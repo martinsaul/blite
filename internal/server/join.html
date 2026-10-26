@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Join Blite session</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --accent:#3a6df0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --accent:#7c9cff; } }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg);
+         font:16px/1.5 system-ui, sans-serif; padding:0 16px; }
+  main { max-width:28rem; }
+  h1 { font-size:1.4rem; margin:0 0 .5rem; }
+  .code { font:600 1.6rem/1.2 ui-monospace, monospace; letter-spacing:.08em; margin:.5rem 0 1rem; }
+  p { color:var(--muted); margin:.4rem 0; }
+  a.btn { display:inline-block; margin-top:.75rem; padding:.55rem 1rem; border-radius:8px; background:var(--accent);
+          color:#fff; text-decoration:none; font-weight:600; }
+  [hidden] { display:none; }
+</style>
+<script src="/static/join.js" defer></script>
+</head>
+<body data-code="{{.Code}}">
+<main>
+  <h1>Joining Blite session</h1>
+  <div class="code">{{.Display}}</div>
+  <p id="opening">Opening Blite&hellip;</p>
+  <div id="missing" hidden>
+    <p>Nothing opened? Blite needs to be installed and running.</p>
+    <a class="btn" id="retry" href="#">Open Blite</a>
+    <p>Don't have it yet? Ask whoever sent this link for the installer.</p>
+  </div>
+  <p id="nopw" hidden>This link has no password. Ask the sender for the full link.</p>
+</main>
+</body>
+</html>

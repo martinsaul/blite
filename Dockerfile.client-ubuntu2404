@@ -1,0 +1,21 @@
+# Builds the blite client against Ubuntu 24.04's GStreamer (1.24), so the binary
+# runs on Ubuntu 24.04 and derivatives (Linux Mint 22, Pop!_OS 24.04).
+#   docker build -f Dockerfile.client-ubuntu2404 --output type=local,dest=out .
+FROM ubuntu:24.04 AS build
+ARG GO_VERSION=1.26.10
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl gcc pkg-config \
+      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH=/usr/local/go/bin:$PATH CGO_ENABLED=1
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY third_party ./third_party
+RUN go mod download
+COPY . .
+ARG LDFLAGS="-s -w"
+RUN go build -trimpath -ldflags="${LDFLAGS}" -o /out/blite ./cmd/blite
+
+FROM scratch
+COPY --from=build /out/blite /blite

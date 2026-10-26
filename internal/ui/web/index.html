@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blite</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>Blite</h1>
+  <span id="status" class="muted"></span>
+  <span id="version" class="muted small"></span>
+</header>
+<p id="updateNudge" class="warn" hidden>A newer Blite is available. Please update when you can.</p>
+<div id="updateBox" class="card" hidden>
+  <p id="updResult" hidden><span></span> <button id="updDismiss" type="button">OK</button></p>
+  <p id="updAvail" hidden><strong></strong> <span class="muted small" id="updNotes"></span>
+    <button id="updInstall" type="button">Install and restart</button></p>
+  <p id="updProblem" class="error" hidden></p>
+  <p class="muted small"><span id="updStatus"></span> <button id="updCheck" type="button">Check for updates</button></p>
+</div>
+<p id="autostartRow" class="small" hidden><label><input type="checkbox" id="autostart"> Start Blite when I sign in</label></p>
+<details class="card small" id="logsBox" hidden><summary>Logs and problem reports</summary>
+  <p>Log folder: <code id="logsDir"></code></p>
+  <p id="logsGuardRow" hidden>Crash guard: <span id="logsGuard"></span></p>
+  <p class="error" id="logsErr" hidden></p>
+  <p><button id="logsSend" type="button">Send logs to the developers</button>
+    <button id="logsOpen" type="button">Open log folder</button> <span id="logsReport" class="muted"></span></p>
+  <p class="muted">If Blite crashes, it sends that run's log by itself the next time it starts.</p>
+</details>
+
+<div id="reconnBanner" class="banner" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><span id="reconnText"></span></div>
+<main>
+  <p id="error" class="error" hidden></p>
+
+  <div class="card" id="meCard">
+    <label>Your name <span class="muted">(others see it with your tag, which comes from your identity key)</span>
+      <span class="nameRow"><input id="myName" type="text" maxlength="64" autocomplete="off" spellcheck="false"><span class="muted" id="myTag"></span>
+      <button id="nameBtn" type="button">Save</button></span>
+    </label>
+  </div>
+
+  <section id="lobby" hidden>
+    <div class="card">
+      <h2>Start a session</h2>
+      <p class="muted">You get a link to send to up to 4 other people.</p>
+      <label>Password <span class="muted">(optional; one is generated if empty)</span>
+        <input id="createPw" type="text" autocomplete="off" spellcheck="false" placeholder="at least 4 characters">
+      </label>
+      <button id="createBtn" class="primary">Create session</button>
+    </div>
+    <div class="card">
+      <h2>Join a session</h2>
+      <label>Share link
+        <input id="joinLink" type="text" autocomplete="off" spellcheck="false" placeholder="https://your-server/j/XXXXXXXX#password">
+      </label>
+      <button id="joinBtn">Join</button>
+    </div>
+  </section>
+
+  <section id="call" hidden>
+    <div class="card">
+      <div class="row">
+        <div>
+          <div class="muted small">Room</div>
+          <div id="room" class="code"></div>
+        </div>
+        <div class="actions">
+          <button id="copyBtn">Copy share link</button>
+          <button id="leaveBtn" class="danger">Leave</button>
+        </div>
+      </div>
+      <p class="muted small">Anyone with the link can join while the session is open. It ends 5 minutes after the last person leaves.</p>
+      <p class="small" id="safetyRow" hidden>Safety code <strong id="safety" class="mono"></strong>
+        <span class="muted">· read it aloud once; everyone should see the same numbers. If someone's differs, the connection is being intercepted.</span></p>
+    </div>
+
+    <div class="card">
+      <h2>What you share</h2>
+      <p class="warn" id="srcNote" hidden></p>
+      <p id="shareHint" class="muted small" hidden>You're not sharing anything yet. Pick a screen or window below to start streaming.</p>
+      <div class="sources" id="sources" role="radiogroup" aria-label="Video source">
+        <label><input type="radio" name="src" value="screen"> Entire screen</label>
+        <label><input type="radio" name="src" value="test"> Test pattern</label>
+        <label><input type="radio" name="src" value="none"> Nothing (watch only)</label>
+      </div>
+      <div class="sources" id="targets" role="radiogroup" aria-label="Monitors and windows"></div>
+      <p class="small"><button id="refreshSources" type="button">Refresh monitors and windows</button> <span class="muted" id="sourcesErr"></span></p>
+      <p class="small"><label>Resolution
+        <select id="resolution" aria-label="Resolution you share at">
+          <option value="720p">720p (default)</option>
+          <option value="1080p">1080p</option>
+          <option value="2160p">4K</option>
+        </select></label>
+        <span class="muted">Higher needs more upload and CPU on your side and theirs. Pick no more than your screen's size.</span></p>
+      <p class="warn" id="resNote" hidden></p>
+      <p class="muted small" id="encoder"></p>
+      <h3>Audio you share</h3>
+      <div class="sources" role="radiogroup" aria-label="Shared audio">
+        <label><input type="radio" name="amode" value="none"> No audio</label>
+        <label><input type="radio" name="amode" value="system"> All apps (everything you hear, except Blite)</label>
+        <label><input type="radio" name="amode" value="apps"> Only these apps:</label>
+      </div>
+      <div id="appList" class="apps"></div>
+      <p class="small"><button id="refreshApps" type="button">Refresh app list</button> <span id="audioErr" class="muted"></span></p>
+
+      <h3>Play the call on</h3>
+      <select id="output" aria-label="Output device"></select>
+    </div>
+
+    <div class="card">
+      <h2>Relay</h2>
+      <p class="muted small" id="relayMode"></p>
+      <ol id="relayQueue" class="small"></ol>
+      <p class="small"><button id="relayBtn" type="button"></button></p>
+      <p class="error small" id="relayRefused" hidden>Relay mode needs everyone in the room on Blite build 31 or newer.</p>
+    </div>
+
+    <div class="card">
+      <h2>People</h2>
+      <table id="members">
+        <thead><tr><th>Name</th><th>Status</th><th>You send</th><th>Frames in</th><th>Path</th><th>Their video</th><th>Volume</th><th id="ownerCol">Room</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="alone" class="muted">Nobody else yet. Send them the share link.</p>
+      <p id="untrusted" class="error" hidden></p>
+      <p class="muted small" id="ownerLine"></p>
+      <h3>How you see their screens</h3>
+      <div class="sources" role="radiogroup" aria-label="How you see their screens">
+        <label><input type="radio" name="layout" value="windows"> A separate window for each person</label>
+        <label><input type="radio" name="layout" value="grid"> All in one window</label>
+      </div>
+      <p class="small" id="gridOpts"><label class="inline">Arrange
+        <select id="gridSize" aria-label="How the window is split">
+          <option value="auto">Automatically</option>
+          <option value="custom">Rows and columns</option>
+        </select></label>
+        <span id="gridCustom"><input type="number" id="gridRows" min="1" max="8" aria-label="Rows"> rows by
+          <input type="number" id="gridCols" min="1" max="8" aria-label="Columns"> columns</span></p>
+      <p class="muted small">After switching, each screen appears within a couple of seconds. If you close the window, pick the layout again to reopen it.</p>
+      <details class="small"><summary>Your identity key</summary>
+        <p class="muted">A hosted room's operator can list this key to make you its owner while you're in it.</p>
+        <code id="idKey"></code></details>
+    </div>
+  </section>
+</main>
+</body>
+</html>

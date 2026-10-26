@@ -1,0 +1,6 @@
+/bin/
+.env
+*.test
+*.out
+/dist/
+/BUILD

@@ -1,0 +1,40 @@
+# Example: the signaling server, plus the optional hosted relay.
+# Put any TLS-terminating reverse proxy in front of "signal" (it must pass
+# WebSocket upgrades on /ws). Copy env.example to .env next to this file.
+services:
+  signal:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.signal
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BLITE_ADDR: ":8080"
+      BLITE_REPORT_DIR: /reports # optional: accept client log reports
+    volumes:
+      - ./reports:/reports
+    ports:
+      - "127.0.0.1:8080:8080" # your reverse proxy forwards https://<host>/ here
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "/blite-signal", "-healthcheck"]
+      interval: 30s
+
+  # Optional hosted relay: keeps the rooms in ./host-data/rooms.json open
+  # around the clock and relays them. Host networking keeps Docker NAT out of
+  # the ICE path. Needs the same BLITE_HOST_KEY as the signal server.
+  relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.host
+    restart: unless-stopped
+    env_file: .env
+    network_mode: host
+    command: ["-server", "wss://blite.example.com/ws"]
+    volumes:
+      - ./host-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

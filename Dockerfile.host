@@ -1,0 +1,28 @@
+# The hosted relay: blite -host, on Ubuntu 24.04's
+# GStreamer. It never encodes, decodes or plays media, so only the libraries
+# the binary links are needed at runtime.
+FROM ubuntu:24.04 AS build
+ARG GO_VERSION=1.26.10
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl gcc pkg-config \
+      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH=/usr/local/go/bin:$PATH CGO_ENABLED=1
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY third_party ./third_party
+RUN go mod download
+COPY . .
+# A BUILD file (commit count) sets the build number; relay mode needs >= 31.
+RUN eval "$(scripts/version.sh)" && go build -trimpath -ldflags="$LDFLAGS" -o /out/blite ./cmd/blite
+
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10001 --home-dir /data --no-create-home blite
+COPY --from=build /out/blite /usr/local/bin/blite
+USER blite
+ENV HOME=/data
+ENTRYPOINT ["/usr/local/bin/blite", "-host", "/data/rooms.json", "-json"]
