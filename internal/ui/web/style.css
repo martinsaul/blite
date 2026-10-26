@@ -3,6 +3,7 @@
   --accent: #3b63e6; --accent-fg: #fff; --danger: #c43d3d; --ok: #2f8f4e;
   color-scheme: light;
 }
+[hidden] { display: none !important; }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #151514; --card: #1f1f1d; --fg: #ececea; --muted: #9a9a94; --line: #33332f;
           --accent: #7d9bff; --accent-fg: #0b0b0a; --danger: #ff7a7a; --ok: #6fd18f; color-scheme: dark; }
