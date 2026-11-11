@@ -10,11 +10,11 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { display: flex; align-items: baseline; gap: 12px; max-width: 760px; margin: 0 auto; padding: 20px 16px 4px; }
+header { display: flex; align-items: baseline; gap: 12px; margin: 0; padding: 20px 24px 4px; }
 h1 { font-size: 1.3rem; margin: 0; }
 h2 { font-size: 1.05rem; margin: 0 0 8px; }
 h3 { font-size: .95rem; margin: 16px 0 4px; }
-main { max-width: 760px; margin: 0 auto; padding: 8px 16px 40px; }
+main { padding: 8px 24px 40px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 12px 0; }
 .muted { color: var(--muted); }
 .small { font-size: .85rem; }
@@ -31,7 +31,9 @@ button:disabled { opacity: .5; cursor: default; }
 .code { font: 600 1.6rem/1.2 ui-monospace, "Cascadia Mono", monospace; letter-spacing: .06em; }
 .sources label { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+th, td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
 th { color: var(--muted); font-weight: 500; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .dot.connected { background: var(--ok); }
@@ -50,5 +52,30 @@ select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-
 .tag { color: var(--muted); }
 .badge { display: inline-block; margin-left: .4rem; padding: 0 .4rem; border-radius: 4px; font-size: .75rem; background: var(--muted); color: #fff; }
 .dot.reconnecting { background: #e0a800; }
+.dot.unreachable { background: var(--danger); }
 label.inline { display: inline; margin: 0; }
 input[type=number] { width: 4em; padding: 5px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; }
+
+/* Shown while a request runs or the call (re)connects */
+.spinner { display: inline-block; width: 14px; height: 14px; margin-left: 8px; vertical-align: middle;
+  border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Wide windows: room and people on the left, what you share on the right */
+@media (min-width: 1500px) {
+  #call:not([hidden]) { display: grid; grid-template-columns: minmax(0, 2fr) minmax(420px, 1fr); gap: 0 16px; align-items: start; }
+}
+#meCard { max-width: 640px; }
+/* Long help text stays readable on wide screens */
+.card p, .card .sources { max-width: 90ch; }
+.tableWrap { overflow-x: auto; }
+#members td { white-space: nowrap; }
+#members td .warn, #members td .hint { white-space: normal; min-width: 16em; }
+.nowrap { white-space: nowrap; }
+.btns { display: flex; gap: 6px; }
+.btns button { white-space: nowrap; padding: 5px 10px; }
+.volume { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.volume input[type=range] { width: 110px; }
+.volume label { display: flex; align-items: center; gap: 4px; margin: 0; }
+body > .card, body > p { margin-left: 24px; margin-right: 24px; }

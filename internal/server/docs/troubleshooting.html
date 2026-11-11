@@ -1,0 +1,59 @@
+{{define "title"}}Troubleshooting and FAQ{{end}}
+{{define "description"}}Fixes for common Bellion Share problems: share links that don't open the app, people who can't connect, low quality or lag, Linux and Wayland, and how to send logs.{{end}}
+{{define "body"}}
+<h1>Troubleshooting and FAQ</h1>
+<p class="lead">Most problems show up as a hint in the People table or a note at the top of the window. Here is what they mean.</p>
+
+<h2>Clicking a share link doesn't open the app</h2>
+<ul>
+  <li>Bellion Share has to be installed. On Windows, start it once after unzipping so it registers itself for share links (the Linux package does this when it installs), then click the link again.</li>
+  <li>Your browser may ask whether to open Bellion Share; allow it.</li>
+  <li>You can always copy the link and paste it into <em>Watch someone</em> in the app instead.</li>
+</ul>
+
+<h2>Someone shows "can't connect, retrying"</h2>
+<p>Bellion Share connects people directly. A direct connection can fail when a firewall or a strict router blocks it.</p>
+<ul>
+  <li>A note at the top of the window says whether others can reach you. Bellion Share asks your router to open its UDP port (30471) with UPnP, NAT-PMP or PCP; if your router doesn't allow that, or sits behind another router or your provider's NAT, calls with people behind strict routers may fail.</li>
+  <li>If you run a firewall, allow Bellion Share through it.</li>
+  <li>When a direct path is blocked, a TURN server can forward the traffic (the connection hint then says so). It's still end-to-end encrypted.</li>
+  <li>If it keeps failing, send logs from both sides (see below).</li>
+</ul>
+
+<h2>Low quality, stutter or delay</h2>
+<ul>
+  <li>The <em>Connection</em> column rates each link <em>Good</em>, <em>Fair</em> or <em>Poor</em>. Loss usually means an upload or download is full: try a lower resolution (<em>Share &gt; Resolution</em>), or set someone's video to <em>Low</em>.</li>
+  <li>For games pick <em>Share &gt; Tuned for &gt; Game</em> (60 fps); for text and code keep <em>Desktop</em> (sharper, 30 fps).</li>
+  <li>If your computer can't encode fast enough, Bellion Share lowers the resolution itself and shows a note. Hardware encoding (NVIDIA, Intel, AMD) helps a lot.</li>
+  <li>In a full mesh every sharer uploads once per viewer. Above about 5 people, have someone with a fast upload <a href="/docs/relays">volunteer as relay</a>.</li>
+  <li>"You can't see someone's stream: its quality is too high for your connection or computer right now" means Bellion Share couldn't find a size you can take. It keeps trying.</li>
+</ul>
+
+<h2>No sound from someone, or they hear an echo</h2>
+<ul>
+  <li>Sharing audio is off by default: the sharer picks <em>Share &gt; Audio you share</em>. With <em>Only these apps...</em>, apps appear in the list while they play audio.</li>
+  <li>Check you haven't muted them or turned their volume down, and pick the right device under <em>Share &gt; Play the call on</em>.</li>
+  <li><em>All apps</em> leaves out Bellion Share itself, so the call isn't sent back.</li>
+</ul>
+
+<h2>Linux: nothing to share, or no windows listed</h2>
+<p>Bellion Share captures the screen through X11. Wayland sessions aren't supported yet: log in with an X11 (Xorg) session from your login screen's session menu.</p>
+
+<h2>I closed a video window</h2>
+<p>Use <em>View &gt; Show the video window</em> (everyone in one window), or <em>People &gt; their name &gt; Show their window</em>.</p>
+
+<h2>The safety codes don't match</h2>
+<p>If someone's safety code differs from yours, the connection may be intercepted. Leave the session and start a new one. Bellion Share also refuses to connect to anyone whose encryption keys don't match their identity, and warns about it.</p>
+
+<h2>"Bellion Share ... is required"</h2>
+<p>Your version is too old to start or join sessions. Press <em>Install and restart</em> in the note (or use <em>Help &gt; Check for updates</em>). When the app only says a newer version is available, you can keep using it and update when convenient; installing during a call restarts the app and rejoins the call.</p>
+
+<h2>Sending logs and feedback</h2>
+<p><em>Help &gt; Logs and problem reports &gt; Send logs to the developers</em> sends your log; when two people can't connect, send logs from both sides. <em>Help &gt; Send feedback...</em> sends an idea or a problem in your own words. Logs contain names and network addresses of the people you were in a session with; they're used only to fix problems and deleted after 30 days (see the <a href="/privacy">Privacy Policy</a>).</p>
+
+<h2>Is it free? Do I need an account?</h2>
+<p>Yes, it's free, and no account is needed. Bellion Share is open source under the AGPL-3.0: the <a href="https://github.com/martinsaul/blite">source code is on GitHub</a>.</p>
+
+<h2>Does it work on macOS or phones?</h2>
+<p>No. Bellion Share runs on Windows 10 and 11, and on Linux with X11.</p>
+{{end}}

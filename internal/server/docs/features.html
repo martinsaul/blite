@@ -1,0 +1,63 @@
+{{define "title"}}Features{{end}}
+{{define "description"}}What Bellion Share can do: share a monitor, a window or all screens at up to 4K and 60 fps with app audio, watch everyone in one grid, per-person quality and volume, end-to-end encryption, safety codes and room controls.{{end}}
+{{define "body"}}
+<h1>Features</h1>
+<p class="lead">Everything below is in the app's menu bar: <em>Room</em>, <em>Share</em>, <em>View</em>, <em>People</em> and <em>Help</em>.</p>
+
+<h2 id="sharing">Sharing</h2>
+<figure>
+  <a href="/static/shots/share-menu.webp"><img src="/static/shots/share-menu.webp" width="1280" height="600" alt="The Share menu: All screens combined, A monitor or window, Test pattern, Nothing (watch only), and submenus for Resolution, Tuned for, Preview of your stream, Audio you share and Play the call on" loading="lazy"></a>
+  <figcaption>The Share menu during a call.</figcaption>
+</figure>
+<ul>
+  <li><strong>What you share.</strong> <em>Go live</em> shares your main monitor. The <em>Share</em> menu also offers <em>All screens combined</em>, <em>A monitor or window...</em> (pick one monitor or one app window), a <em>Test pattern</em>, and <em>Nothing (watch only)</em>. You can switch at any time without leaving the call.</li>
+  <li><strong>Resolution:</strong> 720p, 1080p or 4K. Higher needs more upload and CPU on your side and theirs. If your computer can't encode fast enough, Bellion Share steps the resolution down and tells you.</li>
+  <li><strong>Tuned for:</strong> <em>Desktop</em> (sharp text, 30 fps) or <em>Game</em> (smooth motion, 60 fps).</li>
+  <li><strong>Preview of your stream:</strong> off, a small floating window, or a corner of the video window, so you see what others get.</li>
+  <li><strong>Audio you share:</strong> no audio, all apps (everything you hear except Bellion Share itself, so the call never echoes back), or only the apps you pick. This uses PipeWire on Linux and per-app loopback capture on Windows.</li>
+  <li><strong>Play the call on:</strong> the speakers or headset other people's audio plays on.</li>
+  <li><strong>Hardware encoding.</strong> Bellion Share encodes H.264 on your graphics hardware when it can (NVIDIA NVENC, Intel Quick Sync, AMD AMF, VA-API on Linux, Media Foundation on Windows), and with x264 on the CPU otherwise.</li>
+</ul>
+
+<h2 id="watching">Watching</h2>
+<ul>
+  <li><strong>Layout</strong> (<em>View</em> menu): a separate window for each person, or everyone in one window. <em>Arrange the window...</em> sets the grid automatically or to your own rows and columns. If you close a window, <em>View</em> or <em>People</em> brings it back.</li>
+  <li><strong>Per person</strong> (in the People table or the <em>People</em> menu): their video at <em>Best</em>, <em>Low</em> or <em>Off (audio only)</em>, their volume (up to 200%), and mute.</li>
+  <li><strong>Adapts to each viewer.</strong> Every sharer sends a high and a low layer, plus in-between sizes (1080p, 720p) for viewers whose connection or computer can't take the top size. Each person's row shows what you get from them, for example <em>you get 720p</em>.</li>
+  <li><strong>Smooth over loss.</strong> When packets get lost, Bellion Share holds the last good picture until the next full frame instead of showing a smeared one.</li>
+</ul>
+
+<h2 id="rooms">Rooms and people</h2>
+<figure>
+  <a href="/static/shots/people-menu.webp"><img src="/static/shots/people-menu.webp" width="1280" height="600" alt="The People menu with a submenu for one person: Their video, Mute, Network path, Make owner, Disconnect and Ban; below the people, Volunteer as relay and About relays" loading="lazy"></a>
+  <figcaption>The People menu: per-person settings, owner controls, and relays.</figcaption>
+</figure>
+<ul>
+  <li><strong>Sessions</strong> are a room code plus an optional password, shared as one link. Links open the app directly; older <code>blite://</code> links still work.</li>
+  <li><strong>No fixed room size.</strong> By default everyone sends their video directly to everyone (a full mesh), which strains most home uploads beyond about 5 people; Bellion Share warns you then. <a href="/docs/relays">Relays</a> let rooms grow past that.</li>
+  <li><strong>Room owner.</strong> Whoever starts the session owns it (if the owner leaves, the person who joined earliest takes over). The owner can hand ownership to someone else, disconnect people (they can rejoin with the link) or ban them from the room.</li>
+  <li><strong>The People table</strong> shows each person's status, what you send them, and the connection: <em>Good</em>, <em>Fair</em> or <em>Poor</em> with the round-trip time, packet loss and data rates, plus a hint when something is wrong.</li>
+</ul>
+
+<h2 id="security">Privacy and security</h2>
+<ul>
+  <li><strong>Peer to peer.</strong> Your screen goes straight to the people in your session, not through a streaming service. The server only introduces people to each other. When a direct path is blocked, a TURN server forwards the encrypted traffic.</li>
+  <li><strong>End-to-end encryption</strong> is on by default: each sender encrypts its media with keys only room members get.</li>
+  <li><strong>Identity keys and tags.</strong> Each person has an identity key; names show with a 4-digit tag derived from it (like <em>Alice#4417</em>). If someone shows up with a familiar name but a new key, Bellion Share points it out. Bellion Share refuses to connect to someone whose encryption keys don't match their identity.</li>
+  <li><strong>Safety code.</strong> Everyone in a call sees a safety code. Read it aloud once: if everyone sees the same numbers, nobody is intercepting the connection.</li>
+  <li>The password stays in the part of the link after <code>#</code>, which browsers never send to the server.</li>
+</ul>
+<p>See the <a href="/privacy">Privacy Policy</a> for what the app and our server handle.</p>
+
+<h2 id="app">The app</h2>
+<ul>
+  <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in.</li>
+  <li>Updates itself: new versions are signed, offered in the app, and rolled back automatically if something goes wrong.</li>
+  <li>Opens a UDP port on your router (UPnP, NAT-PMP or PCP) when the router allows it, so others can reach you directly.</li>
+  <li><em>Help &gt; Send feedback...</em> sends an idea or a problem report, optionally with diagnostics (your setup and call stats, no names, keys or links). <em>Help &gt; Logs and problem reports</em> sends your logs, opens the log folder or copies diagnostics.</li>
+  <li>On Windows, a crash guard runs Bellion Share and keeps crash dumps.</li>
+</ul>
+
+<h2>Platforms</h2>
+<p>Windows 10 and 11 (64-bit), and Linux on X11 (Ubuntu 24.04, Mint 22 or newer for the .deb package). Wayland sessions aren't supported yet. The signaling server runs anywhere Go does: see <a href="/docs/self-hosting">Self-hosting</a>.</p>
+{{end}}

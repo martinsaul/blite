@@ -46,13 +46,25 @@ func main() {
 		log.Error("BLITE_MIN_COMPATIBLE_BUILD / BLITE_MIN_RECOMMENDED_BUILD must be build numbers")
 		os.Exit(1)
 	}
+	// Rooms are uncapped unless the operator sets BLITE_MAX_PEERS.
+	maxPeers, err := strconv.Atoi(env("BLITE_MAX_PEERS", "0"))
+	if err != nil || maxPeers < 0 {
+		log.Error("BLITE_MAX_PEERS must be a number (0 = no cap)")
+		os.Exit(1)
+	}
 	s := server.New(server.Config{
 		TrustProxy:          env("BLITE_TRUST_PROXY", "false") == "true",
 		ICE:                 ice,
 		MinCompatibleBuild:  minCompat,
 		MinRecommendedBuild: minRec,
+		MaxPeers:            maxPeers,
 		HostKey:             os.Getenv("BLITE_HOST_KEY"),
+		SiteAliases:         siteAliases(os.Getenv("BLITE_SITE_ALIASES")),
 		ReportDir:           os.Getenv("BLITE_REPORT_DIR"),
+		DiscordClientID:     os.Getenv("BLITE_DISCORD_CLIENT_ID"),
+		DiscordSecret:       os.Getenv("BLITE_DISCORD_SECRET"),
+		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
+		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
 		Log:                 log,
 	})
 
@@ -101,4 +113,15 @@ func iceFromEnv() (turn.Provider, error) {
 		return s, nil
 	}
 	return turn.DefaultSTUN, nil
+}
+
+// siteAliases splits a comma-separated host list.
+func siteAliases(v string) []string {
+	var out []string
+	for _, h := range strings.Split(v, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }

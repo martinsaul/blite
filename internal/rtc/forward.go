@@ -270,6 +270,12 @@ type layerPolicy struct {
 	maxLevel  int       // receiver's cap (their viewer settings), levelHigh = no cap
 	hasMid    bool      // levelMid exists for this peer (a granted rendition)
 
+	// Frame rate steps on HIGH: before levelHigh steps down to
+	// the next layer, it steps through highFPS[1..fpsSteps]. fpsSteps is 0
+	// when not allowed (game mode, or HIGH has other viewers).
+	fps      int
+	fpsSteps int
+
 	// Baseline RTT: the minimum over the current and previous window, so it
 	// follows route changes within rttWindow..2*rttWindow.
 	rttMin, rttPrevMin time.Duration
@@ -341,6 +347,16 @@ func (lp *layerPolicy) observe(cur int, r rr, now time.Time) int {
 		lp.backoff = 0
 	}
 	switch {
+	case lp.badCount >= reportsToGoDown && cur == levelHigh && lp.fps < lp.fpsSteps:
+		lp.fps++
+		lp.badCount, lp.goodCount = 0, 0
+		lp.settle = now.Add(settleTime)
+		if lp.backoff < minBackoff {
+			lp.backoff = minBackoff
+		} else if lp.backoff < maxBackoff {
+			lp.backoff *= 2
+		}
+		lp.nextProbe = now.Add(lp.backoff)
 	case lp.badCount >= reportsToGoDown:
 		target = cur + 1
 		lp.badCount = 0
@@ -350,10 +366,26 @@ func (lp *layerPolicy) observe(cur int, r rr, now time.Time) int {
 			lp.backoff *= 2
 		}
 		lp.nextProbe = now.Add(lp.backoff)
+	case cur == levelHigh && lp.fps > 0 && lp.ewma < lossUp && qd < delayUp && now.After(lp.nextProbe):
+		lp.fps--
+		lp.badCount, lp.goodCount = 0, 0
+		lp.settle = now.Add(settleTime)
+		lp.nextProbe = now.Add(max(lp.backoff, minBackoff))
 	case cur > levelHigh && lp.ewma < lossUp && qd < delayUp && now.After(lp.nextProbe):
 		target = cur - 1
 	}
 	return lp.switchTo(cur, target, now)
+}
+
+// highFPS are the frame rates of HIGH's steps at 30 fps (desktop shares).
+var highFPS = [...]int{30, 20, 15, 10}
+
+// fpsCap is the frame rate this peer can take on HIGH (0: no cap).
+func (lp *layerPolicy) fpsCap() int {
+	if lp.fps == 0 {
+		return 0
+	}
+	return highFPS[lp.fps]
 }
 
 func (lp *layerPolicy) switchTo(cur, target int, now time.Time) int {
@@ -369,6 +401,10 @@ func (lp *layerPolicy) switchTo(cur, target int, now time.Time) int {
 	}
 	if target == levelMid && !lp.hasMid {
 		target = levelLow // capped at a rendition that is gone
+	}
+	lp.fps = min(lp.fps, lp.fpsSteps)
+	if target == levelHigh && cur > levelHigh {
+		lp.fps = lp.fpsSteps // back on HIGH at the lowest rate, then probe up
 	}
 	if target != cur {
 		lp.settle = now.Add(settleTime)

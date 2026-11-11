@@ -8,3 +8,5 @@ import "errors"
 func List() ([]Target, error) { return nil, errors.New("not supported on this OS") }
 
 func windowGone(uint64) bool { return false }
+
+func windowPID(uint64) int { return 0 }

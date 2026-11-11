@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"blite/internal/identity"
 	"blite/internal/media"
 	"blite/internal/proto"
 	"blite/internal/server"
@@ -16,8 +17,8 @@ import (
 )
 
 // Ownership end to end: the creator owns the room, hands it over, an owner
-// whose connection drops loses it at once (and not back on resume), and
-// the owner bans someone, who is told why and can't rejoin.
+// whose connection drops keeps it when it resumes, and the owner bans
+// someone, who is told why and can't rejoin.
 func TestOwnerTransferHandoffBan(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
@@ -54,14 +55,17 @@ func TestOwnerTransferHandoffBan(t *testing.T) {
 	}
 	waitFor(t, "carol owns", 5*time.Second, func() bool { return c.State().IsOwner && member(a, "carol").Owner })
 
-	// Carol's signaling drops: alice (joined first) owns at once; carol
-	// resumes as a member.
+	// Carol's signaling drops: the room is held for her, and she resumes
+	// as its owner.
 	c.sig.Drop()
-	waitFor(t, "alice owns after carol dropped", 5*time.Second, func() bool { return a.State().IsOwner })
-	waitFor(t, "carol back, not owner", 15*time.Second, func() bool {
+	waitFor(t, "carol back, still owner", 15*time.Second, func() bool {
 		st := c.State()
-		return !st.Reconnecting && !st.IsOwner && member(c, "alice").Owner
+		return !st.Reconnecting && st.IsOwner && member(a, "carol").Owner
 	})
+	if err := c.Transfer(peerID(c, "alice")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alice owns", 5*time.Second, func() bool { return a.State().IsOwner && member(c, "alice").Owner })
 
 	// Alice bans bob.
 	if err := a.Kick(peerID(a, "bob"), true); err != nil {
@@ -115,4 +119,58 @@ func TestRenameAndTag(t *testing.T) {
 	if b.State().Name != "Robert9999" {
 		t.Fatalf("bob's own name %q", b.State().Name)
 	}
+}
+
+// In-call update end to end: the owner leaves saying it updates;
+// the room is held for it; the new build joins with the same identity from
+// the Rejoin info, owns the room again and shares the same source.
+func TestOwnerUpdateRejoin(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	cfg := func(n string) Config { return Config{Server: ws, Name: n, View: media.ViewCount, Log: quiet} }
+	ctx := context.Background()
+
+	acfg := cfg("alice")
+	acfg.Identity = identity.Ephemeral()
+	a, err := Create(ctx, acfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Join(ctx, cfg("bob"), a.sig.Welcome.Room, a.pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := a.SetSource(media.SourceTest); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "bob sees alice's video, alice owns", 15*time.Second, func() bool {
+		f, _ := frames(b, "alice")
+		return f > 0 && member(b, "alice").Owner
+	})
+
+	r := a.Rejoin()
+	if r.Room != a.sig.Welcome.Room || r.Password != a.pw || r.Source != media.SourceTest {
+		t.Fatalf("rejoin info %+v", r)
+	}
+	a.CloseForUpdate()
+	waitFor(t, "alice gone for bob", 5*time.Second, func() bool { return member(b, "alice").ID == "" })
+	if b.State().IsOwner {
+		t.Fatal("bob took the room while alice updated")
+	}
+
+	a2, err := Join(ctx, acfg, r.Room, r.Password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	if err := a2.SetSource(r.Source); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alice back as owner, sharing again", 15*time.Second, func() bool {
+		f, _ := frames(b, "alice")
+		return a2.State().IsOwner && member(b, "alice").Owner && f > 0
+	})
 }

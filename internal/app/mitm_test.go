@@ -70,7 +70,7 @@ func TestTamperedFingerprintIsRejected(t *testing.T) {
 	defer b.Shutdown()
 
 	ctx := context.Background()
-	if err := a.Create(ctx, ""); err != nil {
+	if err := a.Create(ctx, "", true); err != nil {
 		t.Fatal(err)
 	}
 	link := a.State().(UIState).Session.Link
@@ -104,7 +104,7 @@ func TestSafetyCodeMatches(t *testing.T) {
 	defer a.Shutdown()
 	defer b.Shutdown()
 	ctx := context.Background()
-	a.Create(ctx, "")
+	a.Create(ctx, "", true)
 	if err := b.JoinLink(ctx, a.State().(UIState).Session.Link); err != nil {
 		t.Fatal(err)
 	}

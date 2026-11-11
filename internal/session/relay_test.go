@@ -95,7 +95,7 @@ func TestRelayModeHandsOffAndBack(t *testing.T) {
 	if err := d.Volunteer(true); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "dave queued", 5*time.Second, func() bool { return len(a.State().Relay) == 2 })
+	waitFor(t, "dave queued", 5*time.Second, func() bool { st := a.State(); return len(st.Relay) == 1 && len(st.RelayWaiting) == 1 })
 	if err := c.Volunteer(false); err != nil {
 		t.Fatal(err)
 	}

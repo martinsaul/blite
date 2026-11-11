@@ -19,6 +19,7 @@ var (
 	procGetWindowLongPtrW   = user32.NewProc("GetWindowLongPtrW")
 	procGetWindow           = user32.NewProc("GetWindow")
 	procIsWindow            = user32.NewProc("IsWindow")
+	procGetWindowThreadPID  = user32.NewProc("GetWindowThreadProcessId")
 	dwmapi                  = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmGetWindowAttr    = dwmapi.NewProc("DwmGetWindowAttribute")
 )
@@ -52,7 +53,7 @@ func List() ([]Target, error) {
 		if mi.Flags&monitorInfoFPrim != 0 {
 			name += ", primary"
 		}
-		out = append(out, Target{Kind: "monitor", Name: name, Source: fmt.Sprintf("monitor:%#x", h)})
+		out = append(out, Target{Kind: "monitor", Name: name, Source: fmt.Sprintf("monitor:%#x", h), Primary: mi.Flags&monitorInfoFPrim != 0})
 		n++
 		return 1
 	})
@@ -96,4 +97,10 @@ func appWindowTitle(h uintptr) string {
 func windowGone(id uint64) bool {
 	r, _, _ := procIsWindow.Call(uintptr(id))
 	return r == 0
+}
+
+func windowPID(id uint64) int {
+	var pid uint32
+	procGetWindowThreadPID.Call(uintptr(id), uintptr(unsafe.Pointer(&pid)))
+	return int(pid)
 }

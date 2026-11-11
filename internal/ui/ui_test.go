@@ -16,11 +16,12 @@ type fake struct {
 	created int
 }
 
-func (f *fake) State() any                             { return map[string]int{"created": f.created} }
-func (f *fake) Create(context.Context, string) error   { f.created++; return nil }
-func (f *fake) JoinLink(context.Context, string) error { return nil }
-func (f *fake) Leave()                                 {}
-func (f *fake) SetSource(string) error                 { return nil }
+func (f *fake) State() any                                 { return map[string]int{"created": f.created} }
+func (f *fake) Create(context.Context, string, bool) error { f.created++; return nil }
+func (f *fake) JoinLink(context.Context, string) error     { return nil }
+func (f *fake) ShowUI()                                    {}
+func (f *fake) Leave()                                     {}
+func (f *fake) SetSource(string) error                     { return nil }
 
 func start(t *testing.T) (*Server, *fake, string) {
 	t.Helper()
@@ -104,20 +105,24 @@ func TestTokenCookieFlow(t *testing.T) {
 	_ = url.Values{}
 }
 
-func (f *fake) AudioOptions() any                           { return nil }
-func (f *fake) SetAudio(string, []string) error             { return nil }
-func (f *fake) SetOutput(string) error                      { return nil }
-func (f *fake) CheckUpdate(context.Context) error           { return nil }
-func (f *fake) InstallUpdate(context.Context) error         { return nil }
-func (f *fake) DismissUpdateResult()                        {}
-func (f *fake) SetAutostart(bool) error                     { return nil }
-func (f *fake) Sources() any                                { return nil }
-func (f *fake) SetPeer(string, string, float64, bool) error { return nil }
-func (f *fake) Volunteer(bool) error                        { return nil }
-func (f *fake) Transfer(string) error                       { return nil }
-func (f *fake) SetName(string) error                        { return nil }
-func (f *fake) Kick(string, bool) error                     { return nil }
-func (f *fake) SetResolution(string) error                  { return nil }
-func (f *fake) SetLayout(string, int, int) error            { return nil }
-func (f *fake) SendLogsNow(context.Context) error           { return nil }
-func (f *fake) OpenLogFolder() error                        { return nil }
+func (f *fake) AudioOptions() any                                    { return nil }
+func (f *fake) SetAudio(string, []string) error                      { return nil }
+func (f *fake) SetOutput(string) error                               { return nil }
+func (f *fake) CheckUpdate(context.Context) error                    { return nil }
+func (f *fake) InstallUpdate(context.Context) error                  { return nil }
+func (f *fake) DismissUpdateResult()                                 {}
+func (f *fake) SetAutostart(bool) error                              { return nil }
+func (f *fake) Sources() any                                         { return nil }
+func (f *fake) SetPeer(string, string, float64, bool) error          { return nil }
+func (f *fake) Volunteer(bool) error                                 { return nil }
+func (f *fake) Transfer(string) error                                { return nil }
+func (f *fake) SetName(string) error                                 { return nil }
+func (f *fake) Kick(string, bool) error                              { return nil }
+func (f *fake) SetResolution(string) error                           { return nil }
+func (f *fake) SetMode(string) error                                 { return nil }
+func (f *fake) Diagnostics() string                                  { return "" }
+func (f *fake) ShowWindow(string) error                              { return nil }
+func (f *fake) Feedback(context.Context, string, string, bool) error { return nil }
+func (f *fake) SetLayout(string, int, int, string) error             { return nil }
+func (f *fake) SendLogsNow(context.Context) error                    { return nil }
+func (f *fake) OpenLogFolder() error                                 { return nil }

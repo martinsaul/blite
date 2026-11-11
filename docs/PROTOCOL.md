@@ -34,7 +34,7 @@ Negotiation: the newcomer sends offers to every peer listed in its `welcome`
 
 ## Error codes
 
-`bad_password`, `no_room`, `room_full` (5 peers), `rate_limited` (5 failed joins per IP
+`bad_password`, `no_room`, `room_full` (only if the operator set `BLITE_MAX_PEERS`), `rate_limited` (5 failed joins per IP
 or 20 per room in 10 min; 10 creates per IP in 10 min), `bad_request`, `no_peer`
 (signal target not in room or disconnected), `resume_failed`.
 

@@ -33,6 +33,9 @@ type passwordHash struct {
 }
 
 func hashPassword(pw string) passwordHash {
+	if pw == "" {
+		return passwordHash{} // an open room: anyone with the code joins
+	}
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -41,6 +44,9 @@ func hashPassword(pw string) passwordHash {
 }
 
 func (h passwordHash) verify(pw string) bool {
+	if h.key == nil {
+		return true // open room (older clients still send some password)
+	}
 	return subtle.ConstantTimeCompare(derive(pw, h.salt), h.key) == 1
 }
 
@@ -48,4 +54,9 @@ func derive(pw string, salt []byte) []byte {
 	hashSem <- struct{}{}
 	defer func() { <-hashSem }()
 	return argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+}
+
+// validPassword: empty (an open room) or MinPasswordLen..MaxPasswordLen.
+func validPassword(pw string) bool {
+	return pw == "" || len(pw) >= MinPasswordLen && len(pw) <= MaxPasswordLen
 }

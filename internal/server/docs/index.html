@@ -1,0 +1,23 @@
+{{define "title"}}Documentation{{end}}
+{{define "description"}}How to use Bellion Share: go live and watch friends' screens, the features, Discord integration, relays for bigger rooms, running your own server, and fixes for common problems.{{end}}
+{{define "body"}}
+<h1>Bellion Share documentation</h1>
+<p class="lead">Bellion Share (formerly Blite) is peer-to-peer group screen sharing for Windows and Linux. Everyone in a room can share a screen, a window and app audio at the same time. The server only introduces people to each other; your video goes straight to your friends.</p>
+
+<figure>
+  <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1280" height="600" alt="The Bellion Share window during a call: the room code, Stop sharing and Copy share link buttons, and a People table with connection quality, video quality and volume for each person"></a>
+  <figcaption>In a call: the room, the safety code, and everyone in it with their connection, video quality and volume.</figcaption>
+</figure>
+
+<div class="grid">
+  <a class="card" href="/docs/getting-started"><h2>Getting started</h2><p>Install, go live, send the link, watch someone.</p></a>
+  <a class="card" href="/docs/features"><h2>Features</h2><p>What you can share, how you watch, encryption and room controls.</p></a>
+  <a class="card" href="/docs/discord"><h2>Discord</h2><p>Go live or watch in your Discord voice channel with one click.</p></a>
+  <a class="card" href="/docs/relays"><h2>Relays</h2><p>How bigger rooms work, and how to volunteer as a relay.</p></a>
+  <a class="card" href="/docs/self-hosting"><h2>Self-hosting</h2><p>Run your own signaling server, TURN and hosted relay.</p></a>
+  <a class="card" href="/docs/troubleshooting"><h2>Troubleshooting</h2><p>Connection problems, quality, Linux notes, sending logs.</p></a>
+</div>
+
+<h2>Open source</h2>
+<p>Bellion Share is free software under the GNU Affero General Public License v3.0. The <a href="https://github.com/martinsaul/blite">source code is on GitHub</a>; the code, binaries and packages still use the old <code>blite</code> name.</p>
+{{end}}

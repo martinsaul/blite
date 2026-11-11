@@ -96,3 +96,13 @@ func tone(s []int16, f float64) float64 {
 	}
 	return (a*a + b*b - k*a*b) / float64(len(s))
 }
+
+func TestInProcessTree(t *testing.T) {
+	me, parent := os.Getpid(), os.Getppid()
+	if !inProcessTree(me, me) || !inProcessTree(me, parent) {
+		t.Fatal("own process should be in its own and its parent's tree")
+	}
+	if inProcessTree(parent, me) || inProcessTree(me, 0) {
+		t.Fatal("parent is not in the child's tree")
+	}
+}

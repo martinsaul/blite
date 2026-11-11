@@ -24,7 +24,7 @@ func TestLeakLoop(t *testing.T) {
 	Init()
 	// 300 access units from a keyframe on (5 GOPs at 30 fps).
 	aus := make(chan []byte, 512)
-	src, _, err := StartVideoSource(SourceTest, Res1080, nil, "x264enc", func(layer int, au AccessUnit) {
+	src, _, err := StartVideoSource(SourceTest, Res1080, "", nil, "x264enc", "", func(layer int, au AccessUnit) {
 		if layer == High {
 			select {
 			case aus <- au.Data:

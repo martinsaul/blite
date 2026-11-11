@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bellion Share: free screen sharing with friends, up to 4K60</title>
+<meta name="description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration.">
+<link rel="canonical" href="https://bellion.app/">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/static/icon-512.png" type="image/png" sizes="512x512">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#3a6df0">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bellion Share">
+<meta property="og:title" content="Bellion Share: free screen sharing with friends, up to 4K60">
+<meta property="og:description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration.">
+<meta property="og:url" content="https://bellion.app/">
+<meta property="og:image" content="https://bellion.app/static/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Bellion Share: share your screen with friends">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Bellion Share",
+"url":"https://bellion.app/","image":"https://bellion.app/static/icon-512.png",
+"description":"Peer-to-peer screen sharing with friends: up to 4K at 60 fps, low latency, end-to-end encrypted, with Discord integration.",
+"applicationCategory":"CommunicationApplication","operatingSystem":"Windows 10, Windows 11, Linux",
+"downloadUrl":"https://bellion.app/","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+</script>
+<style>
+  :root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --accent:#3a6df0; --card:#ffffff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --accent:#7c9cff; --card:#1f1f1e; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui, sans-serif; padding:2rem 16px; }
+  main { max-width:44rem; margin:0 auto; }
+  h1 { font-size:1.8rem; margin:0 0 .3rem; }
+  .lead { color:var(--muted); margin:0 0 1.5rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(17rem, 1fr)); gap:1rem; }
+  .card { background:var(--card); border-radius:12px; padding:1.1rem 1.2rem; }
+  .card h2 { font-size:1.15rem; margin:0 0 .2rem; }
+  .meta { color:var(--muted); font-size:.9rem; margin:0 0 .8rem; }
+  a.btn { display:inline-block; padding:.55rem 1.1rem; border-radius:8px; background:#3a6df0;
+          color:#fff; text-decoration:none; font-weight:600; }
+  ol { padding-left:1.2rem; margin:.8rem 0 0; }
+  code { font:.9em ui-monospace, monospace; }
+  a { color:var(--accent); }
+  .features { margin-top:2rem; }
+  .features h2 { font-size:1.2rem; margin:0 0 .5rem; }
+  .features ul { padding-left:1.2rem; margin:0; }
+  figure { margin:2rem 0 0; }
+  figure img { display:block; max-width:100%; height:auto; border-radius:10px; border:1px solid rgba(127,127,127,.25); }
+  figcaption { color:var(--muted); font-size:.9rem; margin-top:.4rem; }
+  .more { margin-top:1rem; }
+  footer { margin-top:2.5rem; color:var(--muted); font-size:.9rem; }
+  .top { max-width:44rem; margin:0 auto 2rem; display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.2rem; }
+  .top .brand { font-weight:700; color:var(--fg); text-decoration:none; margin-right:auto; }
+  .top a { color:var(--muted); text-decoration:none; }
+  .top a:hover, .top a[aria-current] { color:var(--fg); }
+  footer a { color:var(--muted); }
+</style>
+</head>
+<body>
+<nav class="top" aria-label="Site">
+  <a class="brand" href="/">Bellion Share</a>
+  <a href="/" aria-current="page">Download</a>
+  <a href="/docs">Docs</a>
+  <a href="https://github.com/martinsaul/blite">GitHub</a>
+</nav>
+<main>
+  <h1>Bellion Share</h1>
+  <p class="lead">Share your screen with friends: sharp, smooth and low latency, straight from your PC to theirs.</p>
+  <div class="grid">
+    <section class="card">
+      <h2>Windows</h2>
+      {{with .windows}}
+      <p class="meta">Windows 10 or 11, 64-bit &middot; build {{.Build}} &middot; {{.Size}} &middot; {{.Released}}</p>
+      <a class="btn" href="/download/windows">Download for Windows</a>
+      {{else}}
+      <p class="meta">Not available right now. Try again in a few minutes.</p>
+      {{end}}
+      <ol>
+        <li>Unzip the download anywhere, for example in your Documents.</li>
+        <li>Run <code>blite-guard.exe</code> in the unzipped <code>blite</code> folder.</li>
+      </ol>
+    </section>
+    <section class="card">
+      <h2>Linux</h2>
+      {{with .linux}}
+      <p class="meta">Ubuntu 24.04, Mint 22 or newer, 64-bit &middot; build {{.Build}} &middot; {{.Size}} &middot; {{.Released}}</p>
+      <a class="btn" href="/download/linux">Download for Linux (.deb)</a>
+      {{else}}
+      <p class="meta">Not available right now. Try again in a few minutes.</p>
+      {{end}}
+      <ol>
+        <li>Open a terminal in the folder you downloaded it to and run <code>sudo apt install ./blite_*.deb</code></li>
+        <li>Start Bellion Share from your app menu.</li>
+      </ol>
+    </section>
+  </div>
+  <p class="meta" style="margin-top:1.2rem">Bellion Share keeps itself up to date: it offers new versions in the app. New here? <a href="/docs/getting-started">Getting started</a>.</p>
+  <figure>
+    <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1280" height="600" alt="The Bellion Share window during a call: the room code, Stop sharing and Copy share link buttons, and everyone in the call with their connection quality, video quality and volume"></a>
+    <figcaption>In a call: everyone in the room, their connection, and their video quality and volume.</figcaption>
+  </figure>
+  <section class="features">
+    <h2>Screen sharing built for friends</h2>
+    <ul>
+      <li>Share a monitor, a window or app audio at up to 4K and 60 fps, with hardware encoding on NVIDIA, Intel and AMD.</li>
+      <li>Peer to peer and end-to-end encrypted: your screen goes straight to your friends, not through a streaming service.</li>
+      <li>Everyone in a room can share at the same time, and watch in separate windows or one grid.</li>
+      <li>Connect Discord to go live or watch in your voice channel with one click.</li>
+      <li>Free, no account needed: start a session and send the link.</li>
+      <li>Open source under the AGPL-3.0: <a href="https://github.com/martinsaul/blite">source code on GitHub</a>.</li>
+    </ul>
+    <figure>
+      <a href="/static/shots/lobby-discord.webp"><img src="/static/shots/lobby-discord.webp" width="1000" height="330" alt="Bellion Share showing You're in #gaming (Game Night) on Discord, with a Go live in #gaming button next to the regular Go live and Watch options" loading="lazy"></a>
+      <figcaption>In a Discord voice channel, going live there is one click.</figcaption>
+    </figure>
+    <p class="more"><a href="/docs/features">All features</a> &middot; <a href="/docs/discord">Discord integration</a> &middot; <a href="/docs/relays">Relays for bigger rooms</a> &middot; <a href="/docs/troubleshooting">Troubleshooting</a></p>
+  </section>
+  <footer><a href="/">Download</a> &middot; <a href="/docs">Docs</a> &middot; <a href="/terms">Terms of Service</a> &middot; <a href="/privacy">Privacy Policy</a> &middot; <a href="https://github.com/martinsaul/blite">Source code on GitHub</a> (AGPL-3.0)</footer>
+</main>
+</body>
+</html>

@@ -31,7 +31,7 @@ func TestCaptureTargets(t *testing.T) {
 	for _, tg := range ts {
 		kinds[tg.Kind] = true
 		got := make(chan struct{}, 1)
-		src, _, err := StartVideoSource(SourceKind(tg.Source), "", nil, "", func(layer int, _ AccessUnit) {
+		src, _, err := StartVideoSource(SourceKind(tg.Source), "", "", nil, "", "", func(layer int, _ AccessUnit) {
 			select {
 			case got <- struct{}{}:
 			default:
@@ -76,7 +76,7 @@ func TestCapturedWindowCloses(t *testing.T) {
 	c.Sync()
 
 	frames := make(chan struct{}, 1)
-	src, _, err := StartVideoSource(SourceKind(fmt.Sprintf("window:%#x", uint32(w))), "", nil, "", func(int, AccessUnit) {
+	src, _, err := StartVideoSource(SourceKind(fmt.Sprintf("window:%#x", uint32(w))), "", "", nil, "", "", func(int, AccessUnit) {
 		select {
 		case frames <- struct{}{}:
 		default:

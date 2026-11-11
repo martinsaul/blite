@@ -28,7 +28,11 @@ func List() ([]Target, error) {
 			for _, m := range mons.Monitors {
 				name := atomName(c, m.Name)
 				r := Region{int(m.X), int(m.Y), int(m.Width), int(m.Height)}
-				out = append(out, Target{Kind: "monitor", Name: fmt.Sprintf("%s (%dx%d)", name, r.W, r.H), Source: monitorSource(r)})
+				n := fmt.Sprintf("%s (%dx%d)", name, r.W, r.H)
+				if m.Primary {
+					n += ", primary"
+				}
+				out = append(out, Target{Kind: "monitor", Name: n, Source: monitorSource(r), Primary: m.Primary})
 			}
 		}
 	}
@@ -137,4 +141,18 @@ func windowGone(id uint64) bool {
 	_, err = xproto.GetWindowAttributes(c, xproto.Window(id)).Reply()
 	_, bad := err.(xproto.WindowError)
 	return bad
+}
+
+// windowPID reads _NET_WM_PID, which most toolkits set.
+func windowPID(id uint64) int {
+	c, err := xgb.NewConn()
+	if err != nil {
+		return 0
+	}
+	defer c.Close()
+	r := prop(c, xproto.Window(id), "_NET_WM_PID", xproto.AtomCardinal)
+	if r == nil || r.Format != 32 || len(r.Value) < 4 {
+		return 0
+	}
+	return int(xgb.Get32(r.Value))
 }

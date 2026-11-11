@@ -31,6 +31,9 @@ type Event struct {
 	// Topology is the room's new relay queue (head = relay; empty = mesh).
 	// Also sent right after Resumed.
 	Topology *proto.Topology
+	// Plan is the room's new relay plan (servers that send plans send no
+	// Topology). Also sent right after Resumed.
+	Plan *proto.Plan
 	// RelayRefused: the server refused our relay volunteering
 	// (proto.ErrRelayUnsupported).
 	RelayRefused bool
@@ -52,6 +55,7 @@ type Client struct {
 	opt    Options
 	wmu    sync.Mutex // serialises writes and guards ws swaps
 	ws     *websocket.Conn
+	early  [][]byte // messages that came before the welcome, handled first by run
 	left   chan struct{}
 	kicked chan struct{} // closed on TKicked: don't resume
 	once   sync.Once
@@ -81,51 +85,63 @@ type ServerError string
 
 func (e ServerError) Error() string { return "server: " + string(e) }
 
-// dialSeat opens a socket, sends first, and reads the welcome.
-func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket.Conn, proto.Welcome, error) {
+// maxEarly caps the messages we keep that arrive before the welcome: the
+// server seats us before sending it, so members may already signal us (an
+// end-to-end exchange key).
+const maxEarly = 64
+
+// dialSeat opens a socket, sends first, and reads the welcome. Messages
+// that arrive before it are returned in early, in order.
+func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket.Conn, proto.Welcome, [][]byte, error) {
 	var w proto.Welcome
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	ws, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPClient: o.HTTPClient})
 	if err != nil {
-		return nil, w, fmt.Errorf("dial %s: %w", url, err)
+		return nil, w, nil, fmt.Errorf("dial %s: %w", url, err)
 	}
 	ws.SetReadLimit(64 << 10)
 	b, _ := json.Marshal(first)
 	if err := ws.Write(dctx, websocket.MessageText, b); err != nil {
 		ws.CloseNow()
-		return nil, w, err
+		return nil, w, nil, err
 	}
-	_, b, err = ws.Read(dctx)
-	if err != nil {
-		ws.CloseNow()
-		return nil, w, err
-	}
-	var env proto.Envelope
-	json.Unmarshal(b, &env)
-	switch env.T {
-	case proto.TWelcome:
-		if err := json.Unmarshal(b, &w); err != nil {
+	var early [][]byte
+	for {
+		_, b, err = ws.Read(dctx)
+		if err != nil {
 			ws.CloseNow()
-			return nil, w, err
+			return nil, w, nil, err
 		}
-		return ws, w, nil
-	case proto.TError:
-		var e proto.Error
-		json.Unmarshal(b, &e)
-		ws.CloseNow()
-		return nil, w, ServerError(e.Code)
+		var env proto.Envelope
+		json.Unmarshal(b, &env)
+		switch env.T {
+		case proto.TWelcome:
+			if err := json.Unmarshal(b, &w); err != nil {
+				ws.CloseNow()
+				return nil, w, nil, err
+			}
+			return ws, w, early, nil
+		case proto.TError:
+			var e proto.Error
+			json.Unmarshal(b, &e)
+			ws.CloseNow()
+			return nil, w, nil, ServerError(e.Code)
+		}
+		if len(early) == maxEarly {
+			ws.CloseNow()
+			return nil, w, nil, fmt.Errorf("no welcome after %d messages (last %q)", maxEarly, env.T)
+		}
+		early = append(early, b)
 	}
-	ws.CloseNow()
-	return nil, w, fmt.Errorf("unexpected first message %q", env.T)
 }
 
 func enter(ctx context.Context, url string, first any, o Options) (*Client, error) {
-	ws, w, err := dialSeat(ctx, url, first, o)
+	ws, w, early, err := dialSeat(ctx, url, first, o)
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{Welcome: w, Events: make(chan Event, 64), url: url, opt: o, ws: ws, left: make(chan struct{}), kicked: make(chan struct{})}
+	c := &Client{Welcome: w, Events: make(chan Event, 64), url: url, opt: o, ws: ws, early: early, left: make(chan struct{}), kicked: make(chan struct{})}
 	go c.run()
 	return c, nil
 }
@@ -155,6 +171,10 @@ func (c *Client) hasLeft() bool {
 func (c *Client) run() {
 	defer close(c.Events)
 	for {
+		for _, b := range c.early {
+			c.handle(b)
+		}
+		c.early = nil
 		err := c.readLoop(c.conn())
 		if c.hasLeft() {
 			c.Events <- Event{Err: errors.New("left")}
@@ -174,7 +194,11 @@ func (c *Client) run() {
 		}
 		c.state("connected")
 		c.Events <- Event{Resumed: w.Peers}
-		c.Events <- Event{Topology: &proto.Topology{T: proto.TTopology, Queue: w.RelayQueue}}
+		if w.Plan != nil {
+			c.Events <- Event{Plan: w.Plan}
+		} else {
+			c.Events <- Event{Topology: &proto.Topology{T: proto.TTopology, Queue: w.RelayQueue, Paused: w.RelayPaused, Waiting: w.RelayWaiting}}
+		}
 		owner := w.Owner
 		c.Events <- Event{Owner: &owner}
 	}
@@ -190,12 +214,13 @@ func (c *Client) resume() (proto.Welcome, error) {
 			return proto.Welcome{}, errors.New("left")
 		}
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		ws, w, err := dialSeat(ctx, c.url, msg, c.opt)
+		ws, w, early, err := dialSeat(ctx, c.url, msg, c.opt)
 		cancel()
 		if err == nil {
 			c.wmu.Lock()
 			c.ws = ws
 			c.wmu.Unlock()
+			c.early = early // handled by run after the resume events
 			return w, nil
 		}
 		var se ServerError
@@ -218,58 +243,68 @@ func (c *Client) readLoop(ws *websocket.Conn) error {
 		if err != nil {
 			return err
 		}
-		var env proto.Envelope
-		if json.Unmarshal(b, &env) != nil {
-			continue
+		c.handle(b)
+	}
+}
+
+// handle turns one server message into events.
+func (c *Client) handle(b []byte) {
+	var env proto.Envelope
+	if json.Unmarshal(b, &env) != nil {
+		return
+	}
+	switch env.T {
+	case proto.TPeerJoined:
+		var m proto.PeerJoined
+		if json.Unmarshal(b, &m) == nil {
+			p := m.Peer
+			c.Events <- Event{Joined: &p}
 		}
-		switch env.T {
-		case proto.TPeerJoined:
-			var m proto.PeerJoined
-			if json.Unmarshal(b, &m) == nil {
-				p := m.Peer
-				c.Events <- Event{Joined: &p}
+	case proto.TPeerLeft:
+		var m proto.PeerLeft
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Left: m.PeerID}
+		}
+	case proto.TSignal:
+		var m proto.Signal
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Signal: &m}
+		}
+	case proto.TTopology:
+		var m proto.Topology
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Topology: &m}
+		}
+	case proto.TPlan:
+		var m proto.Plan
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Plan: &m}
+		}
+	case proto.TPeerRenamed:
+		var m proto.PeerRenamed
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Renamed: &m}
+		}
+	case proto.TOwner:
+		var m proto.Owner
+		if json.Unmarshal(b, &m) == nil {
+			c.Events <- Event{Owner: &m.PeerID}
+		}
+	case proto.TKicked:
+		var m proto.Kicked
+		if json.Unmarshal(b, &m) == nil {
+			select {
+			case <-c.kicked:
+			default:
+				close(c.kicked)
 			}
-		case proto.TPeerLeft:
-			var m proto.PeerLeft
-			if json.Unmarshal(b, &m) == nil {
-				c.Events <- Event{Left: m.PeerID}
-			}
-		case proto.TSignal:
-			var m proto.Signal
-			if json.Unmarshal(b, &m) == nil {
-				c.Events <- Event{Signal: &m}
-			}
-		case proto.TTopology:
-			var m proto.Topology
-			if json.Unmarshal(b, &m) == nil {
-				c.Events <- Event{Topology: &m}
-			}
-		case proto.TPeerRenamed:
-			var m proto.PeerRenamed
-			if json.Unmarshal(b, &m) == nil {
-				c.Events <- Event{Renamed: &m}
-			}
-		case proto.TOwner:
-			var m proto.Owner
-			if json.Unmarshal(b, &m) == nil {
-				c.Events <- Event{Owner: &m.PeerID}
-			}
-		case proto.TKicked:
-			var m proto.Kicked
-			if json.Unmarshal(b, &m) == nil {
-				select {
-				case <-c.kicked:
-				default:
-					close(c.kicked)
-				}
-				c.Events <- Event{Kicked: &m}
-			}
-		case proto.TError:
-			// no_peer etc. are informational.
-			var e proto.Error
-			if json.Unmarshal(b, &e) == nil && e.Code == proto.ErrRelayUnsupported {
-				c.Events <- Event{RelayRefused: true}
-			}
+			c.Events <- Event{Kicked: &m}
+		}
+	case proto.TError:
+		// no_peer etc. are informational.
+		var e proto.Error
+		if json.Unmarshal(b, &e) == nil && e.Code == proto.ErrRelayUnsupported {
+			c.Events <- Event{RelayRefused: true}
 		}
 	}
 }
@@ -301,6 +336,12 @@ func (c *Client) Volunteer(on bool) error {
 	return c.send(proto.RelayVolunteer{T: proto.TRelayVolunteer, On: on})
 }
 
+// Caps reports what we could do as a relay.
+func (c *Client) Caps(m proto.Caps) error {
+	m.T = proto.TCaps
+	return c.send(m)
+}
+
 // Rename sets our display name in the room.
 func (c *Client) Rename(name string) error {
 	return c.send(proto.Rename{T: proto.TRename, Name: name})
@@ -317,10 +358,13 @@ func (c *Client) Kick(peerID string, ban bool) error {
 }
 
 // Leave tells the server we're gone and closes the socket.
-func (c *Client) Leave() {
+func (c *Client) Leave() { c.LeaveFor("") }
+
+// LeaveFor is Leave with a reason (proto.LeaveUpdate).
+func (c *Client) LeaveFor(reason string) {
 	c.once.Do(func() {
 		close(c.left)
-		c.send(map[string]string{"t": proto.TLeave})
+		c.send(proto.Leave{T: proto.TLeave, Reason: reason})
 		c.conn().Close(websocket.StatusNormalClosure, "")
 	})
 }

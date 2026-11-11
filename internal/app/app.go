@@ -5,7 +5,10 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,8 +33,12 @@ type App struct {
 	mu      sync.Mutex
 	sess    *session.Session
 	lastErr string
-	res     media.Resolution // last chosen share resolution; new sessions keep it
-	layout  session.Layout   // how we show received streams; kept on disk
+	res     media.Resolution  // last chosen share resolution; new sessions keep it
+	mode    media.ContentMode // last chosen content mode; new sessions keep it
+	layout  session.Layout    // how we show received streams; kept on disk
+	discord Discord           // the user's Discord voice channel (RunDiscord)
+	// discordAuth wakes RunDiscord to ask Discord for permission.
+	discordAuth chan struct{}
 	// DefaultSource is what a new session shares first.
 	DefaultSource media.SourceKind
 	// Exe is the installed Blite binary; empty for dev builds, which don't
@@ -47,18 +54,27 @@ type App struct {
 	Logs     func() any
 	SendLogs func(ctx context.Context) error
 	OpenLogs func() error
+	// SendFeedback sends an idea or a problem the user wrote, with
+	// diagnostics ("" = without); nil = not available.
+	SendFeedback func(ctx context.Context, kind, text, diag string) error
+	// System and RecentLog feed Diagnostics: this computer in a line, and
+	// the last lines of our log. nil = left out.
+	System    func() string
+	RecentLog func() string
+	// Show brings the native window to the front.
+	Show func()
 }
 
 // ErrUpdateRequired: the installed build is below the update channel's
 // minimum, so no new sessions until it's updated.
-var ErrUpdateRequired = errors.New("this Blite is too old: install the update first")
+var ErrUpdateRequired = errors.New("this Bellion Share is too old: install the update first")
 
 // New returns an App that creates sessions with cfg.
 func New(cfg session.Config, def media.SourceKind) *App {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
-	return &App{cfg: cfg, log: cfg.Log, DefaultSource: def, layout: loadLayout()}
+	return &App{cfg: cfg, log: cfg.Log, DefaultSource: def, layout: loadLayout(), discordAuth: make(chan struct{}, 1)}
 }
 
 // UIState is what /api/state returns.
@@ -76,14 +92,30 @@ type UIState struct {
 	// Layout is how received streams are shown, also outside a session.
 	Layout session.Layout `json:"layout"`
 	Logs   any            `json:"logs,omitempty"`
+	// Reach says whether others can reach us from the internet.
+	Reach *Reach `json:"reach,omitempty"`
+	// Discord: the user's voice channel and its session (nil until the
+	// watcher runs).
+	Discord *Discord `json:"discord,omitempty"`
+}
+
+// Reach is the reachability line; OK false is a warning.
+type Reach struct {
+	OK   bool   `json:"ok"`
+	Text string `json:"text"`
 }
 
 // State implements ui.Backend.
 func (a *App) State() any {
 	a.mu.Lock()
 	s, e := a.sess, a.lastErr
+	var dc *Discord
+	if a.discord.Status != "" {
+		d := a.discord
+		dc = &d
+	}
 	a.mu.Unlock()
-	st := UIState{Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), Layout: a.currentLayout()}
+	st := UIState{Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), Layout: a.currentLayout(), Discord: dc}
 	if a.cfg.Identity.Private != nil {
 		st.Tag = identity.Tag(a.cfg.Identity.Public())
 	}
@@ -97,6 +129,10 @@ func (a *App) State() any {
 	}
 	if a.Logs != nil {
 		st.Logs = a.Logs()
+	}
+	if a.cfg.Port != nil {
+		ok, text := a.cfg.Port.State().Describe()
+		st.Reach = &Reach{OK: ok, Text: text}
 	}
 	if s != nil {
 		ss := s.State()
@@ -130,6 +166,64 @@ func (a *App) SendLogsNow(ctx context.Context) error {
 	return err
 }
 
+// Feedback implements ui.Backend: kind is "idea" or "problem".
+func (a *App) Feedback(ctx context.Context, kind, text string, withDiag bool) error {
+	text = strings.TrimSpace(text)
+	switch {
+	case a.SendFeedback == nil:
+		return errors.New("this build can't send feedback")
+	case kind != "idea" && kind != "problem":
+		return errors.New("unknown kind of feedback")
+	case text == "":
+		return errors.New("write something first")
+	case len(text) > maxFeedback:
+		return fmt.Errorf("that's too long: %d characters at most", maxFeedback)
+	}
+	diag := ""
+	if withDiag {
+		diag = a.Diagnostics()
+	}
+	return a.SendFeedback(ctx, kind, text, diag)
+}
+
+const maxFeedback = 8000
+
+// ShowWindow implements ui.Backend.
+func (a *App) ShowWindow(id string) error {
+	a.mu.Lock()
+	s := a.sess
+	a.mu.Unlock()
+	if s == nil {
+		return errors.New("not in a call")
+	}
+	return s.ShowWindow(id)
+}
+
+// Diagnostics implements ui.Backend: this computer, the call, and the
+// last log lines, with links and passwords cut out.
+func (a *App) Diagnostics() string {
+	var b strings.Builder
+	if a.System != nil {
+		b.WriteString(a.System())
+	}
+	a.mu.Lock()
+	s := a.sess
+	a.mu.Unlock()
+	if s != nil {
+		b.WriteString(s.Diagnostics())
+	} else {
+		b.WriteString("not in a call\n")
+	}
+	if a.RecentLog != nil {
+		b.WriteString("\nrecent log:\n")
+		b.WriteString(secretField.ReplaceAllString(a.RecentLog(), "$1=[cut]"))
+	}
+	return b.String()
+}
+
+// secretField matches log fields that could let someone into a call.
+var secretField = regexp.MustCompile(`\b(link|password|pw|token)=("[^"]*"|\S+)`)
+
 // OpenLogFolder implements ui.Backend.
 func (a *App) OpenLogFolder() error {
 	if a.OpenLogs == nil {
@@ -150,16 +244,31 @@ func (a *App) cfgName() string {
 	return a.cfg.Name
 }
 
+// ShowUI implements ui.Backend.
+func (a *App) ShowUI() {
+	if a.Show != nil {
+		a.Show()
+	}
+}
+
 // Subscribe implements ui.Backend.
 func (a *App) Subscribe() (<-chan struct{}, func()) { return a.bc.Subscribe() }
 
-func (a *App) adopt(s *session.Session) {
+// Notify tells the UI that the state changed.
+func (a *App) Notify() { a.bc.Notify() }
+
+func (a *App) adopt(s *session.Session) { a.adoptAs(s, a.DefaultSource) }
+
+// adoptAs makes s the live session, sharing src first ("" or "none" =
+// nothing).
+func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 	s.OnChange(a.bc.Notify)
 	a.mu.Lock()
 	a.sess, a.lastErr = s, ""
-	res, layout := a.res, a.layout
+	res, mode, layout := a.res, a.mode, a.layout
 	a.mu.Unlock()
 	s.SetResolution(res)
+	s.SetMode(mode)
 	s.SetLayout(layout)
 	go func() {
 		<-s.Done()
@@ -173,8 +282,8 @@ func (a *App) adopt(s *session.Session) {
 		a.mu.Unlock()
 		a.bc.Notify()
 	}()
-	if a.DefaultSource != "" && a.DefaultSource != "none" {
-		if err := s.SetSource(a.DefaultSource); err != nil {
+	if src != "" && src != "none" {
+		if err := s.SetSource(src); err != nil {
 			a.setErr("could not start sharing: " + err.Error())
 		}
 	}
@@ -198,7 +307,12 @@ func (a *App) busy() bool {
 }
 
 // Create implements ui.Backend.
-func (a *App) Create(ctx context.Context, password string) error {
+func (a *App) Create(ctx context.Context, password string, e2ee bool) error {
+	return a.create(ctx, password, e2ee, "")
+}
+
+// create starts a session, tied to Discord voice channel channel if set.
+func (a *App) create(ctx context.Context, password string, e2ee bool, channel string) error {
 	if a.busy() {
 		return ErrInSession
 	}
@@ -207,7 +321,9 @@ func (a *App) Create(ctx context.Context, password string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	s, err := session.Create(ctx, a.config(), password)
+	cfg := a.config()
+	cfg.E2EE, cfg.Channel = e2ee, channel
+	s, err := session.Create(ctx, cfg, password)
 	if err != nil {
 		return friendly(err)
 	}
@@ -221,6 +337,11 @@ func (a *App) JoinLink(ctx context.Context, link string) error {
 	if err != nil {
 		return err
 	}
+	return a.join(ctx, code, pw)
+}
+
+// join joins room code.
+func (a *App) join(ctx context.Context, code, pw string) error {
 	if a.busy() {
 		return ErrInSession
 	}
@@ -257,6 +378,9 @@ func (a *App) SetSource(kind string) error {
 	if s == nil {
 		return errors.New("not in a session")
 	}
+	if kind == "primary" { // Go live: the main monitor, not all of them combined
+		kind = capture.PrimarySource()
+	}
 	if kind != "none" && !media.ValidSource(media.SourceKind(kind)) {
 		return errors.New("unknown source")
 	}
@@ -278,6 +402,22 @@ func (a *App) SetResolution(res string) error {
 		return nil
 	}
 	return s.SetResolution(r)
+}
+
+// SetMode implements ui.Backend: desktop or game, now and in later sessions.
+func (a *App) SetMode(mode string) error {
+	m := media.ContentMode(mode)
+	if !media.ValidMode(m) {
+		return errors.New("unknown mode")
+	}
+	a.mu.Lock()
+	a.mode = m
+	s := a.sess
+	a.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	return s.SetMode(m)
 }
 
 // Sources implements ui.Backend: monitors and windows that can be shared.
@@ -401,26 +541,44 @@ func (a *App) CheckUpdate(ctx context.Context) error {
 	return nil
 }
 
-// InstallUpdate implements ui.Backend. Never during a call: molt-swap
-// restarts Blite.
+// InstallUpdate implements ui.Backend. molt-swap restarts Blite; during a
+// call we write the call to the resume file first and leave saying we
+// update, so the next build rejoins it (and an owner keeps the room).
 func (a *App) InstallUpdate(ctx context.Context) error {
 	if a.Updates == nil {
 		return errors.New("this build doesn't update itself")
 	}
-	if a.busy() {
-		return errors.New("leave the session first: installing restarts Blite")
-	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
+	// Download and verify while the call goes on.
 	if err := a.Updates.Install(ctx); err != nil {
 		a.bc.Notify()
 		return err
 	}
-	a.log.Info("update handed to molt-swap; exiting")
+	inCall := a.leaveForUpdate()
+	a.log.Info("update handed to molt-swap; exiting", "inCall", inCall)
 	if a.Exit != nil {
 		go a.Exit()
 	}
 	return nil
+}
+
+// leaveForUpdate writes the call (if any) to the resume file and leaves it
+// saying we update.
+func (a *App) leaveForUpdate() (inCall bool) {
+	a.mu.Lock()
+	s := a.sess
+	a.sess = nil
+	a.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if err := writeResume(s.Rejoin(), time.Now()); err != nil {
+		a.log.Warn("resume file: the call won't rejoin by itself", "err", err)
+	}
+	s.CloseForUpdate()
+	a.bc.Notify()
+	return true
 }
 
 // SetAutostart implements ui.Backend: start Blite at sign-in, or not.
@@ -446,11 +604,12 @@ func (a *App) Shutdown() { a.Leave() }
 
 var serverMessages = map[string]string{
 	proto.ErrBadPassword:    "wrong password for that room",
+	proto.ErrChannelBusy:    "someone already started a session in this Discord channel: watch it instead",
 	proto.ErrNoRoom:         "that session doesn't exist (it ends when everyone leaves)",
-	proto.ErrRoomFull:       "that session is full (5 people)",
+	proto.ErrRoomFull:       "that session is full (the server limits room size)",
 	proto.ErrRateLimited:    "too many attempts; wait a few minutes",
 	proto.ErrBadRequest:     "password must be at least 4 characters",
-	proto.ErrUpdateRequired: "this Blite is too old for the server: please update it",
+	proto.ErrUpdateRequired: "this Bellion Share is too old for the server: please update it",
 }
 
 func friendly(err error) error {

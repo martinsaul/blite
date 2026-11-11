@@ -17,24 +17,24 @@ install -d "$pkg/usr/share/applications" "$pkg/DEBIAN"
 cat > "$pkg/usr/share/applications/blite.desktop" <<DESK
 [Desktop Entry]
 Type=Application
-Name=Blite
+Name=Bellion Share
 Comment=Peer-to-peer screen sharing
 Exec=/usr/bin/blite %u
 Icon=video-display
 Terminal=false
 Categories=Network;
-MimeType=x-scheme-handler/blite;
+MimeType=x-scheme-handler/bshare;x-scheme-handler/blite;
 DESK
 cat > "$pkg/DEBIAN/control" <<CTRL
 Package: blite
 Version: $ver
 Architecture: amd64
-Maintainer: ${BLITE_MAINTAINER:-Blite <blite@localhost>}
-Depends: gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-x, gstreamer1.0-pipewire, pipewire-bin, pulseaudio-utils | pipewire-pulse, xdg-utils
+Maintainer: ${BLITE_MAINTAINER:-Bellion Share <blite@localhost>}
+Depends: gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-x, gstreamer1.0-pipewire, pipewire-bin, pulseaudio-utils | pipewire-pulse, xdg-utils, libgl1, libx11-6, libxcursor1, libxrandr2, libxinerama1, libxi6, libxxf86vm1, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0
 Recommends: gstreamer1.0-vaapi
 Section: net
 Priority: optional
-Description: Blite - peer-to-peer screen sharing (POC)
+Description: Bellion Share - peer-to-peer screen sharing (POC)
  Share your screen and chosen apps' audio with up to 4 people,
  directly peer to peer. Runs as a tray app with a local web UI.
 CTRL

@@ -40,7 +40,7 @@ func SetAutostart(on bool, exe string) error {
 	}
 	desktop := fmt.Sprintf(`[Desktop Entry]
 Type=Application
-Name=Blite
+Name=Bellion Share
 Comment=Peer-to-peer screen sharing (runs in the tray)
 Exec="%s" -background
 Icon=video-display

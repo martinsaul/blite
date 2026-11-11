@@ -1,23 +1,38 @@
 package rtc
 
-// Relay mode. The server keeps a relay queue per room; its head is
-// the active relay. While a relay is active, every other member connects only
-// to the relay, which forwards each member's video and audio to everyone else
-// over fixed "origin slots".
+// Relay mode. The server plans which volunteers relay (proto.Plan): every
+// member is homed on one relay and connects only to it; relays connect to
+// the members homed on them ("children") and to every other relay
+// ("trunks"). A relay forwards each child's media to its other children and
+// over every trunk, and what arrives over a trunk to its children, so any
+// path is at most sharer -> relay -> relay -> viewer. With one relay this is
+// the classic relay mode; with none, the full mesh.
 //
 // Every PeerConnection carries the same tracks whatever the topology, so a
-// topology change never renegotiates:
+// plan change never renegotiates:
 //
 //	screen      our video, adaptive per peer (forwarder + layerPolicy)
-//	screen-low  our LOW layer; only sent to the relay, and only while
-//	            screen carries HIGH, so the relay can serve weak viewers
-//	slotN       relay -> viewer: origin N's video (N < numSlots)
+//	screen-low  our LOW layer; only sent to a relay that forwards our
+//	            video, and only while screen carries HIGH, so the relay
+//	            can serve weak viewers
+//	slotN       relay -> peer: a forwarded origin's video
 //	audio       our Opus
-//	aslotN      relay -> viewer: origin N's audio
+//	aslotN      relay -> peer: that origin's audio
 //
-// The relay tells each viewer which origin is in which slot (signalMsg.Slots).
-// Clients from before relay mode see the extra m-lines and never get RTP on
-// them; the server refuses relay mode while any of them is in the room.
+// The number of slots is fixed per connection: maxSlots between builds from
+// proto.MultiRelayBuild on, legacySlots with an older build (which assumes
+// one slot per member and at most proto.RelayMaxPeers members). Slots go to
+// origins, not members: the relay keeps a slot map per connection and tells
+// the other side (signalMsg.Slots). While there are free slots every origin
+// has one; beyond that an origin that starts sending takes the slot of one
+// that has been quiet. Over a trunk, an origin can take two slots: "id"
+// (its screen) and "id/low" (its screen-low), so the far relay can serve
+// its own weak viewers.
+//
+// For every origin we take its media from one connection only (provider):
+// its own if we connect to it directly, else its relay. While a plan
+// change is under way that can be the old connection, until the new one
+// carries it (make-before-break).
 
 import (
 	"fmt"
@@ -34,8 +49,14 @@ import (
 	"blite/internal/proto"
 )
 
-// numSlots is one slot per possible origin: everyone but the relay.
-const numSlots = proto.MaxPeers - 1
+const (
+	// legacySlots is what builds before proto.MultiRelayBuild carry: one
+	// slot per possible origin, everyone but the relay.
+	legacySlots = proto.RelayMaxPeers - 1
+	// maxSlots is the slot count between newer builds: origins forwarded
+	// at once, whatever the room size.
+	maxSlots = 8
+)
 
 const (
 	trackScreen    = "screen"
@@ -43,6 +64,7 @@ const (
 	trackAudio     = "audio"
 	slotPrefix     = "slot"
 	aslotPrefix    = "aslot"
+	lowSuffix      = "/low" // slot key suffix: the origin's screen-low (trunks)
 )
 
 // Relay sources of one origin, used as forwarder "layers" at the relay.
@@ -52,18 +74,37 @@ const (
 )
 
 const (
-	pruneAfter  = 10 * time.Second // longest we keep PCs the topology no longer wants
+	pruneAfter  = 10 * time.Second // longest we keep PCs the plan no longer wants
 	pliInterval = 500 * time.Millisecond
-	lowSilence  = time.Second // screen-low quiet this long: the origin's screen carries LOW
+	lowSilence  = time.Second     // screen-low quiet this long: the origin's screen carries LOW
+	activeFor   = 3 * time.Second // an origin with packets this recent is active
+	idleFor     = 5 * time.Second // an origin quiet this long may lose its slot
+	joinGrace   = 5 * time.Second // a newcomer offers itself this long
 )
 
 // slotIndex parses "slotN" / "aslotN".
 func slotIndex(id, prefix string) (int, bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(id, prefix))
-	if !strings.HasPrefix(id, prefix) || err != nil || n < 0 || n >= numSlots {
+	if !strings.HasPrefix(id, prefix) || err != nil || n < 0 || n >= maxSlots {
 		return 0, false
 	}
 	return n, true
+}
+
+// slotKey is the slot map entry for an origin's source.
+func slotKey(origin string, src int) string {
+	if src == srcLow {
+		return origin + lowSuffix
+	}
+	return origin
+}
+
+// parseSlotKey is slotKey's inverse ("" for a free slot).
+func parseSlotKey(k string) (origin string, src int) {
+	if o, ok := strings.CutSuffix(k, lowSuffix); ok {
+		return o, srcLow
+	}
+	return k, srcScreen
 }
 
 // relayFwd feeds one viewer's slot from one origin's two sources, one packet
@@ -72,9 +113,11 @@ func slotIndex(id, prefix string) (int, bool) {
 // the hop.
 type relayFwd struct {
 	track *webrtc.TrackLocalStaticRTP
+	write func(src int, p *rtp.Packet) // nil = track.WriteRTP
 
 	mu         sync.Mutex
-	cur, want  int // source being sent (-1 none yet) and wanted (layerOff = nothing)
+	cur, want  int    // source being sent (-1 none yet) and wanted (layerOff = nothing)
+	curSSRC    uint32 // the incoming stream cur comes from: a new one is a switch too
 	started    bool
 	seqOff     uint16
 	tsOff      uint32
@@ -117,7 +160,9 @@ func (f *relayFwd) forward(src int, p *rtp.Packet) (needKey bool) {
 		f.mu.Unlock()
 		return false
 	}
-	if src != f.cur {
+	if src != f.cur || p.SSRC != f.curSSRC {
+		// A new source, or the same one arriving on another stream (the
+		// origin moved to another relay, or now connects to us).
 		if src != f.want {
 			f.mu.Unlock()
 			return false
@@ -126,7 +171,7 @@ func (f *relayFwd) forward(src int, p *rtp.Packet) (needKey bool) {
 			f.mu.Unlock()
 			return true
 		}
-		f.cur = src
+		f.cur, f.curSSRC = src, p.SSRC
 		f.seqOff = f.nextSeq - p.SequenceNumber
 		f.switchSeq, f.highIn, f.pastSwitch = p.SequenceNumber, p.SequenceNumber, false
 		ts := f.lastTS + frameTicks
@@ -158,30 +203,112 @@ func (f *relayFwd) forward(src int, p *rtp.Packet) (needKey bool) {
 		f.nextSeq, f.lastTS = h.SequenceNumber+1, h.Timestamp
 	}
 	f.mu.Unlock()
-	f.track.WriteRTP(&rtp.Packet{Header: h, Payload: p.Payload})
+	out := &rtp.Packet{Header: h, Payload: p.Payload}
+	if f.write != nil {
+		f.write(src, out)
+	} else {
+		f.track.WriteRTP(out)
+	}
 	return false
 }
 
-// relayTracks are the relay-mode tracks of one PeerConnection.
+// relayTracks are the relay-mode tracks and state of one PeerConnection.
 type relayTracks struct {
 	lowFwd *forwarder // screen-low
-	slotV  [numSlots]*relayFwd
-	slotA  [numSlots]*webrtc.TrackLocalStaticRTP
+	nslots int
+	slotV  []*relayFwd
+	slotA  []*audioTrack
 
-	// Relay side, for this peer as an origin: its received video sources
-	// (for PLIs upstream), and when screen-low last had a packet.
-	srcMu sync.Mutex
-	src   [2]*webrtc.TrackRemote
-	lowAt time.Time
-	pliAt [2]time.Time
-	// Relay side, for this peer as a viewer: its quality cap per origin
-	// (a level, levelHigh..levelOff). Guarded by remote.polMu.
+	// Guarded by Mesh.mu: the slot map we send this peer (as relay), and
+	// the one it sends us (it relays to us).
+	txSlots []string
+	rxSlots []string
+	byeAt   time.Time // it said it closes this connection (zero = no)
+
+	// Relay side, for this peer as a viewer or trunk: its quality cap per
+	// origin (a level, levelHigh..levelOff), and whether we forward to it.
+	// Guarded by remote.polMu.
 	originCap map[string]int
+	fanTarget bool
 }
 
-// addRelayTracks adds screen-low and the slot tracks to pc. Video tracks go
-// right after screen and audio slots right after audio (see newPeer), in the
-// same order on every client.
+// origin (relay side) is one member whose media we forward or play: where
+// its video sources arrive, for keyframe requests upstream, and what its
+// provider says it sends.
+type origin struct {
+	id string
+
+	mu     sync.Mutex
+	via    [2]*remote // connection each source arrives on
+	src    [2]*webrtc.TrackRemote
+	lowAt  time.Time // screen-low's last packet
+	lastAt time.Time // last packet of any kind
+	pliAt  [2]time.Time
+	heard  sendingMsg
+}
+
+// originLocked is id's origin, created on first use (m.mu held).
+func (m *Mesh) originLocked(id string) *origin {
+	o := m.origins[id]
+	if o == nil {
+		o = &origin{id: id}
+		m.origins[id] = o
+	}
+	return o
+}
+
+func (m *Mesh) originOf(id string) *origin {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.originLocked(id)
+}
+
+func (o *origin) setSrc(src int, via *remote, t *webrtc.TrackRemote) {
+	o.mu.Lock()
+	o.via[src], o.src[src] = via, t
+	o.mu.Unlock()
+}
+
+// saw records a packet of src (audio: -1).
+func (o *origin) saw(src int, now time.Time) {
+	o.mu.Lock()
+	o.lastAt = now
+	if src == srcLow {
+		o.lowAt = now
+	}
+	o.mu.Unlock()
+}
+
+func (o *origin) lowQuiet() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return time.Since(o.lowAt) > lowSilence
+}
+
+func (o *origin) lastPacket() time.Time {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lastAt
+}
+
+func (o *origin) heardMsg() sendingMsg {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.heard
+}
+
+// slotCount is the slot count of our connection to id: maxSlots if both
+// builds understand plans, else legacySlots (m.mu held).
+func (m *Mesh) slotCountLocked(id string) int {
+	if m.opt.Build >= proto.MultiRelayBuild && m.builds[id] >= proto.MultiRelayBuild {
+		return maxSlots
+	}
+	return legacySlots
+}
+
+// addVideoRelayTracks adds screen-low and the slot tracks to pc. Video
+// tracks go right after screen and audio slots right after audio (see
+// newPeer), in the same order on every client.
 func (m *Mesh) addVideoRelayTracks(r *remote) error {
 	low, err := webrtc.NewTrackLocalStaticRTP(m.cap, trackScreenLow, "blite")
 	if err != nil {
@@ -193,12 +320,15 @@ func (m *Mesh) addVideoRelayTracks(r *remote) error {
 		return err
 	}
 	go m.readLowRTCP(s)
-	for i := range numSlots {
+	r.slotV = make([]*relayFwd, r.nslots)
+	r.txSlots, r.rxSlots = make([]string, r.nslots), make([]string, r.nslots)
+	for i := range r.nslots {
 		t, err := webrtc.NewTrackLocalStaticRTP(m.cap, fmt.Sprintf("%s%d", slotPrefix, i), "blite")
 		if err != nil {
 			return err
 		}
 		r.slotV[i] = newRelayFwd(t)
+		r.slotV[i].write = m.pacedWriter(r, i)
 		s, err := r.pc.AddTrack(t)
 		if err != nil {
 			return err
@@ -209,13 +339,9 @@ func (m *Mesh) addVideoRelayTracks(r *remote) error {
 }
 
 func (m *Mesh) addAudioRelayTracks(r *remote) error {
-	for i := range numSlots {
-		t, err := webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1"},
-			fmt.Sprintf("%s%d", aslotPrefix, i), "blite")
-		if err != nil {
-			return err
-		}
+	r.slotA = make([]*audioTrack, r.nslots)
+	for i := range r.nslots {
+		t := newAudioTrack(fmt.Sprintf("%s%d", aslotPrefix, i))
 		r.slotA[i] = t
 		s, err := r.pc.AddTrack(t)
 		if err != nil {
@@ -252,8 +378,15 @@ func (m *Mesh) readLowRTCP(s *webrtc.RTPSender) {
 	}
 }
 
-// readSlotRTCP (relay side) turns a viewer's reports on a slot into layer
-// decisions for that viewer, and its keyframe requests into PLIs to the origin.
+// txKey is the origin and source we send r in a slot ("" = none).
+func (m *Mesh) txKey(r *remote, slot int) (string, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return parseSlotKey(r.txSlots[slot])
+}
+
+// readSlotRTCP (relay side) turns a peer's reports on a slot into layer
+// decisions for that peer, and its keyframe requests into PLIs upstream.
 func (m *Mesh) readSlotRTCP(r *remote, slot int, s *webrtc.RTPSender) {
 	for {
 		pkts, _, err := s.ReadRTCP()
@@ -274,11 +407,13 @@ func (m *Mesh) readSlotRTCP(r *remote, slot int, s *webrtc.RTPSender) {
 					m.observe(r, rr{lost: float64(rep.FractionLost) / 256, rtt: rrRTT(rep, now)})
 				}
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				o, _ := m.txKey(r, slot)
 				switch src := r.slotV[slot].current(); {
+				case o == "":
 				case src == srcScreen || src == srcLow:
-					m.pliUpstream(m.slotOrigin(slot), src)
+					m.pliUpstream(o, src)
 				case src >= 0 && src < layerOff:
-					m.transKeyframe(m.slotOrigin(slot), src) // a rendition we encode
+					m.transKeyframe(o, src) // a rendition we encode
 				}
 			}
 		}
@@ -299,27 +434,47 @@ func (r *remote) sendingVideo() bool {
 	return false
 }
 
-// relayLocked is the active relay ("" = mesh). m.mu held.
-func (m *Mesh) relayLocked() string {
-	if len(m.queue) == 0 {
-		return ""
-	}
-	return m.queue[0]
-}
-
-func (m *Mesh) relay() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.relayLocked()
-}
-
 func (m *Mesh) me() string { return m.sig.Welcome.PeerID }
 
-// directLocked reports whether we exchange media with id over our own PC to
-// it: always in a mesh, always as relay, and only with the relay otherwise.
+// isRelayLocked reports whether id relays in the current plan (m.mu held).
+func (m *Mesh) isRelayLocked(id string) bool { return slices.Contains(m.plan.Relays, id) }
+
+// amRelayLocked reports whether we relay (m.mu held).
+func (m *Mesh) amRelayLocked() bool { return m.isRelayLocked(m.me()) }
+
+// homeLocked is id's relay ("" = mesh, or not planned yet) (m.mu held).
+func (m *Mesh) homeLocked(id string) string {
+	if len(m.plan.Relays) == 0 {
+		return ""
+	}
+	if h, ok := m.plan.Home[id]; ok {
+		return h
+	}
+	if m.isRelayLocked(id) {
+		return id
+	}
+	if len(m.plan.Relays) == 1 && m.plan.Home == nil {
+		return m.plan.Relays[0] // a Topology from an older server
+	}
+	return ""
+}
+
+// childLocked reports whether id is homed on us (m.mu held).
+func (m *Mesh) childLocked(id string) bool {
+	return id != m.me() && !m.isRelayLocked(id) && m.homeLocked(id) == m.me()
+}
+
+// directLocked reports whether the plan wants our own PC to id: always in a
+// mesh; as relay, to our children and the other relays; else only to our
+// relay (m.mu held).
 func (m *Mesh) directLocked(id string) bool {
-	rel := m.relayLocked()
-	return rel == "" || rel == m.me() || id == rel
+	switch {
+	case len(m.plan.Relays) == 0:
+		return true
+	case m.amRelayLocked():
+		return m.isRelayLocked(id) || m.homeLocked(id) == m.me()
+	}
+	return id == m.homeLocked(m.me())
 }
 
 func (m *Mesh) direct(id string) bool {
@@ -328,11 +483,55 @@ func (m *Mesh) direct(id string) bool {
 	return m.directLocked(id)
 }
 
-// Topology returns the relay queue (head = active relay).
-func (m *Mesh) Topology() []string {
+// forwardingLocked reports whether we forward media: as relay, and as a
+// former relay while its children still hang on (m.mu held).
+func (m *Mesh) forwardingLocked() bool { return m.amRelayLocked() || len(m.served) > 0 }
+
+// servesLocked reports whether we forward to non-relay peer id: our child,
+// or a former child that hasn't moved yet (m.mu held).
+func (m *Mesh) servesLocked(id string) bool { return m.childLocked(id) || m.served[id] }
+
+// targetLocked reports whether we forward origin o's media, which arrives
+// from `from` (o itself or its relay), to peer r: to the members we serve
+// (children, and former children until they move), and over trunks only
+// what our own children send (m.mu held).
+func (m *Mesh) targetLocked(r *remote, o, from string) bool {
+	if r.id == o || r.id == from {
+		return false
+	}
+	if m.isRelayLocked(r.id) {
+		return m.amRelayLocked() && from == o && m.childLocked(o)
+	}
+	return m.servesLocked(r.id)
+}
+
+// Relays returns the active relays (empty = full mesh).
+func (m *Mesh) Relays() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return slices.Clone(m.queue)
+	return slices.Clone(m.plan.Relays)
+}
+
+// Queue returns every relay volunteer in volunteer order, relays or not.
+func (m *Mesh) Queue() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.plan.Queue)
+}
+
+// Home returns the relay id is homed on ("" = mesh).
+func (m *Mesh) Home(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.homeLocked(id)
+}
+
+// Paused reports whether relay mode is paused: an older member keeps the
+// room on one relay and the room is bigger than proto.RelayMaxPeers.
+func (m *Mesh) Paused() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plan.Paused
 }
 
 // Volunteer joins (on) or leaves the room's relay queue.
@@ -344,46 +543,130 @@ func (m *Mesh) Name(id string) string { return m.name(id) }
 // Me is our peer ID.
 func (m *Mesh) Me() string { return m.me() }
 
-// setTopology applies a new relay queue: connects what the new topology
-// needs, then prunes what it no longer does once that is up.
-func (m *Mesh) setTopology(queue []string) {
+// planFromTopology is the plan an older server's Topology means: its head
+// relays for everyone.
+func planFromTopology(t proto.Topology) proto.Plan {
+	p := proto.Plan{T: proto.TPlan, Queue: slices.Clone(t.Queue), Paused: t.Paused}
+	if t.Paused {
+		p.Queue = slices.Clone(t.Waiting)
+	}
+	if rel := t.Relay(); rel != "" {
+		p.Relays = []string{rel}
+	}
+	return p
+}
+
+// setPlan applies a new plan: connects what it needs, then prunes what it
+// no longer does once that is up.
+func (m *Mesh) setPlan(p proto.Plan) {
 	m.mu.Lock()
-	old := m.relayLocked()
-	m.queue = slices.Clone(queue)
-	rel := m.relayLocked()
-	if rel != old {
+	if p.Epoch != 0 && p.Epoch < m.plan.Epoch {
+		m.mu.Unlock()
+		return // stale
+	}
+	wasRelay := m.amRelayLocked()
+	same := slices.Equal(p.Relays, m.plan.Relays) && homesEqual(p.Home, m.plan.Home)
+	var was []string // our children so far
+	for id := range m.members {
+		if m.childLocked(id) {
+			was = append(was, id)
+		}
+	}
+	m.plan = p
+	isRelay := m.amRelayLocked()
+	if !same {
 		m.topoAt = time.Now()
+		if isRelay {
+			m.relaying = true
+		}
+		// Keep serving former children until they have moved
+		// (make-before-break): they say bye, or prune gives up.
+		for _, id := range was {
+			if !m.childLocked(id) && !m.isRelayLocked(id) && m.peers[id] != nil {
+				m.served[id] = true
+			}
+		}
+		clear(m.provider)
 	}
 	m.mu.Unlock()
-	if rel == old {
+	if same {
 		if m.opt.OnTopology != nil {
-			m.opt.OnTopology() // the queue behind the relay changed
+			m.opt.OnTopology() // only the queue changed
 		}
 		return
 	}
-	m.opt.Log.Info("topology", "relay", rel, "queue", queue)
-	if old == m.me() || rel == m.me() {
-		// Starting over either way; as a new relay, the slot map we had
-		// as a viewer is the old relay's.
-		m.stopRelaying()
+	m.opt.Log.Info("plan", "epoch", p.Epoch, "relays", p.Relays, "home", m.Home(m.me()))
+	if !wasRelay && isRelay {
+		// The slot maps we had as a viewer are another relay's.
+		m.clearRx()
 	}
-	if rel == m.me() {
-		m.assignSlots()
-	}
+	m.updateTargets()
+	m.assignAllSlots()
 	m.reconcile()
 	m.resendCaps()
+	m.pushDemand()
 	if m.opt.OnTopology != nil {
 		m.opt.OnTopology()
 	}
 }
 
+func homesEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// clearRx forgets the slot maps peers sent us.
+func (m *Mesh) clearRx() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.peers {
+		clear(r.rxSlots)
+	}
+	clear(m.provider)
+}
+
+// updateTargets marks the peers we forward to, whose caps on our own video
+// then stop limiting what we forward them (applyCap).
+func (m *Mesh) updateTargets() {
+	m.mu.Lock()
+	type t struct {
+		r   *remote
+		fan bool
+	}
+	var ts []t
+	for id, r := range m.peers {
+		ts = append(ts, t{r, m.servesLocked(id) || m.isRelayLocked(id) && m.amRelayLocked()})
+	}
+	m.mu.Unlock()
+	for _, x := range ts {
+		x.r.polMu.Lock()
+		if x.r.fanTarget != x.fan {
+			x.r.fanTarget = x.fan
+			m.applyCap(x.r)
+		}
+		x.r.polMu.Unlock()
+	}
+}
+
 // reconcile offers to every member we should be connected to and aren't. For
-// pairs a topology change creates, the lower peer ID offers; the other side
-// waits (and glare, if both still offer, resolves the same way).
+// pairs a plan change creates, the lower peer ID offers; the other side
+// waits (and glare, if both still offer, resolves the same way). A member
+// that just joined offers to everyone its plan connects it to, so we leave
+// it alone for joinGrace. It runs on plan changes and every second.
 func (m *Mesh) reconcile() {
 	m.mu.Lock()
 	var want []string
 	for id := range m.members {
+		if time.Since(m.joinedAt[id]) < joinGrace {
+			continue
+		}
 		if m.directLocked(id) && m.peers[id] == nil && m.me() < id {
 			want = append(want, id)
 		}
@@ -396,13 +679,13 @@ func (m *Mesh) reconcile() {
 	}
 }
 
-// prune closes PCs the topology no longer wants once every wanted PC is
-// connected (make-before-break), or after pruneAfter at the latest. It runs
-// from pruneLoop.
+// prune closes PCs the plan no longer wants once every wanted PC is
+// connected (make-before-break), or after pruneAfter at the latest. A
+// member we served waits for its new relay instead: it says bye when that
+// is up. It runs from pruneLoop.
 func (m *Mesh) prune() {
 	m.mu.Lock()
 	ready := true
-	var extra []*remote
 	for id := range m.members {
 		if m.directLocked(id) {
 			if r := m.peers[id]; r == nil || r.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
@@ -410,24 +693,60 @@ func (m *Mesh) prune() {
 			}
 		}
 	}
+	late := time.Since(m.topoAt) >= pruneAfter
+	if late {
+		clear(m.served)
+	}
+	var extra []*remote
 	for id, r := range m.peers {
-		if !m.directLocked(id) {
+		if m.directLocked(id) {
+			continue
+		}
+		switch {
+		case !r.byeAt.IsZero(), late, ready && !m.served[id]:
 			extra = append(extra, r)
 		}
 	}
-	if len(extra) == 0 || (!ready && time.Since(m.topoAt) < pruneAfter) {
-		m.mu.Unlock()
-		return
-	}
 	for _, r := range extra {
 		delete(m.peers, r.id)
+		delete(m.served, r.id)
+	}
+	stop := false
+	if m.relaying && !m.forwardingLocked() {
+		m.relaying, stop = false, true
+	}
+	if len(extra) > 0 {
+		clear(m.provider)
 	}
 	m.mu.Unlock()
 	for _, r := range extra {
-		m.opt.Log.Info("topology: closing direct connection", "peer", r.id)
+		m.opt.Log.Info("plan: closing direct connection", "peer", r.id)
+		if r.byeAt.IsZero() {
+			m.sig.Signal(r.id, signalMsg{Bye: true})
+		}
 		m.closePC(r.pc)
 	}
-	m.updateLowBitrate()
+	if stop {
+		m.stopRelaying()
+	}
+	if len(extra) > 0 {
+		m.updateLowBitrate()
+		m.assignAllSlots()
+		m.pushDemand()
+	}
+}
+
+// gotBye: from closes our connection, which our plan no longer wants
+// either; prune closes it at once. (A former child that is direct again,
+// as in a mesh, just stops being served.)
+func (m *Mesh) gotBye(from string) {
+	m.mu.Lock()
+	if r := m.peers[from]; r != nil && !m.directLocked(from) {
+		r.byeAt = time.Now()
+	}
+	delete(m.served, from)
+	m.mu.Unlock()
+	m.prune()
 }
 
 func (m *Mesh) pruneLoop() {
@@ -438,77 +757,172 @@ func (m *Mesh) pruneLoop() {
 		case <-m.done:
 			return
 		case <-t.C:
+			m.reconcile()
 			m.prune()
+			m.assignAllSlots()
 			m.rendTick()
 		}
 	}
 }
 
-// assignSlots (as relay) gives every other member a slot, keeping existing
-// assignments, and tells the viewers if anything changed.
-func (m *Mesh) assignSlots() {
-	m.mu.Lock()
-	if m.relayLocked() != m.me() {
-		m.mu.Unlock()
-		return
+// slotKeysLocked are the slot keys r may carry from us, in preference
+// order: to a member we serve, every other member's media; over a trunk,
+// our children's screens, then their screen-lows (m.mu held).
+func (m *Mesh) slotKeysLocked(r *remote) []string {
+	if !m.forwardingLocked() {
+		return nil
+	}
+	var keys []string
+	if m.isRelayLocked(r.id) {
+		if !m.amRelayLocked() {
+			return nil
+		}
+		for id := range m.members {
+			if m.childLocked(id) {
+				keys = append(keys, id)
+			}
+		}
+		slices.Sort(keys)
+		for _, id := range slices.Clone(keys) {
+			keys = append(keys, id+lowSuffix)
+		}
+		return keys
+	}
+	if !m.servesLocked(r.id) {
+		return nil
+	}
+	for id := range m.members {
+		if id != r.id {
+			keys = append(keys, id)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// activeLocked reports whether origin id sent us anything lately (m.mu held).
+func (m *Mesh) activeLocked(id string, now time.Time) bool {
+	o := m.origins[id]
+	return o != nil && now.Sub(o.lastPacket()) < activeFor
+}
+
+// assignLocked updates r's slot map: drops keys it may no longer carry,
+// gives free slots to active origins first, then to the rest in order, and
+// lets active origins without a slot take one from an idle origin. It
+// reports whether the map changed (m.mu held).
+func (m *Mesh) assignLocked(r *remote, now time.Time) bool {
+	keys := m.slotKeysLocked(r)
+	ok := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		ok[k] = true
 	}
 	changed := false
-	for o, i := range m.slotOf {
-		if !m.members[o] {
-			delete(m.slotOf, o)
-			m.slots[i] = ""
+	have := map[string]bool{}
+	for i, k := range r.txSlots {
+		if k != "" && !ok[k] {
+			r.txSlots[i] = ""
+			r.slotV[i].reset()
 			changed = true
+		} else if k != "" {
+			have[k] = true
 		}
 	}
-	ids := make([]string, 0, len(m.members))
-	for id := range m.members {
-		ids = append(ids, id)
+	active := func(k string) bool {
+		o, _ := parseSlotKey(k)
+		return m.activeLocked(o, now)
 	}
-	slices.Sort(ids)
-	for _, id := range ids {
-		if _, ok := m.slotOf[id]; ok {
+	order := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if active(k) {
+			order = append(order, k)
+		}
+	}
+	for _, k := range keys {
+		if !active(k) {
+			order = append(order, k)
+		}
+	}
+	for _, k := range order {
+		if have[k] {
 			continue
 		}
-		for i, o := range m.slots {
-			if o == "" {
-				m.slots[i], m.slotOf[id] = id, i
-				changed = true
-				break
+		free := slices.Index(r.txSlots, "")
+		if free < 0 && active(k) {
+			// Take the slot of the origin quiet longest, if quiet enough.
+			var oldest time.Time
+			for i, k2 := range r.txSlots {
+				o2, _ := parseSlotKey(k2)
+				last := time.Time{}
+				if o := m.origins[o2]; o != nil {
+					last = o.lastPacket()
+				}
+				if now.Sub(last) >= idleFor && (free < 0 || last.Before(oldest)) {
+					free, oldest = i, last
+				}
+			}
+			if free >= 0 {
+				delete(have, r.txSlots[free])
 			}
 		}
+		if free < 0 {
+			continue
+		}
+		r.txSlots[free] = k
+		r.slotV[free].reset()
+		have[k] = true
+		changed = true
 	}
-	slots := m.slots
-	viewers := make([]*remote, 0, len(m.peers))
+	return changed
+}
+
+// assignAllSlots updates every connection's slot map and tells the peers
+// whose map changed.
+func (m *Mesh) assignAllSlots() {
+	now := time.Now()
+	m.mu.Lock()
+	var send []*remote
 	for _, r := range m.peers {
-		viewers = append(viewers, r)
+		if m.assignLocked(r, now) {
+			send = append(send, r)
+		}
 	}
 	m.mu.Unlock()
-	if !changed {
-		return
-	}
-	for _, r := range viewers {
-		for i := range numSlots {
-			if slots[i] == "" || slots[i] == r.id {
-				r.slotV[i].reset()
-			}
-		}
-		m.sendSlots(r.id, slots)
+	for _, r := range send {
+		m.sendSlots(r)
 	}
 }
 
-func (m *Mesh) sendSlots(to string, slots [numSlots]string) {
-	m.sig.Signal(to, signalMsg{Slots: slots[:]})
+// slotFor is the slot r carries key in, assigning one if key's origin is
+// active and one is free or idle (-1 = none).
+func (m *Mesh) slotFor(r *remote, key string) int {
+	m.mu.Lock()
+	if i := slices.Index(r.txSlots, key); i >= 0 {
+		m.mu.Unlock()
+		return i
+	}
+	changed := m.assignLocked(r, time.Now())
+	i := slices.Index(r.txSlots, key)
+	m.mu.Unlock()
+	if changed {
+		m.sendSlots(r)
+	}
+	return i
 }
 
-// stopRelaying clears the slot map and our slot forwarders.
+func (m *Mesh) sendSlots(r *remote) {
+	m.mu.Lock()
+	slots := slices.Clone(r.txSlots)
+	m.mu.Unlock()
+	m.sig.Signal(r.id, signalMsg{Slots: slots})
+}
+
+// stopRelaying clears our slot maps and forwarders.
 func (m *Mesh) stopRelaying() {
 	m.stopTranscoders()
 	m.mu.Lock()
-	m.slotOf = map[string]int{}
-	m.slots = [numSlots]string{}
-	m.slotsFrom = ""
 	peers := make([]*remote, 0, len(m.peers))
 	for _, r := range m.peers {
+		clear(r.txSlots)
 		peers = append(peers, r)
 	}
 	m.mu.Unlock()
@@ -516,48 +930,117 @@ func (m *Mesh) stopRelaying() {
 		for _, f := range r.slotV {
 			f.reset()
 		}
+		m.sendSlots(r)
 	}
+	m.updateTargets()
 }
 
-// slotOrigin is the origin in a slot: ours as relay, else the relay's map.
-func (m *Mesh) slotOrigin(slot int) string {
+// providerLocked is the peer we take origin o's media from ("" = none):
+// o itself if the plan connects us; else our relay for it (as relay, o's
+// relay over the trunk), if it carries o; else, while a plan change is
+// under way, o itself or whoever still carries it (m.mu held).
+func (m *Mesh) providerLocked(o string) string {
+	if p, ok := m.provider[o]; ok {
+		return p
+	}
+	p := m.findProviderLocked(o)
+	m.provider[o] = p
+	return p
+}
+
+func (m *Mesh) findProviderLocked(o string) string {
+	up := func(id string) bool {
+		r := m.peers[id]
+		return r != nil && r.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
+	}
+	if m.directLocked(o) && up(o) {
+		return o
+	}
+	carries := func(id string) bool {
+		r := m.peers[id]
+		return r != nil && r.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
+			(slices.Contains(r.rxSlots, o) || slices.Contains(r.rxSlots, o+lowSuffix))
+	}
+	home := m.homeLocked(m.me())
+	if m.amRelayLocked() {
+		home = m.homeLocked(o)
+	}
+	if home != "" && home != m.me() && carries(home) {
+		return home
+	}
+	if up(o) {
+		return o
+	}
+	ids := make([]string, 0, len(m.peers))
+	for id := range m.peers {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		if carries(id) {
+			return id
+		}
+	}
+	if m.directLocked(o) && m.peers[o] != nil {
+		return o // connecting
+	}
+	return ""
+}
+
+func (m *Mesh) forgetProviders() {
+	m.mu.Lock()
+	clear(m.provider)
+	m.mu.Unlock()
+}
+
+// relayedOrigin is the origin and source whose media arrives on slot from
+// peer `from`, or "" if we don't take that origin from `from`.
+func (m *Mesh) relayedOrigin(from string, slot int) (string, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.slots[slot]
+	r := m.peers[from]
+	if r == nil || slot >= len(r.rxSlots) {
+		return "", 0
+	}
+	o, src := parseSlotKey(r.rxSlots[slot])
+	if o == "" || o == m.me() || m.providerLocked(o) != from {
+		return "", 0
+	}
+	return o, src
 }
 
-// relayedOrigin (viewer side) is the origin whose media arrives on slot from
-// peer `from`, or "" if we shouldn't play it: from isn't our relay, or we
-// get that origin directly.
-func (m *Mesh) relayedOrigin(from string, slot int) string {
+// ownProvided reports whether we take r's own media from r.
+func (m *Mesh) ownProvided(r *remote) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if from != m.relayLocked() || from == m.me() || m.slotsFrom != from {
-		return ""
-	}
-	o := m.slots[slot]
-	if o == "" || m.directLocked(o) {
-		return ""
-	}
-	return o
+	return m.providerLocked(r.id) == r.id
 }
 
-// gotSlots (viewer side) records the relay's slot map and reports the
-// relayed members as connected.
+// gotSlots records the slot map a relay sends us and reports the relayed
+// members as connected.
 func (m *Mesh) gotSlots(from string, slots []string) {
-	if len(slots) != numSlots {
-		return
-	}
 	m.mu.Lock()
-	if from != m.relayLocked() || from == m.me() {
+	r := m.peers[from]
+	if r == nil || len(slots) != r.nslots {
 		m.mu.Unlock()
 		return
 	}
-	copy(m.slots[:], slots)
-	m.slotsFrom = from
+	copy(r.rxSlots, slots)
+	clear(m.provider)
+	// Everyone we reach through this relay is connected, slot or not:
+	// those without one just aren't sending.
 	var up []string
-	for _, o := range slots {
-		if o != "" && o != m.me() && m.members[o] {
+	if !m.amRelayLocked() && from == m.homeLocked(m.me()) {
+		for o := range m.members {
+			if !m.directLocked(o) {
+				if p := m.providerLocked(o); p == from || p == "" {
+					up = append(up, o)
+				}
+			}
+		}
+	}
+	for _, k := range slots {
+		if o, src := parseSlotKey(k); o != "" && src == srcScreen && o != m.me() && m.members[o] && m.providerLocked(o) == from && !slices.Contains(up, o) {
 			up = append(up, o)
 		}
 	}
@@ -573,7 +1056,7 @@ func (m *Mesh) gotSlots(from string, slots []string) {
 // link's level toward us, capped by what v asked for o; at levelMid the
 // rendition we encode for v, and screen instead of screen-low
 // while o's screen carries LOW anyway.
-func (m *Mesh) slotWant(v, o *remote) int {
+func (m *Mesh) slotWant(v *remote, o *origin) int {
 	v.polMu.Lock()
 	level := viewerLevelLocked(v, o.id)
 	mid, hasMid := v.originMid[o.id]
@@ -585,10 +1068,7 @@ func (m *Mesh) slotWant(v, o *remote) int {
 	case layerHigh:
 		return srcScreen
 	case layerLow:
-		o.srcMu.Lock()
-		quiet := time.Since(o.lowAt) > lowSilence
-		o.srcMu.Unlock()
-		if quiet {
+		if o.lowQuiet() {
 			return srcScreen
 		}
 		return srcLow
@@ -596,83 +1076,117 @@ func (m *Mesh) slotWant(v, o *remote) int {
 	return layerOff
 }
 
-// fanVideo (relay side) forwards one packet of origin o's source src to
-// every other member.
-func (m *Mesh) fanVideo(o *remote, src int, p *rtp.Packet) {
-	m.mu.Lock()
-	slot, ok := m.slotOf[o.id]
-	if !ok || m.relayLocked() != m.me() {
-		m.mu.Unlock()
-		return
+// trunkWant (relay side) is what trunk peer t should get of origin o in
+// its slot for src: screen while it wants HIGH, screen-low while it wants
+// anything (screen instead when o's screen carries LOW anyway).
+func (m *Mesh) trunkWant(t *remote, o *origin, src int) int {
+	t.polMu.Lock()
+	level := viewerLevelLocked(t, o.id)
+	t.polMu.Unlock()
+	if level >= levelOff {
+		return layerOff
 	}
-	viewers := make([]*remote, 0, len(m.peers))
-	for id, r := range m.peers {
-		if id != o.id {
-			viewers = append(viewers, r)
+	quiet := o.lowQuiet()
+	switch {
+	case src == srcScreen && (level <= levelMid || quiet):
+		return srcScreen
+	case src == srcLow && !quiet:
+		return srcLow
+	}
+	return layerOff
+}
+
+// fanTargets are the peers that should get origin o's media from us,
+// which arrived from `from`, or nil if we don't forward.
+func (m *Mesh) fanTargets(o, from string) []*remote {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.forwardingLocked() {
+		return nil
+	}
+	var out []*remote
+	for _, r := range m.peers {
+		if m.targetLocked(r, o, from) {
+			out = append(out, r)
 		}
 	}
-	m.mu.Unlock()
-	needKey := false
-	for _, v := range viewers {
-		f := v.slotV[slot]
+	return out
+}
+
+// isRelay reports whether id relays.
+func (m *Mesh) isRelay(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.isRelayLocked(id)
+}
+
+// fanVideo (relay side) forwards one packet of origin o's source src,
+// which arrived from `from`, to the peers we serve.
+func (m *Mesh) fanVideo(o *origin, from string, src int, p *rtp.Packet) {
+	targets := m.fanTargets(o.id, from)
+	if len(targets) == 0 {
+		return
+	}
+	needKey := [2]bool{}
+	for _, v := range targets {
+		if m.isRelay(v.id) {
+			i := m.slotFor(v, slotKey(o.id, src))
+			if i < 0 {
+				continue
+			}
+			f := v.slotV[i]
+			w := m.trunkWant(v, o, src)
+			f.setWant(w)
+			if f.forward(src, p) && w == src {
+				needKey[src] = true
+			}
+			continue
+		}
+		i := m.slotFor(v, o.id)
+		if i < 0 {
+			continue
+		}
+		f := v.slotV[i]
 		w := m.slotWant(v, o)
 		f.setWant(w)
 		m.noteRelaySending(v, o, w)
-		if f.forward(src, p) {
-			needKey = true
+		if f.forward(src, p) && (w == srcScreen || w == srcLow) {
+			needKey[w] = true
 		}
 	}
-	if !needKey {
-		return
-	}
-	for _, v := range viewers {
-		if w := m.slotWant(v, o); (w == srcScreen || w == srcLow) && v.slotV[slot].current() != w {
-			m.pliTo(o, w)
+	for s, need := range needKey {
+		if need {
+			m.pliTo(o, s)
 		}
 	}
 }
 
-// fanAudio (relay side) forwards one Opus packet of origin o to every other
-// member.
-func (m *Mesh) fanAudio(o *remote, p *rtp.Packet) {
-	m.mu.Lock()
-	slot, ok := m.slotOf[o.id]
-	if !ok || m.relayLocked() != m.me() {
-		m.mu.Unlock()
-		return
-	}
-	viewers := make([]*remote, 0, len(m.peers))
-	for id, r := range m.peers {
-		if id != o.id {
-			viewers = append(viewers, r)
+// fanAudio (relay side) forwards one Opus frame of origin o, which arrived
+// from `from`, to the peers we serve.
+func (m *Mesh) fanAudio(o *origin, from string, f aframe) {
+	for _, v := range m.fanTargets(o.id, from) {
+		if i := m.slotFor(v, o.id); i >= 0 {
+			v.slotA[i].write(f)
 		}
 	}
-	m.mu.Unlock()
-	for _, v := range viewers {
-		v.slotA[slot].WriteRTP(p)
-	}
 }
 
-func (m *Mesh) pliUpstream(origin string, src int) {
-	m.mu.Lock()
-	o := m.peers[origin]
-	m.mu.Unlock()
-	if o != nil {
-		m.pliTo(o, src)
-	}
+func (m *Mesh) pliUpstream(o string, src int) {
+	m.pliTo(m.originOf(o), src)
 }
 
-// pliTo asks origin o for a keyframe on one source, at most every pliInterval.
-func (m *Mesh) pliTo(o *remote, src int) {
-	o.srcMu.Lock()
-	t := o.src[src]
-	if t == nil || time.Since(o.pliAt[src]) < pliInterval {
-		o.srcMu.Unlock()
+// pliTo asks origin o's provider for a keyframe on one source, at most
+// every pliInterval.
+func (m *Mesh) pliTo(o *origin, src int) {
+	o.mu.Lock()
+	t, via := o.src[src], o.via[src]
+	if t == nil || via == nil || time.Since(o.pliAt[src]) < pliInterval {
+		o.mu.Unlock()
 		return
 	}
 	o.pliAt[src] = time.Now()
-	o.srcMu.Unlock()
-	o.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(t.SSRC())}})
+	o.mu.Unlock()
+	via.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(t.SSRC())}})
 }
 
 func lowWant(r *remote) int {
@@ -680,10 +1194,12 @@ func lowWant(r *remote) int {
 	return w
 }
 
-// lowWantLocked (sender side) is what our screen-low should carry toward r: LOW
-// while r is the relay and our screen to it carries HIGH.
+// lowWantLocked (sender side) is what our screen-low should carry toward r:
+// LOW while r forwards our video (our relay, or as relay a trunk peer) and
+// our screen to it carries HIGH (m.mu held).
 func (m *Mesh) lowWantLocked(r *remote) int {
-	if rel := m.relayLocked(); rel == "" || rel == m.me() || r.id != rel {
+	fwd := r.id == m.homeLocked(m.me()) || m.amRelayLocked() && m.isRelayLocked(r.id)
+	if !fwd || r.id == m.me() {
 		return layerOff
 	}
 	if cur, _ := r.fwd.layers(); cur != layerHigh {
@@ -693,8 +1209,8 @@ func (m *Mesh) lowWantLocked(r *remote) int {
 }
 
 // SetMaxLayer tells whoever sends us peerID's video the best layer we want of
-// it (wire values: 0 high, 1 low, 2 none): peerID itself, or the relay. The
-// wish is kept and re-sent when the topology changes.
+// it (wire values: 0 high, 1 low, 2 none): peerID itself, or our relay. The
+// wish is kept and re-sent when the plan changes.
 func (m *Mesh) SetMaxLayer(peerID string, layer int) error {
 	m.mu.Lock()
 	m.caps[peerID] = layer
@@ -704,23 +1220,24 @@ func (m *Mesh) SetMaxLayer(peerID string, layer int) error {
 
 func (m *Mesh) sendCap(peerID string, layer int) error {
 	m.mu.Lock()
-	rel := m.relayLocked()
+	relaying := m.amRelayLocked()
 	direct := m.directLocked(peerID)
+	home := m.homeLocked(m.me())
 	m.mu.Unlock()
 	switch {
-	case rel == m.me():
-		// As relay we pull everyone's full video for the others; our own
-		// "none" is applied locally (deliverVideo).
-		high := wireHigh
-		return m.sig.Signal(peerID, signalMsg{MaxLayer: &high})
+	case relaying:
+		// We pull what anyone we serve wants, our own wish included.
+		m.pushDemand()
+		return nil
 	case direct:
 		return m.sig.Signal(peerID, signalMsg{MaxLayer: &layer})
-	default:
-		return m.sig.Signal(rel, signalMsg{MaxLayer: &layer, Origin: peerID})
+	case home != "":
+		return m.sig.Signal(home, signalMsg{MaxLayer: &layer, Origin: peerID})
 	}
+	return nil
 }
 
-// resendCaps re-sends every kept quality wish along the current topology.
+// resendCaps re-sends every kept quality wish along the current plan.
 func (m *Mesh) resendCaps() {
 	m.mu.Lock()
 	caps := make(map[string]int, len(m.caps))
@@ -735,10 +1252,167 @@ func (m *Mesh) resendCaps() {
 	}
 }
 
-// localCapOff reports whether we asked for no video of id (as relay we still
-// receive it, for the others).
+// ownWishLocked is the level we want of id for ourselves (m.mu held).
+func (m *Mesh) ownWishLocked(id string) int {
+	if m.opt.Headless {
+		return levelOff
+	}
+	if c, ok := m.caps[id]; ok {
+		if l, ok := wireLevel(c); ok {
+			return l
+		}
+	}
+	return levelHigh
+}
+
+// demandKey is one upstream wish of a relay: to's own video (origin "") or
+// an origin to relays to us.
+type demandKey struct{ to, origin string }
+
+// forgetDemand drops what we asked of id (a new connection starts afresh).
+func (m *Mesh) forgetDemand(id string) {
+	m.mu.Lock()
+	for k := range m.demand {
+		if k.to == id {
+			delete(m.demand, k)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func levelWire(l int) int {
+	switch {
+	case l <= levelMid:
+		return wireHigh
+	case l >= levelOff:
+		return wireOff
+	}
+	return wireLow
+}
+
+// pushDemand (relay) asks each origin's provider for the best layer anyone
+// we serve wants of it, ourselves included: an origin nobody watches sends
+// us nothing. It sends only what changed.
+func (m *Mesh) pushDemand() {
+	type up = demandKey
+	m.mu.Lock()
+	if !m.forwardingLocked() {
+		// Back to asking for ourselves: undo what we asked as relay.
+		var undo []string
+		for k := range m.demand {
+			if k.origin == "" && m.peers[k.to] != nil {
+				undo = append(undo, k.to)
+			}
+		}
+		clear(m.demand)
+		m.mu.Unlock()
+		for _, id := range undo {
+			m.mu.Lock()
+			w := levelWire(m.ownWishLocked(id))
+			direct := m.directLocked(id)
+			m.mu.Unlock()
+			if direct {
+				m.sig.Signal(id, signalMsg{MaxLayer: &w})
+			}
+		}
+		return
+	}
+	type need struct {
+		from    string
+		own     int
+		targets []*remote
+	}
+	needs := map[string]*need{}
+	for id := range m.members {
+		from := id
+		if !m.directLocked(id) {
+			if !m.amRelayLocked() || m.homeLocked(id) == "" || m.homeLocked(id) == m.me() {
+				continue
+			}
+			from = m.homeLocked(id) // over the trunk
+		}
+		n := &need{from: from, own: m.ownWishLocked(id)}
+		for _, r := range m.peers {
+			if m.targetLocked(r, id, from) {
+				n.targets = append(n.targets, r)
+			}
+		}
+		needs[id] = n
+	}
+	m.mu.Unlock()
+	want := map[up]int{}
+	for id, n := range needs {
+		best := n.own
+		for _, r := range n.targets {
+			r.polMu.Lock()
+			c, ok := r.originCap[id]
+			r.polMu.Unlock()
+			if !ok {
+				c = levelHigh
+			}
+			best = min(best, c)
+		}
+		k := up{to: n.from}
+		if n.from != id {
+			k.origin = id
+		}
+		want[k] = levelWire(best)
+	}
+	m.mu.Lock()
+	var send []up
+	for k, w := range want {
+		if old, ok := m.demand[k]; !ok || old != w {
+			send = append(send, k)
+		}
+	}
+	m.demand = want
+	m.mu.Unlock()
+	for _, k := range send {
+		w := want[k]
+		m.sig.Signal(k.to, signalMsg{MaxLayer: &w, Origin: k.origin})
+	}
+}
+
+// localCapOff reports whether we don't play id's video: we asked for none
+// (as relay we still receive it, for the others), or we never play.
 func (m *Mesh) localCapOff(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.caps[id] == wireOff && m.relayLocked() == m.me()
+	return m.opt.Headless || m.caps[id] == wireOff && m.forwardingLocked()
+}
+
+// pacedWriter is how slot of r writes its packets (nil = straight out).
+func (m *Mesh) pacedWriter(r *remote, slot int) func(int, *rtp.Packet) {
+	if m.pacer == nil {
+		return nil
+	}
+	t := r.slotV[slot].track
+	return func(src int, p *rtp.Packet) {
+		class := classHigh
+		if src == srcLow {
+			class = classLow
+		}
+		m.pacer.send(class, t, p)
+	}
+}
+
+// Members returns the other members now in the room.
+func (m *Mesh) Members() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.members))
+	for id := range m.members {
+		out = append(out, id)
+	}
+	return out
+}
+
+// SlotCount is the slot count of our connection to id (tests).
+func (m *Mesh) SlotCount(id string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r := m.peers[id]; r != nil {
+		return r.nslots
+	}
+	return 0
 }

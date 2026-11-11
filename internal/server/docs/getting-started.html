@@ -1,0 +1,53 @@
+{{define "title"}}Getting started{{end}}
+{{define "description"}}Install Bellion Share on Windows or Linux, go live with one click, send the share link to friends, and watch someone else's screen.{{end}}
+{{define "body"}}
+<h1>Getting started</h1>
+<p class="lead">No account needed: install the app, press Go live, and send the link.</p>
+
+<h2>1. Install</h2>
+<ul>
+  <li><strong>Windows 10 or 11 (64-bit):</strong> <a href="/">download the zip</a>, unzip it anywhere (for example in your Documents), and run <code>blite-guard.exe</code> in the unzipped <code>blite</code> folder. It starts Bellion Share and keeps crash reports if something goes wrong.</li>
+  <li><strong>Linux (Ubuntu 24.04, Mint 22 or newer, 64-bit):</strong> <a href="/">download the .deb</a>, open a terminal in its folder and run <code>sudo apt install ./blite_*.deb</code>, then start Bellion Share from your app menu. Bellion Share needs an X11 session; Wayland sessions aren't supported yet.</li>
+</ul>
+<p>Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
+<p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Help &gt; Start Bellion Share when I sign in</em> starts it in the tray at sign-in.</p>
+
+<h2>2. Pick your name</h2>
+<p>The top of the window shows who you are, for example <strong>Alice#4417</strong>. Press <em>Change name...</em> to set the name others see. The 4-digit tag after it comes from your identity key, a key the app creates on your computer, so two people can't pass as each other by picking the same name.</p>
+
+<figure>
+  <a href="/static/shots/lobby.webp"><img src="/static/shots/lobby.webp" width="1000" height="360" alt="The Bellion Share window before a call: Share your screen with a Go live button and Options (Require a password, Encrypt end to end), and Watch someone with a box to paste a share link" loading="lazy"></a>
+  <figcaption>Before a call: share your screen on the left, watch someone on the right.</figcaption>
+</figure>
+
+<h2>3. Share your screen</h2>
+<ol>
+  <li>Press <strong>Go live</strong>. Bellion Share starts a session, shares your main monitor (the one with the taskbar or panel) and copies the share link to your clipboard.</li>
+  <li>Paste the link to your friends, for example in a Discord chat.</li>
+</ol>
+<p>To share something else, press <em>Share a window instead...</em> and pick a monitor or a window. During the call the <em>Share</em> menu also offers a single monitor, a window, or all your screens combined, plus the resolution, frame rate and audio (see <a href="/docs/features">Features</a>).</p>
+<p>Under <em>Options</em>:</p>
+<ul>
+  <li><strong>Require a password</strong>: the session gets a password you choose. Without one, the session is open to anyone who has the link. Either way the link carries everything needed to join, so only send it to people you want in.</li>
+  <li><strong>Encrypt end to end</strong> (on by default): each sender encrypts its video and audio with keys that only people in the room get, so a TURN server passing them on can't read them. Everyone in the room needs build 72 or newer.</li>
+</ul>
+<p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>.</p>
+
+<h2>4. Watch someone</h2>
+<p>Click the share link someone sent you. Your browser opens a page that hands the link to Bellion Share (on its first use it may ask whether to open the app). If nothing opens, make sure Bellion Share is installed and running, then click the link again.</p>
+<p>You can also paste the link into <em>Watch someone</em> and press <strong>Watch</strong>. When you switch to Bellion Share with a share link on your clipboard, it offers a one-click button to watch that session.</p>
+<p>You join watching only. To share your own screen too, press <strong>Go live</strong> in the call: everyone in a room can share at the same time.</p>
+
+<h2>5. In the call</h2>
+<figure>
+  <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1280" height="600" alt="A call with three other people: Bob and Carol connected with Fair connections, Dave unable to connect, with a hint that his network may block UDP" loading="lazy"></a>
+  <figcaption>The call window. Each person's row shows their status, what you send them, the connection quality, and their video and volume settings.</figcaption>
+</figure>
+<ul>
+  <li><strong>Go live / Stop sharing</strong> starts or stops your share; <em>Share a window...</em> (or <em>Share something else...</em>) picks what you share.</li>
+  <li><strong>Copy share link</strong> copies the link again to invite more people.</li>
+  <li>The <strong>safety code</strong> is the same for everyone when nobody is intercepting the connection. Read it aloud once to check (<em>Room &gt; Safety code...</em>).</li>
+  <li>Other people's screens open in their own windows, or all together in one window: see <a href="/docs/features#watching">Watching</a>.</li>
+  <li><strong>Leave</strong> ends your part in the call. You can rejoin with the link while the session is open; a session ends shortly after the last person leaves.</li>
+</ul>
+{{end}}

@@ -31,7 +31,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -H windowsgui" -o "$out/blite/b
 
 plugins="coreelements app videoconvertscale videorate videotestsrc audiotestsrc audioconvert
 audioresample audiomixer opus x264 openh264 videoparsersbad d3d11 nvcodec qsv amfcodec
-mediafoundation wasapi2 playback typefindfunctions autodetect libav volume pango inter compositor"
+mediafoundation wasapi2 playback typefindfunctions autodetect libav volume pango inter compositor videobox"
 for p in $plugins; do cp "$gst/lib/gstreamer-1.0/gst$p.dll" "$out/blite/lib/gstreamer-1.0/"; done
 
 # Copy every DLL the exe and plugins import (transitively) from the runtime bin.
@@ -50,13 +50,13 @@ while [ ${#queue[@]} -gt 0 ]; do
 done
 
 cat > "$out/blite/README.txt" <<TXT
-Blite $APP_VERSION ($BUILD) (Windows, POC)
+Bellion Share $APP_VERSION ($BUILD) (Windows, POC)
 
-Run blite-guard.exe. A tray icon appears and Blite opens in your browser.
-To have Blite start when you sign in, tick "Start Blite when I sign in" in its window.
-Share links open in Blite once it has run once.
+Run blite-guard.exe. Bellion Share opens its window and adds a tray icon.
+To have Bellion Share start when you sign in, tick "Start Bellion Share when I sign in" in its window.
+Share links open in Bellion Share once it has run once.
 Per-app audio needs Windows 11 (or Windows 10 build 20348+).
-Updates: Blite checks the ${BLITE_DEFAULT_CHANNEL:-beta} channel and offers new builds in its window.
+Updates: Bellion Share checks the ${BLITE_DEFAULT_CHANNEL:-beta} channel and offers new builds in its window.
 Logs: %LOCALAPPDATA%\\Blite\\logs. Crash dumps: %LOCALAPPDATA%\\Blite\\crash.
 TXT
 (cd "$out" && rm -f blite-windows.zip && python3 -I -m zipfile -c blite-windows.zip blite)

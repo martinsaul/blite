@@ -1,10 +1,12 @@
-# Blite
+# Bellion Share
+
+Formerly Blite. The code, binaries and packages still use the `blite` name.
 
 Peer-to-peer group screen sharing for Windows and Linux. Everyone in a room
 can share a screen, a window and app audio at the same time; the server only
 introduces peers and never carries media.
 
-![A call: the Blite window and two remote screens in one grid window](docs/screenshots/call.png)
+![A call: the Bellion Share window and two remote screens in one grid window](docs/screenshots/call.png)
 
 More screenshots: [start screen](docs/screenshots/start.png),
 [people and relay controls](docs/screenshots/people.png).
@@ -13,8 +15,11 @@ More screenshots: [start screen](docs/screenshots/start.png),
 
 **Rooms**
 - Start a session and send the link, or join one by link: rooms are a code
-  plus a password, and `blite://` links open the app directly.
-- Up to 5 participants per room. A hosted relay (below) takes one of the 5 seats.
+  plus a password, and `bshare://` links open the app directly (older `blite://`
+  links still work).
+- No fixed room size. Above 5 people a full mesh strains most home uplinks
+  (every sharer uploads once per viewer), and Bellion Share warns about it; with
+  relays, rooms grow past that. Server operators can cap room size.
 - Each person has an identity key; names show with a 4-digit tag derived
   from it, so two people can't pass as each other.
 - A safety code everyone can read aloud to confirm nobody is intercepting
@@ -24,9 +29,9 @@ More screenshots: [start screen](docs/screenshots/start.png),
 
 **Sharing**
 - Share an entire screen, one monitor or one window, at 720p, 1080p or 4K.
-  Blite steps the resolution down when the encoder can't keep up.
+  Bellion Share steps the resolution down when the encoder can't keep up.
 - Share audio from all apps or only selected ones (PipeWire on Linux,
-  per-process loopback on Windows); Blite never echoes the call back.
+  per-process loopback on Windows); Bellion Share never echoes the call back.
 - Hardware H.264 encoding when available (NVENC, Quick Sync, AMF, VA-API,
   Media Foundation), x264 otherwise.
 
@@ -42,18 +47,23 @@ More screenshots: [start screen](docs/screenshots/start.png),
 
 **Topologies**
 - Full mesh by default: everyone sends directly to everyone.
-- Relay mode: a member with a fast upload volunteers, and the others send
-  their video only to them. Volunteers queue up; if the relay leaves, the
-  next one takes over without dropping the call, or the room goes back to
-  full mesh.
+- Relays: members with a fast upload volunteer, and the others send their
+  video only to a relay, which forwards it. The server picks as many
+  volunteers as the room needs (up to 4) by their upload, and homes each
+  member on one of them; relays forward to each other, so any stream
+  crosses at most two. Relays pull only what someone watches, and up to 8
+  people can share at once in any room size. When a relay leaves, its
+  members move to another one without dropping the call, or the room goes
+  back to full mesh.
 - Hosted relay: `blite -host rooms.json` runs headless on a server, keeps
-  fixed rooms open around the clock and relays them.
+  fixed rooms open around the clock and relays them; it is one more relay
+  volunteer, usually the biggest.
 - STUN by default; TURN (coturn) for peers behind strict NAT.
 
 **App**
 - Tray app with a local web UI; optional start at sign-in.
 - Logs panel, and optional log reports to your server.
-- On Windows, a crash guard runs Blite and keeps crash dumps.
+- On Windows, a crash guard runs Bellion Share and keeps crash dumps.
 - Optional signed self-update with automatic rollback.
 
 **Platforms:** Windows, and Linux on X11 (Wayland sessions aren't supported
@@ -85,7 +95,7 @@ image: `docker build -f Dockerfile.signal -t blite-signal .`
 
 Copyright (C) 2026 Martin Saul
 
-Blite is free software: you can redistribute it and/or modify it under the
+Bellion Share is free software: you can redistribute it and/or modify it under the
 terms of the GNU Affero General Public License as published by the Free
 Software Foundation, either version 3 of the License, or (at your option) any
 later version. See [LICENSE](LICENSE).

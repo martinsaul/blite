@@ -5,10 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
-// Register installs a per-user .desktop entry for blite:// and makes it the
-// default handler (xdg-mime). exe is the absolute path of the blite binary.
+// Register installs a per-user .desktop entry for our schemes and makes it
+// the default handler (xdg-mime). exe is the absolute path of the blite binary.
 func Register(exe string) error {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
@@ -24,19 +25,29 @@ func Register(exe string) error {
 	}
 	desktop := fmt.Sprintf(`[Desktop Entry]
 Type=Application
-Name=Blite
+Name=Bellion Share
 Comment=Peer-to-peer screen sharing
 Exec="%s" %%u
 Terminal=false
 Categories=Network;
-MimeType=x-scheme-handler/%s;
-`, exe, Scheme)
+MimeType=%s
+`, exe, mimeTypes())
 	if err := os.WriteFile(filepath.Join(dir, "blite.desktop"), []byte(desktop), 0o644); err != nil {
 		return err
 	}
-	if out, err := exec.Command("xdg-mime", "default", "blite.desktop", "x-scheme-handler/"+Scheme).CombinedOutput(); err != nil {
-		return fmt.Errorf("xdg-mime: %v: %s", err, out)
+	for _, sch := range Schemes {
+		if out, err := exec.Command("xdg-mime", "default", "blite.desktop", "x-scheme-handler/"+sch).CombinedOutput(); err != nil {
+			return fmt.Errorf("xdg-mime: %v: %s", err, out)
+		}
 	}
 	exec.Command("update-desktop-database", dir).Run() // best effort
 	return nil
+}
+
+func mimeTypes() string {
+	var b strings.Builder
+	for _, s := range Schemes {
+		b.WriteString("x-scheme-handler/" + s + ";")
+	}
+	return b.String()
 }

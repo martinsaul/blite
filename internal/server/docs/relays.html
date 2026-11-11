@@ -1,0 +1,34 @@
+{{define "title"}}Relays{{end}}
+{{define "description"}}How Bellion Share rooms grow past a full mesh: members with a fast upload volunteer as relays that forward everyone's video. How relays are picked, and how to volunteer.{{end}}
+{{define "body"}}
+<h1>Relays</h1>
+<p class="lead">Relays let rooms grow beyond what a full mesh can carry, without a streaming server in the middle.</p>
+
+<h2>Full mesh: the default</h2>
+<p>In a new room everyone sends their video directly to everyone else. That gives the lowest delay, but every sharer uploads their screen once per viewer: in a room of 6, each sharer uploads it 5 times. Most home connections can't keep that up at good quality, so above about 5 people Bellion Share shows a warning suggesting a relay.</p>
+
+<h2>Relay mode</h2>
+<p>Members with a fast upload can <strong>volunteer as relays</strong>. The others then send their video only to their relay, once, and the relay forwards it to everyone who watches it.</p>
+<ul>
+  <li><strong>Several relays.</strong> The server picks as many volunteers as the room needs, up to 4, preferring the ones with the most upload. Each member is homed on one relay. Relays forward to each other, so any stream crosses at most two relays on its way.</li>
+  <li><strong>Capacity.</strong> A relay serves between 2 and 16 members, depending on its measured upload (each member costs it roughly 4.5 Mbit/s); a relay whose upload isn't known yet serves 4. Volunteers the room doesn't need yet stand by.</li>
+  <li><strong>Only what's watched.</strong> Relays pull only the streams someone is watching, and up to 8 people can share at once in any room size.</li>
+  <li><strong>Adapts to viewers.</strong> A relay can make smaller versions (1080p, 720p) of a stream for viewers whose connection or computer can't take the top size.</li>
+  <li><strong>Leaving is fine.</strong> When a relay leaves, its members move to another relay without dropping the call; if there's no other volunteer, the room goes back to full mesh.</li>
+  <li><strong>Encryption still applies.</strong> With end-to-end encryption on, media stays encrypted with the room members' keys.</li>
+</ul>
+
+<h2>How to volunteer</h2>
+<ol>
+  <li>In a call, open the <em>People</em> menu.</li>
+  <li>Choose <strong>Volunteer as relay</strong>.</li>
+</ol>
+<p>The line under the People table then shows the relays and how many people each one serves, for example <em>Relays: You relay for 4</em>, or <em>standing by</em> if the room doesn't need you yet. Choose <em>Stop relaying</em> (or <em>Leave the relay queue</em>) in the same menu to stop.</p>
+<div class="note">
+  <p>Volunteer when you have a fast, stable upload (a wired connection helps) and a computer that isn't busy with a demanding game. A volunteer that others can only reach through a TURN server is never picked as a relay.</p>
+</div>
+<p>Relay mode needs everyone in the room on build 31 or newer. If someone runs a build that only knows one relay, the room uses a single relay and pauses relay mode above 5 people until they update.</p>
+
+<h2>Hosted relay</h2>
+<p>A server can also run Bellion Share without a window as a <strong>hosted relay</strong>: it keeps fixed rooms open around the clock and volunteers as their relay, usually the biggest one, so the room doesn't depend on a member's machine. Member volunteers can relay alongside it when the room outgrows it. See <a href="/docs/self-hosting#hosted-relay">Self-hosting</a> to run one.</p>
+{{end}}

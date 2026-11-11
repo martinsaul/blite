@@ -34,6 +34,9 @@ const (
 
 // Config controls a Server.
 type Config struct {
+	// SiteAliases are other host names of this server whose web pages
+	// redirect to the canonical site (lower case).
+	SiteAliases []string
 	ResumeGrace time.Duration
 	// TrustProxy makes the server take the client IP from CF-Connecting-IP /
 	// X-Forwarded-For. Only enable it behind a reverse proxy that sets them.
@@ -44,15 +47,26 @@ type Config struct {
 	// change; it locks out everyone below it. For anything else bump
 	// MinRecommendedBuild: those clients still get in, with an update nudge.
 	// 0 = accept any.
-	MinCompatibleBuild  int
+	MinCompatibleBuild int
+	// MaxPeers caps room size (0 = no cap).
+	MaxPeers            int
 	MinRecommendedBuild int
 	// HostKey lets a hosted relay create rooms with a fixed code
 	// (proto.Create.Room). Empty = nobody can.
 	HostKey string
+	// DiscordClientID and DiscordSecret: the Discord app whose OAuth codes
+	// POST /v1/discord/token exchanges for clients, so the secret never
+	// ships in the app. Empty = the endpoint is off.
+	DiscordClientID string
+	DiscordSecret   string
 	// ReportDir stores client log reports (POST /v1/report). Empty = the
 	// endpoint is off.
 	ReportDir string
-	Log       *slog.Logger
+	// UpdateURL and UpdateChannel: where the download page finds the latest
+	// builds (molt). Empty UpdateURL = no download page.
+	UpdateURL     string
+	UpdateChannel string
+	Log           *slog.Logger
 }
 
 // Server serves Blite signaling.
@@ -63,7 +77,9 @@ type Server struct {
 	failRoom *ratelimit.Window
 	createIP *ratelimit.Window
 	reportIP *ratelimit.Window
+	lookIP   *ratelimit.Window
 	mux      *http.ServeMux
+	releases *releases // the download page (nil = off)
 }
 
 // New returns a Server. Call Run to start background sweeps.
@@ -84,8 +100,10 @@ func New(cfg Config) *Server {
 		failRoom: ratelimit.New(20, 10*time.Minute),
 		createIP: ratelimit.New(10, 10*time.Minute),
 		reportIP: ratelimit.New(20, time.Hour),
+		lookIP:   ratelimit.New(120, time.Minute),
 		mux:      http.NewServeMux(),
 	}
+	s.rooms.MaxPeers = cfg.MaxPeers
 	s.mux.HandleFunc("GET /ws", s.handleWS)
 	s.mux.HandleFunc("GET /j/{code}", s.handleJoinPage)
 	s.mux.HandleFunc("GET /static/join.js", func(w http.ResponseWriter, _ *http.Request) {
@@ -95,6 +113,33 @@ func New(cfg Config) *Server {
 	})
 	if cfg.ReportDir != "" {
 		s.mux.HandleFunc("POST /v1/report", s.handleReport)
+	}
+	s.mux.HandleFunc("GET /v1/channel/{id}", s.handleChannel)
+	if cfg.DiscordClientID != "" && cfg.DiscordSecret != "" {
+		s.mux.HandleFunc("POST /v1/discord/token", s.handleDiscordToken)
+	}
+	s.mux.HandleFunc("GET /terms", s.canonicalHost(staticPage(termsHTML)))
+	s.mux.HandleFunc("GET /privacy", s.canonicalHost(staticPage(privacyHTML)))
+	s.mux.HandleFunc("GET /robots.txt", textFile(robotsTxt, "text/plain; charset=utf-8"))
+	s.mux.HandleFunc("GET /sitemap.xml", textFile(sitemapXML, "application/xml"))
+	s.mux.HandleFunc("GET /favicon.ico", siteFile("favicon.ico", "image/x-icon"))
+	s.mux.HandleFunc("GET /apple-touch-icon.png", siteFile("apple-touch-icon.png", "image/png"))
+	s.mux.HandleFunc("GET /static/icon-512.png", siteFile("icon-512.png", "image/png"))
+	s.mux.HandleFunc("GET /static/og.jpg", siteFile("og.jpg", "image/jpeg"))
+	for _, n := range siteShots {
+		s.mux.HandleFunc("GET /static/shots/"+n, siteFile("shots/"+n, "image/webp"))
+	}
+	for _, p := range docPages {
+		s.mux.HandleFunc("GET "+p.Path, s.canonicalHost(staticPage(docsHTML[p.Path])))
+	}
+	s.mux.HandleFunc("GET /docs/{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs", http.StatusMovedPermanently)
+	})
+	if cfg.UpdateURL != "" {
+		s.releases = &releases{base: cfg.UpdateURL, channel: cfg.UpdateChannel}
+		s.mux.HandleFunc("GET /{$}", s.canonicalHost(s.handleDownloadPage))
+		s.mux.HandleFunc("GET /download", s.canonicalHost(s.handleDownloadPage))
+		s.mux.HandleFunc("GET /download/{platform}", s.handleDownload)
 	}
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	return s
@@ -248,12 +293,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ip := s.clientIP(r)
 	var seat room.Seat
-	left := false
+	left, updating := false, false
 	lim := rate.NewLimiter(50, 100)
 
 	defer func() {
 		if seat.PeerID != "" {
-			if left {
+			if updating {
+				s.rooms.LeaveForUpdate(seat.Room, seat.PeerID)
+			} else if left {
 				s.rooms.Leave(seat.Room, seat.PeerID)
 			} else {
 				s.rooms.Disconnected(seat.Room, seat.PeerID, c)
@@ -300,6 +347,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := s.rooms.Volunteer(seat.Room, seat.PeerID, m.On); err != nil {
 				c.Send(proto.Error{T: proto.TError, Code: err.Error()})
 			}
+		case proto.TCaps:
+			var m proto.Caps
+			if json.Unmarshal(data, &m) != nil {
+				c.Send(proto.Error{T: proto.TError, Code: proto.ErrBadRequest})
+				continue
+			}
+			if err := s.rooms.SetCaps(seat.Room, seat.PeerID, m); err != nil {
+				c.Send(proto.Error{T: proto.TError, Code: err.Error()})
+			}
 		case proto.TRename:
 			var m proto.Rename
 			if json.Unmarshal(data, &m) != nil {
@@ -330,7 +386,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				s.cfg.Log.Info("kicked", "ban", m.Ban)
 			}
 		case proto.TLeave:
-			left = true
+			var m proto.Leave
+			json.Unmarshal(data, &m)
+			left, updating = true, m.Reason == proto.LeaveUpdate
 			return
 		default:
 			c.Send(proto.Error{T: proto.TError, Code: proto.ErrBadRequest})
@@ -378,14 +436,24 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 		}
 		s.createIP.Add(ip)
 		if m.Room == "" {
-			seat, err = s.rooms.Create(m.Password, m.Name, m.IDKey, cm.Label(), build(cm), c)
+			if m.Channel != "" {
+				if _, busy := s.rooms.Channel(m.Channel); busy {
+					return fail(proto.ErrChannelBusy)
+				}
+			}
+			seat, err = s.rooms.Create(m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, c)
+			if err == nil && m.Channel != "" {
+				if terr := s.rooms.TieChannel(seat.Room, m.Channel); terr != nil {
+					s.cfg.Log.Warn("tie channel", "room", seat.Room, "err", terr)
+				}
+			}
 			break
 		}
 		if s.cfg.HostKey == "" || subtle.ConstantTimeCompare([]byte(m.HostKey), []byte(s.cfg.HostKey)) != 1 {
 			s.failIP.Add(ip)
 			return fail(proto.ErrBadRequest)
 		}
-		seat, err = s.rooms.CreateFixed(room.NormalizeCode(m.Room), m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.Owners, c)
+		seat, err = s.rooms.CreateFixed(room.NormalizeCode(m.Room), m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, m.Owners, c)
 	case proto.TJoin:
 		var m proto.Join
 		if json.Unmarshal(data, &m) != nil {
@@ -427,10 +495,13 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 	c.Send(proto.Welcome{
 		T: proto.TWelcome, V: proto.Version,
 		Room: seat.Room, PeerID: seat.PeerID, Resume: seat.Resume,
-		ICEServers: s.cfg.ICE.ICEServers(seat.PeerID),
-		Peers:      seat.Others,
-		RelayQueue: seat.RelayQueue,
-		Owner:      seat.Owner,
+		ICEServers:  s.cfg.ICE.ICEServers(seat.PeerID),
+		Peers:       seat.Others,
+		RelayQueue:  seat.RelayQueue,
+		RelayPaused: seat.RelayPaused, RelayWaiting: seat.RelayWaiting,
+		Owner: seat.Owner,
+		Plan:  seat.Plan,
+		E2EE:  seat.E2EE,
 		// Resume carries no ClientMeta; the nudge was given on create/join.
 		UpdateRecommended: t != proto.TResume && build(cm) < s.cfg.MinRecommendedBuild,
 	})

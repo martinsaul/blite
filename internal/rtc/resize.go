@@ -81,9 +81,6 @@ type rendState struct {
 	originMid    map[string]int
 	originMidCap map[string]bool
 	originSent   map[string]sendingMsg
-	// Relay side, as an origin: what it says it sends us.
-	heardMu sync.Mutex
-	heard   sendingMsg
 }
 
 // renditions is a Mesh's rendition state.
@@ -98,9 +95,10 @@ type renditions struct {
 	viewMu sync.Mutex
 	view   map[string]*viewState // viewer: per origin
 
-	txKbps  atomic.Int32
-	txAt    time.Time
-	txBytes uint64
+	txKbps   atomic.Int32
+	peakKbps atomic.Int32 // highest txKbps seen (passive upload estimate)
+	txAt     time.Time
+	txBytes  uint64
 }
 
 type originTrans struct {
@@ -153,9 +151,13 @@ func (m *Mesh) peerList() []*remote {
 }
 
 // applyCap sets r's policy cap from its MaxLayer and rendition cap, and
-// moves it if the cap requires (polMu held).
+// moves it if the cap requires (polMu held). A peer we forward to caps only
+// our own video with MaxLayer (setLevel), not what we forward it.
 func (m *Mesh) applyCap(r *remote) {
 	capLevel := r.wireCap
+	if r.fanTarget {
+		capLevel = levelHigh
+	}
 	if r.midCap && r.mid >= 0 && capLevel < levelMid {
 		capLevel = levelMid
 	}
@@ -171,6 +173,8 @@ func (m *Mesh) applyCap(r *remote) {
 		m.setLevel(r, levelLow) // lifting "none": resume on LOW, probe up as usual
 	case cur == levelMid && !r.policy.hasMid:
 		m.setLevel(r, levelLow) // its rendition is gone
+	case r.fanTarget:
+		m.setLevel(r, cur) // its cap on our own video may have changed
 	}
 }
 
@@ -191,8 +195,9 @@ func (m *Mesh) noteSending(r *remote) {
 	top := int(m.rend.top.Load())
 	var msg sendingMsg
 	if top > 0 {
-		level := int(r.level.Load())
-		msg = sendingMsg{Height: layerHeight(levelLayer(level, r.mid), top), Top: top, Congested: level > r.policy.maxLevel}
+		link := int(r.level.Load())
+		level := max(link, r.wireCap)
+		msg = sendingMsg{Height: layerHeight(levelLayer(level, r.mid), top), Top: top, Congested: link > max(r.policy.maxLevel, r.wireCap)}
 	}
 	if msg == r.sent {
 		return
@@ -272,16 +277,13 @@ func (m *Mesh) ownResizeLocked(r *remote, q resizeMsg) int {
 // q.Origin; 0 = refused.
 func (m *Mesh) relayResizeLocked(v *remote, q resizeMsg) int {
 	m.mu.Lock()
-	o := m.peers[q.Origin]
-	_, slotted := m.slotOf[q.Origin]
-	relaying := m.relayLocked() == m.me()
+	o := m.origins[q.Origin]
+	ok := m.forwardingLocked() && o != nil && m.members[q.Origin] && slices.Contains(v.txSlots, q.Origin)
 	m.mu.Unlock()
-	if !relaying || o == nil || !slotted || m.opt.NewTranscoder == nil {
+	if !ok || m.opt.NewTranscoder == nil {
 		return 0
 	}
-	o.heardMu.Lock()
-	top := o.heard.Top
-	o.heardMu.Unlock()
+	top := o.heardMsg().Top
 	h := rendFor(top, q.MaxHeight)
 	if h == 0 {
 		return 0
@@ -391,22 +393,23 @@ func (m *Mesh) fanRendition(origin string, ot *originTrans, layer int, au []byte
 	if layer < 0 || layer >= numLayers {
 		return
 	}
-	pkts := ot.pkz[layer].packetize(au, d)
+	pkts := ot.pkz[layer].packetize(m.encVideo(au), d)
 	m.mu.Lock()
-	slot, ok := m.slotOf[origin]
-	o := m.peers[origin]
-	viewers := make([]*remote, 0, len(m.peers))
-	for id, r := range m.peers {
-		if id != origin {
-			viewers = append(viewers, r)
-		}
-	}
+	o := m.origins[origin]
+	from := m.providerLocked(origin)
 	m.mu.Unlock()
-	if !ok || o == nil {
+	if o == nil {
 		return
 	}
 	needKey := false
-	for _, v := range viewers {
+	for _, v := range m.fanTargets(origin, from) {
+		if m.isRelay(v.id) {
+			continue // trunks carry the origin's own layers
+		}
+		slot := m.slotFor(v, origin)
+		if slot < 0 {
+			continue
+		}
 		f := v.slotV[slot]
 		w := m.slotWant(v, o)
 		f.setWant(w)
@@ -502,10 +505,8 @@ func viewerCapLocked(v *remote, o string) int {
 
 // noteRelaySending (relay) tells viewer v what it gets of origin o now, if
 // that changed; w is its slot's wanted source.
-func (m *Mesh) noteRelaySending(v, o *remote, w int) {
-	o.heardMu.Lock()
-	heard := o.heard
-	o.heardMu.Unlock()
+func (m *Mesh) noteRelaySending(v *remote, o *origin, w int) {
+	heard := o.heardMsg()
 	var msg sendingMsg
 	if heard.Top > 0 {
 		h := 0
@@ -541,26 +542,24 @@ func (m *Mesh) gotSending(from string, q sendingMsg) {
 		origin = from
 	}
 	m.mu.Lock()
-	rel := m.relayLocked()
-	ownLink := origin == from && m.directLocked(from)
-	viaRelay := from == rel && rel != m.me() && origin != from && !m.directLocked(origin)
-	r := m.peers[from]
-	relaying := rel == m.me()
+	provided := origin != m.me() && m.providerLocked(origin) == from
+	o := m.originLocked(origin)
 	m.mu.Unlock()
-	if !ownLink && !viaRelay {
+	if !provided {
 		return
 	}
-	if ownLink && r != nil {
-		r.heardMu.Lock()
-		r.heard = q
-		r.heardMu.Unlock()
-		if relaying && q.Top == 0 {
-			// It stopped sharing: no packets will come to say so.
-			for _, v := range m.peerList() {
-				if v.id != from {
-					m.noteRelaySending(v, r, layerOff)
-				}
-			}
+	o.mu.Lock()
+	o.heard = q
+	o.mu.Unlock()
+	// As relay, pass it on over trunks; and if it stopped sharing, tell
+	// those we serve (no packets will come to say so).
+	for _, v := range m.fanTargets(origin, from) {
+		if m.isRelay(v.id) {
+			msg := q
+			msg.Origin = origin
+			go m.sig.Signal(v.id, signalMsg{Sending: &msg})
+		} else if q.Top == 0 {
+			m.noteRelaySending(v, o, layerOff)
 		}
 	}
 	now := time.Now()
@@ -655,7 +654,10 @@ func (m *Mesh) ForgetAsk(origin string) {
 // rendTick runs every second: viewer triggers, idle renditions, upload rate.
 func (m *Mesh) rendTick() {
 	now := time.Now()
-	if m.relay() != m.me() { // the relay is the hub, it doesn't ask
+	m.mu.Lock()
+	relaying := m.forwardingLocked()
+	m.mu.Unlock()
+	if !relaying { // a relay is a hub, it doesn't ask
 		m.rend.viewMu.Lock()
 		for origin, vs := range m.rend.view {
 			if vs.lowSince.IsZero() || now.Sub(vs.lowSince) < lowTrigger || vs.top <= 720 {
@@ -678,13 +680,17 @@ func (m *Mesh) rendTick() {
 		m.dropIdleLocked(now)
 		m.rend.mu.Unlock()
 	}
-	if m.opt.UploadKbps > 0 && now.Sub(m.rend.txAt) >= 5*time.Second {
+	if now.Sub(m.rend.txAt) >= 5*time.Second {
 		var tx uint64
 		for _, ps := range m.Stats() {
 			tx += ps.TxBytes
 		}
 		if !m.rend.txAt.IsZero() && tx >= m.rend.txBytes {
-			m.rend.txKbps.Store(int32(float64(tx-m.rend.txBytes) * 8 / 1000 / now.Sub(m.rend.txAt).Seconds()))
+			kbps := int32(float64(tx-m.rend.txBytes) * 8 / 1000 / now.Sub(m.rend.txAt).Seconds())
+			m.rend.txKbps.Store(kbps)
+			if kbps > m.rend.peakKbps.Load() {
+				m.rend.peakKbps.Store(kbps)
+			}
 		}
 		m.rend.txAt, m.rend.txBytes = now, tx
 	}
@@ -741,14 +747,19 @@ func (m *Mesh) dropIdleLocked(now time.Time) {
 	m.rend.trMu.Unlock()
 	for origin, ot := range origins {
 		m.mu.Lock()
-		slot, ok := m.slotOf[origin]
+		slotOf := map[*remote]int{}
+		for _, v := range peers {
+			if i := slices.Index(v.txSlots, origin); i >= 0 {
+				slotOf[v] = i
+			}
+		}
 		m.mu.Unlock()
 		var gone, keep []int
 		m.rend.trMu.Lock()
 		for layer, last := range ot.layers {
 			used := false
-			for _, v := range peers {
-				if ok && v.id != origin && v.slotV[slot].current() == layer {
+			for v, slot := range slotOf {
+				if v.id != origin && v.slotV[slot].current() == layer {
 					used = true
 				}
 			}

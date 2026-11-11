@@ -119,3 +119,20 @@ func OpenBrowser(url string) error {
 	}
 	return cmd.Start()
 }
+
+// ShowInstance asks the running instance to bring its window to the front.
+// Builds before the native window answer 404: the caller opens the web UI.
+func ShowInstance(in Instance) error {
+	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/show", in.Port), nil)
+	req.Header.Set("Authorization", "Bearer "+in.Token)
+	req.Header.Set("X-Blite", "1")
+	res, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	res.Body.Close()
+	if res.StatusCode >= 300 {
+		return fmt.Errorf("show: %s", res.Status)
+	}
+	return nil
+}

@@ -7,6 +7,7 @@ package media
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
@@ -42,6 +43,39 @@ var highLayers = map[Resolution]Layer{
 	Res720:  {Width: 1280, Height: 720, FPS: 30, BitrateKbs: 2500},
 	Res1080: {Width: 1920, Height: 1080, FPS: 30, BitrateKbs: 5000},
 	Res2160: {Width: 3840, Height: 2160, FPS: 30, BitrateKbs: 14000},
+}
+
+// ContentMode is what the share is tuned for.
+type ContentMode string
+
+const (
+	// ModeDesktop (detail, the default): 30 fps; when the link or the CPU is
+	// tight, lower the frame rate before the resolution, so text stays sharp.
+	ModeDesktop ContentMode = "desktop"
+	// ModeGame (motion): 60 fps; when tight, keep the frame rate and lower
+	// the resolution.
+	ModeGame ContentMode = "game"
+)
+
+// ValidMode reports whether m is a content mode ("" = desktop).
+func ValidMode(m ContentMode) bool { return m == "" || m == ModeDesktop || m == ModeGame }
+
+// HighFPS is the HIGH layer's frame rate in mode m.
+func HighFPS(m ContentMode) int {
+	if m == ModeGame {
+		return 60
+	}
+	return 30
+}
+
+// atFPS is l at fps, with the bitrate grown for the extra frames (60 fps
+// needs about 1.5x of 30, not 2x: consecutive frames differ less).
+func atFPS(l Layer, fps int) Layer {
+	if fps > l.FPS {
+		l.BitrateKbs = l.BitrateKbs * (l.FPS + fps) / (2 * l.FPS)
+		l.FPS = fps
+	}
+	return l
 }
 
 // ValidResolution reports whether r is one StartVideoSource accepts ("" = 720p).
@@ -144,16 +178,17 @@ func LayerHeight(id, top int) int {
 // resolution, LOW, and the renditions in rends (heights below the top; others
 // are ignored). Absent IDs are zero Layers. Keyframes every 2 s, plus on
 // demand (ForceKeyframe) when a peer switches layer or reports loss.
-func LayersFor(r Resolution, rends []int) []Layer {
+func LayersFor(r Resolution, m ContentMode, rends []int) []Layer {
 	hi, ok := highLayers[r]
 	if !ok {
 		hi = highLayers[Res720]
 	}
+	fps := HighFPS(m)
 	out := make([]Layer, NumLayers)
-	out[High], out[Low] = hi, lowLayer
+	out[High], out[Low] = atFPS(hi, fps), lowLayer
 	for _, h := range rends {
 		if rl, ok := rendLayers[h]; ok && h < hi.Height {
-			out[rl.id] = rl.l
+			out[rl.id] = atFPS(rl.l, fps)
 		}
 	}
 	return out
@@ -252,7 +287,11 @@ type encoder struct {
 // and an unknown property fails the whole pipeline. StartVideoSource also
 // falls back to the next encoder if one refuses to start.
 var encoders = []encoder{
-	{"nvh264enc", "bitrate=%d gop-size=%d"},
+	// CBR: the default VBR spends far below the target on a mostly static
+	// screen and leaves text soft (Alex's 4K share: 1.5-7 of 21 Mbit/s).
+	// spatial-aq gives edges and text more bits. Both exist in the old
+	// (CUDA) and the new (D3D11) nvh264enc.
+	{"nvh264enc", "bitrate=%d gop-size=%d rc-mode=cbr spatial-aq=true"},
 	{"qsvh264enc", "bitrate=%d gop-size=%d"},
 	{"amfh264enc", "bitrate=%d gop-size=%d"},
 	{"vah264enc", "bitrate=%d key-int-max=%d b-frames=0 rate-control=cbr"},
@@ -285,6 +324,29 @@ func PickEncoder(force string) (encoder, error) {
 
 // Factory is the encoder's GStreamer element name.
 func (e encoder) Factory() string { return e.factory }
+
+// format is the raw format we feed the encoder: x264 takes I420; the
+// hardware encoders (QSV, AMF, Media Foundation, NVENC, VA) want NV12, and
+// on Windows refuse to link at all with I420 (seen on 75: every share fell
+// back to x264).
+func (e encoder) format() string {
+	if e.factory == "x264enc" {
+		return "I420"
+	}
+	return "NV12"
+}
+
+// Log receives encoder fallbacks and choices; main points it at the app log.
+var Log = slog.Default()
+
+// AvailableEncoders names the installed encoders, best first (for logs).
+func AvailableEncoders() []string {
+	var out []string
+	for _, e := range availableEncoders("") {
+		out = append(out, e.factory)
+	}
+	return out
+}
 
 // launch is the encoder element for layer i, named enc<i>. Every encoder in
 // the list takes its bitrate in kbit/s and allows changing it while PLAYING.
@@ -403,12 +465,16 @@ func (p *Pipeline) stopped() bool {
 // VideoSource is a running capture with one encoder per layer.
 type VideoSource struct {
 	*Pipeline
-	sinks   []*gst.Element
-	encs    []*gst.Element
-	life    sync.RWMutex
-	lastKey []time.Time
-	keyMu   sync.Mutex
-	live    sync.Once // counted out of liveSources once
+	sinks     []*gst.Element
+	encs      []*gst.Element
+	preview   *gst.Element // the self-preview valve (nil without a preview channel)
+	previewed *gst.Counter // frames through the valve (nil if unknown)
+	offered   *gst.Counter // frames the capture gave the encoders (nil if unknown)
+	thin      *gst.Thinner // HIGH's frame rate step (nil if unknown)
+	life      sync.RWMutex
+	lastKey   []time.Time
+	keyMu     sync.Mutex
+	live      sync.Once // counted out of liveSources once
 }
 
 // liveSources counts started, not yet stopped, video sources (tests).
@@ -418,38 +484,41 @@ var liveSources atomic.Int64
 func LiveVideoSources() int { return int(liveSources.Load()) }
 
 // StartVideoSource captures from kind once, encodes every layer of
-// LayersFor(res, rends), and calls onAU(layer, au) from that layer's pull goroutine. onAU must not block.
-func StartVideoSource(kind SourceKind, res Resolution, rends []int, encoderForce string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
+// LayersFor(res, mode, rends), and calls onAU(layer, au) from that layer's pull goroutine. onAU must not block.
+// A non-empty preview is the intervideo channel SetPreview feeds with our
+// picture (PreviewW x PreviewH at PreviewFPS) for a self-preview.
+func StartVideoSource(kind SourceKind, res Resolution, mode ContentMode, rends []int, encoderForce, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
 	encs := availableEncoders(encoderForce)
 	if len(encs) == 0 {
 		return nil, "", errors.New("no H.264 encoder available (install gstreamer1.0-plugins-ugly for x264enc)")
 	}
 	var lastErr error
 	for _, enc := range encs {
-		vs, err := startVideoSource(kind, LayersFor(res, rends), enc, onAU)
+		vs, err := startVideoSource(kind, LayersFor(res, mode, rends), enc, preview, onAU)
 		if err == nil {
 			liveSources.Add(1)
 			return vs, enc.factory, nil
 		}
+		Log.Warn("encoder failed, trying the next", "encoder", enc.factory, "res", res, "err", err)
 		lastErr = fmt.Errorf("%s: %w", enc.factory, err)
 	}
 	return nil, "", lastErr
 }
 
-func startVideoSource(kind SourceKind, layers []Layer, enc encoder, onAU func(layer int, au AccessUnit)) (*VideoSource, error) {
+func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, error) {
 	src, err := sourceElements(kind)
 	if err != nil {
 		return nil, err
 	}
 	hi := layers[High]
 	branches := []string{fmt.Sprintf("%s ! videoconvert ! videoscale ! videorate ! "+
-		"video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! tee name=t",
-		src, hi.Width, hi.Height, hi.FPS)}
+		"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! identity name=offered ! tee name=t",
+		src, enc.format(), hi.Width, hi.Height, hi.FPS)}
 	for i, l := range layers {
 		if l.Height == 0 {
 			continue
 		}
-		scale := ""
+		scale := "identity name=thin ! " // HIGH: SetHighFPS drops frames here
 		if i != High {
 			scale = fmt.Sprintf("videoscale ! videorate ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! ", l.Width, l.Height, l.FPS)
 		}
@@ -457,6 +526,13 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, onAU func(la
 			"video/x-h264,profile=constrained-baseline ! "+
 			"h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "+
 			"appsink name=out%d sync=false max-buffers=4 drop=true", scale, enc.launch(i, l), i))
+	}
+	if preview != "" {
+		// The valve drops everything until SetPreview opens it, so a
+		// preview nobody looks at costs nothing.
+		branches = append(branches, fmt.Sprintf("t. ! queue max-size-buffers=1 leaky=downstream ! valve name=preview drop=true ! "+
+			"videoscale ! videorate drop-only=true ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=previewed ! intervideosink channel=%s sync=false async=false",
+			PreviewW, PreviewH, PreviewFPS, preview))
 	}
 	p, err := launch(strings.Join(branches, "  "))
 	if err != nil {
@@ -496,7 +572,23 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, onAU func(la
 			return true
 		})
 	}
+	if e, err := p.element("offered"); err == nil {
+		vs.offered, _ = e.CountBuffers()
+	}
+	if e, err := p.element("thin"); err == nil {
+		vs.thin, _ = e.Thin(hi.FPS)
+	}
+	if preview != "" {
+		if vs.preview, err = p.element("preview"); err != nil {
+			p.Stop()
+			return nil, err
+		}
+		if e, err := p.element("previewed"); err == nil {
+			vs.previewed, _ = e.CountBuffers()
+		}
+	}
 	if err := p.start(); err != nil {
+		vs.Stop()
 		return nil, err
 	}
 	// A hardware encoder can accept PLAYING and fail a moment later (no
@@ -542,11 +634,74 @@ func (vs *VideoSource) SetBitrate(layer, kbps int) {
 	}
 }
 
+// SetHighFPS caps the frames HIGH encodes per second (its full rate or
+// more: all). The encoders budget bits per frame, so fewer frames also
+// means fewer bits, while each frame stays as sharp.
+func (vs *VideoSource) SetHighFPS(fps int) {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.thin != nil && !vs.stopped() {
+		vs.thin.SetFPS(fps)
+	}
+}
+
+// SetPreview starts (on) or stops feeding the preview channel.
+func (vs *VideoSource) SetPreview(on bool) {
+	if vs.preview == nil {
+		return
+	}
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if !vs.stopped() {
+		vs.preview.SetBool("drop", !on)
+	}
+}
+
+// PreviewFrames is how many frames went to the preview channel (-1 if unknown).
+func (vs *VideoSource) PreviewFrames() int {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.previewed == nil {
+		return -1
+	}
+	return vs.previewed.Load()
+}
+
+// OfferedFrames is how many frames the capture handed to the encoders (-1
+// if unknown). A still window offers few: capture only delivers changes.
+func (vs *VideoSource) OfferedFrames() int {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.offered == nil {
+		return -1
+	}
+	return vs.offered.Load()
+}
+
+// HighOfferedFrames is how many frames HIGH's encoder was handed, after
+// SetHighFPS thinned them (-1 if unknown).
+func (vs *VideoSource) HighOfferedFrames() int {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.thin == nil {
+		return -1
+	}
+	return vs.thin.Passed()
+}
+
 // Stop tears the source down; in-flight ForceKeyframe calls finish first.
 func (vs *VideoSource) Stop() {
 	vs.life.Lock()
 	defer vs.life.Unlock()
 	vs.Pipeline.Stop()
+	if vs.previewed != nil {
+		vs.previewed.Free()
+		vs.previewed = nil
+	}
+	if vs.thin != nil {
+		vs.thin.Free()
+		vs.thin = nil
+	}
 	vs.live.Do(func() { liveSources.Add(-1) })
 }
 

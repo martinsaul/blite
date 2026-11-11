@@ -48,6 +48,14 @@ func (g *keyGate) pass(au []byte, dropped uint16) bool {
 	return false
 }
 
+// lost makes the gate wait for a keyframe, as after lost packets.
+func (g *keyGate) lost() {
+	g.started = true
+	if !g.waiting {
+		g.waiting, g.since = true, time.Now()
+	}
+}
+
 // hasIDR reports whether an Annex-B access unit contains an IDR slice.
 func hasIDR(au []byte) bool {
 	for i := 0; i+3 < len(au); i++ {

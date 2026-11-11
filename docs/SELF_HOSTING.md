@@ -42,6 +42,7 @@ server pings every 30 s.
 | `BLITE_ICE_JSON` | unset | Fixed ICE server list (JSON array) instead |
 | `BLITE_REPORT_DIR` | unset | Accept client log reports into this directory (kept 30 days) |
 | `BLITE_HOST_KEY` | unset | Shared secret with a hosted relay (fixed room codes) |
+| `BLITE_MAX_PEERS` | `0` | Cap room size (0 = no cap) |
 | `BLITE_MIN_COMPATIBLE_BUILD` | `0` | Refuse clients below this build |
 | `BLITE_MIN_RECOMMENDED_BUILD` | `0` | Ask clients below this build to update |
 
@@ -66,7 +67,11 @@ BLITE_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:
 volunteers as each room's relay, so a room works without a member's machine
 relaying. It needs the GStreamer runtime (see `Dockerfile.host`) and the
 signal server's `BLITE_HOST_KEY`. Give it good upload bandwidth and run it
-with host networking.
+with host networking, and tell it that bandwidth with
+`-relay-upload-kbps` (for example `-relay-upload-kbps 200000` on a fast
+port): the server then gives it up to 16 members per room instead of 4,
+and it paces what it forwards to that rate. Member volunteers can relay
+alongside it when a room outgrows it.
 
 ```json
 [

@@ -31,7 +31,7 @@ func NewSharer() (*Sharer, error) { return &Sharer{sel: Selection{Mode: "none"}}
 
 func (s *Sharer) Select(sel Selection) error {
 	switch sel.Mode {
-	case "none", "system", "apps":
+	case "none", "system", "apps", "window":
 	default:
 		return errors.New("unknown audio mode")
 	}
@@ -58,6 +58,11 @@ func (s *Sharer) Capture() CaptureSource {
 	switch sel.Mode {
 	case "system":
 		return CaptureSource(loopback("exclude-process-tree", os.Getpid()))
+	case "window":
+		if sel.PID > 0 {
+			return CaptureSource(loopback("include-process-tree", sel.PID))
+		}
+		return silence
 	case "apps":
 		var pids []int
 		for _, k := range sel.Apps {

@@ -22,15 +22,24 @@ func peerID(s *Session, name string) string { return member(s, name).ID }
 // rendition and sends bob that, the others keep HIGH. Then a relay: carol
 // relays, and transcodes alice's 1080p to 720p for bob; a refusing provider
 // leaves him where he was.
-func TestRenditionsMeshAndRelay(t *testing.T) {
+func TestRenditionsMeshAndRelay(t *testing.T) { testRenditions(t, false) }
+
+// With end-to-end encryption the relay decrypts what it transcodes and
+// encrypts its renditions with its own key.
+func TestRenditionsEncrypted(t *testing.T) { testRenditions(t, true) }
+
+func testRenditions(t *testing.T, e2ee bool) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
 	defer ts.Close()
 	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 	cm := &proto.ClientMeta{AppVersion: "0.1.0", Build: room.DefaultMinRelayBuild}
+	if e2ee {
+		cm.Build = proto.E2EEBuild
+	}
 	allow := true
 	cfg := func(n string) Config {
-		return Config{Server: ws, Name: n, View: media.ViewCount, Client: cm, Log: quiet,
+		return Config{Server: ws, Name: n, View: media.ViewCount, Client: cm, Log: quiet, E2EE: e2ee,
 			CanEncode: func() bool { return allow }}
 	}
 	ctx := context.Background()
@@ -133,35 +142,51 @@ func TestCantSeeNotice(t *testing.T) {
 	}
 }
 
-// A sharer whose encoder can't do the chosen size steps down one size and
-// says why. The test pattern at 4K with x264 runs far below 24 fps on any
-// machine we test on; skip where it doesn't.
+// A sharer whose encoder can't do the chosen size says why and steps down:
+// a game share one size, a desktop share to a lower frame rate first. The
+// test pattern at 4K with x264 runs far below 24 fps on any machine we test
+// on; skip where it doesn't.
 func TestEncoderTooSlowStepsDown(t *testing.T) {
-	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
-	defer ts.Close()
-	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	a, err := Create(context.Background(), Config{Server: ws, Name: "alice", View: media.ViewCount, Encoder: "x264enc", Log: quiet}, "")
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		mode media.ContentMode
+		res  media.Resolution
+		fps  int
+		note string
+	}{
+		{media.ModeGame, media.Res1080, 60, "can't encode 4K fast enough"},
+		{media.ModeDesktop, media.Res2160, 20, "can't encode 4K at 30 fps"},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+			ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
+			defer ts.Close()
+			ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+			a, err := Create(context.Background(), Config{Server: ws, Name: "alice", View: media.ViewCount, Encoder: "x264enc", Log: quiet}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			if err := a.SetResolution(media.Res2160); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.SetMode(tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.SetSource(media.SourceTest); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(40 * time.Second) // warm-up + 2 windows + restart
+			for time.Now().Before(deadline) && a.State().ResolutionNote == "" {
+				time.Sleep(200 * time.Millisecond)
+			}
+			st := a.State()
+			if st.ResolutionNote == "" {
+				t.Skip("this machine encodes 4K fast enough")
+			}
+			if st.Resolution != string(tc.res) || st.HighFPS != tc.fps || !strings.Contains(st.ResolutionNote, tc.note) {
+				t.Fatalf("resolution %q at %d fps, note %q", st.Resolution, st.HighFPS, st.ResolutionNote)
+			}
+			t.Log(st.ResolutionNote)
+		})
 	}
-	defer a.Close()
-	if err := a.SetResolution(media.Res2160); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetSource(media.SourceTest); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(20 * time.Second) // warm-up + window + restart
-	for time.Now().Before(deadline) && a.State().ResolutionNote == "" {
-		time.Sleep(200 * time.Millisecond)
-	}
-	st := a.State()
-	if st.Resolution == string(media.Res2160) {
-		t.Skip("this machine encodes 4K fast enough")
-	}
-	if st.Resolution != string(media.Res1080) || !strings.Contains(st.ResolutionNote, "can't encode 4K fast enough") {
-		t.Fatalf("resolution %q note %q", st.Resolution, st.ResolutionNote)
-	}
-	t.Log(st.ResolutionNote)
 }

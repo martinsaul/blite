@@ -10,6 +10,10 @@
 #   scripts/soak.sh -p 4g,terrible,modem -t 2m -o /tmp/soak
 #   scripts/soak.sh -p fiber,dsl -j 'https://blite.example.com/j/CODE#pw'
 #   scripts/soak.sh -p fiber,dsl,dsl,4g -r 0        # relay mode: peer 0 relays
+#   scripts/soak.sh -p fiber,fiber,dsl,dsl,dsl,4g,dsl,dsl,4g -r 0,1 -s 3
+#                                                   # volunteers 0 and 1; peers 0-2 share
+#   scripts/soak.sh ... -k 0:90s                     # peer 0 leaves after 90 s
+#   scripts/soak.sh ... -O dev~3:2,5                 # peers 2 and 5 run that git revision
 #   SOAK_ARGS="-resolution 1080p" scripts/soak.sh -p fiber,mid   # extra peer flags
 #
 # With -j the peers join an existing room (humans included) over the host's
@@ -31,7 +35,10 @@ out=
 link=
 port=18190
 relay=
-while getopts p:t:o:j:P:r: o; do
+sharers=
+kill=
+old=
+while getopts p:t:o:j:P:r:s:k:O: o; do
   case $o in
     p) profiles=$OPTARG ;;
     t) dur=$OPTARG ;;
@@ -39,7 +46,10 @@ while getopts p:t:o:j:P:r: o; do
     j) link=$OPTARG ;;
     P) port=$OPTARG ;;
     r) relay=$OPTARG ;;
-    *) sed -n '2,24p' "$0"; exit 2 ;;
+    s) sharers=$OPTARG ;;
+    k) kill=$OPTARG ;;
+    O) old=$OPTARG ;;
+    *) sed -n '2,28p' "$0"; exit 2 ;;
   esac
 done
 out=${out:-$(mktemp -d /tmp/blite-soak.XXXX)}
@@ -64,6 +74,15 @@ for p in "${prof[@]}"; do shape "$p" >/dev/null; done
 # Relay mode needs build >= 31 on every peer; soak builds claim a high one.
 go build -ldflags "-X main.version=soak -X main.build=9999" -o bin/blite ./cmd/blite
 go build -o bin/blite-signal ./cmd/blite-signal
+oldpeers=
+if [ -n "$old" ]; then
+  rev=${old%%:*} oldpeers=${old#*:}
+  tmp=$(mktemp -d)
+  git archive "$rev" | tar -x -C "$tmp"
+  oldbuild=$(git rev-list --count "$rev")
+  (cd "$tmp" && go build -ldflags "-X main.version=old -X main.build=$oldbuild" -o "$OLDPWD/bin/blite-old" ./cmd/blite)
+  rm -rf "$tmp"
+fi
 
 me=$(id -un)
 hub=blsoak-hub
@@ -87,10 +106,14 @@ run() {
 
 peer() { # peer <i> <ns> <joinargs...>
   local i=$1 ns=$2; shift 2
-  [ "$i" = "$relay" ] && set -- "$@" -volunteer
+  [[ ",$relay," == *",$i,"* ]] && set -- "$@" -volunteer
+  local src=test aud=test bin=bin/blite for=$dur
+  [[ ",$oldpeers," == *",$i,"* ]] && bin=bin/blite-old
+  [ "${kill%%:*}" = "$i" ] && for=${kill#*:}
+  if [ -n "$sharers" ] && [ "$i" -ge "$sharers" ]; then src=none aud=none; fi
   # shellcheck disable=SC2086 # SOAK_ARGS is a flag list
-  run "$ns" env HOME="$HOME" bin/blite -headless "$@" -source test -audio test -view count ${SOAK_ARGS:-} \
-    -name "syn$i-${prof[$i]}" -json -for "$dur" >"$out/syn$i.out" 2>"$out/syn$i.log" &
+  run "$ns" env HOME="$HOME" "$bin" -headless "$@" -source "$src" -audio "$aud" -view count ${SOAK_ARGS:-} \
+    -name "syn$i-${prof[$i]}" -json -for "$for" >"$out/syn$i.out" 2>"$out/syn$i.log" &
   pids+=($!) peerpids+=($!)
 }
 

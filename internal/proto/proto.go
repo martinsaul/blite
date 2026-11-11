@@ -10,8 +10,27 @@ import (
 // Version is sent in Welcome so clients can refuse a server they don't understand.
 const Version = 0
 
-// MaxPeers is the room size cap.
-const MaxPeers = 5
+// RelayMaxPeers is the largest room relay mode serves: a relay connection
+// carries one fixed origin slot per other member (RelayMaxPeers-1). In a
+// bigger room relay mode pauses (Topology.Paused) and everyone meshes.
+// Rooms themselves have no size cap unless the server operator sets one.
+const RelayMaxPeers = 5
+
+// MultiRelayBuild is the first client build that understands Plan (several
+// relays, slots for active origins only). While any member is older, the
+// server keeps the room on one relay and RelayMaxPeers (legacy Topology).
+const MultiRelayBuild = 56
+
+// E2EEBuild is the first client build that encrypts media end to end
+// . Encrypted rooms refuse older builds (update_required).
+const E2EEBuild = 72
+
+// MaxRelays is the most relays a Plan uses (they all trunk to each other).
+const MaxRelays = 4
+
+// MeshComfortPeers is the room size above which a full mesh usually strains
+// home uplinks (every sharer uploads once per viewer); clients warn there.
+const MeshComfortPeers = 5
 
 // Client -> server message types.
 const (
@@ -29,6 +48,8 @@ const (
 	TKick = "kick"
 	// TRename changes our display name in the room.
 	TRename = "rename"
+	// TCaps reports what we could do as a relay (planner input).
+	TCaps = "caps"
 )
 
 // Server -> client message types.
@@ -37,8 +58,12 @@ const (
 	TPeerJoined = "peer-joined"
 	TPeerLeft   = "peer-left"
 	TError      = "error"
-	// TTopology announces the relay queue whenever it changes.
+	// TTopology announces the relay queue whenever it changes (builds
+	// below MultiRelayBuild).
 	TTopology = "topology"
+	// TPlan announces the relay plan whenever it changes (builds from
+	// MultiRelayBuild on, instead of TTopology).
+	TPlan = "plan"
 	// TOwner announces the room's owner whenever it changes.
 	TOwner = "owner"
 	// TKicked tells a member it was removed; the server then closes it.
@@ -65,6 +90,8 @@ const (
 	ErrRelayUnsupported = "relay_unsupported"
 	// ErrNotOwner: only the owner may transfer or kick.
 	ErrNotOwner = "not_owner"
+	// ErrChannelBusy: another room is already tied to that Discord channel.
+	ErrChannelBusy = "channel_busy"
 	// ErrBanned: the owner banned this identity from the room.
 	ErrBanned = "banned"
 )
@@ -89,7 +116,25 @@ type Create struct {
 	// Owners (hosted relay only): identity keys of the members who take
 	// ownership from the relay while any of them is in the room.
 	Owners []string `json:"owners,omitempty"`
+	// E2EE: the room's media is encrypted end to end. Ignored
+	// when joining an existing fixed room.
+	E2EE bool `json:"e2ee,omitempty"`
+	// Channel ties the new room to a Discord voice channel (its ID), so
+	// people in that channel find it (GET /v1/channel/{id}). Refused with
+	// ErrChannelBusy while another room holds the channel.
+	Channel string `json:"channel,omitempty"`
 }
+
+// Leave ends our membership. Reason LeaveUpdate: we restart into a new
+// build and rejoin in a moment, so an owner gets the room back
+// (OwnerReturnWindow). Servers from before it ignore Reason.
+type Leave struct {
+	T      string `json:"t"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// LeaveUpdate is Leave.Reason for an in-call update.
+const LeaveUpdate = "update"
 
 // Join enters an existing room.
 type Join struct {
@@ -149,6 +194,7 @@ type Peer struct {
 	Name   string `json:"name"`
 	IDKey  string `json:"idKey"`
 	Client string `json:"client,omitempty"` // ClientMeta.Label of their build
+	Build  int    `json:"build,omitempty"`  // their build number (0 = unknown)
 }
 
 // ICEServer mirrors the WebRTC RTCIceServer dictionary.
@@ -172,8 +218,15 @@ type Welcome struct {
 	UpdateRecommended bool `json:"updateRecommended,omitempty"`
 	// RelayQueue is the relay queue at the time of joining (see Topology).
 	RelayQueue []string `json:"relayQueue,omitempty"`
+	// RelayPaused / RelayWaiting: see Topology.Paused and Waiting.
+	RelayPaused  bool     `json:"relayPaused,omitempty"`
+	RelayWaiting []string `json:"relayWaiting,omitempty"`
 	// Owner is the room owner's peer ID ("" = none online).
 	Owner string `json:"owner,omitempty"`
+	// Plan is the relay plan at the time of joining (MultiRelayBuild on).
+	Plan *Plan `json:"plan,omitempty"`
+	// E2EE: members encrypt media end to end.
+	E2EE bool `json:"e2ee,omitempty"`
 }
 
 // PeerJoined announces a new member to existing members.
@@ -208,6 +261,10 @@ type RelayVolunteer struct {
 type Topology struct {
 	T     string   `json:"t"`
 	Queue []string `json:"queue"`
+	// Paused: the room is bigger than RelayMaxPeers, so Queue is sent empty
+	// (full mesh) and Waiting holds the volunteers until it shrinks.
+	Paused  bool     `json:"paused,omitempty"`
+	Waiting []string `json:"waiting,omitempty"`
 }
 
 // Relay is the active relay's peer ID, or "" for full mesh.
@@ -216,6 +273,42 @@ func (t Topology) Relay() string {
 		return ""
 	}
 	return t.Queue[0]
+}
+
+// Plan is the room's relay plan, computed by the server from the volunteer
+// queue and the members' Caps. No relays means full mesh. Every relay
+// connects to every other relay (trunks) and to the members homed on it;
+// everyone else connects only to its home relay. Sent to every member
+// whenever it changes; Epoch grows with each change.
+type Plan struct {
+	T      string   `json:"t"`
+	Epoch  int      `json:"epoch"`
+	Relays []string `json:"relays,omitempty"`
+	// Home maps every member to its relay (a relay to itself).
+	Home map[string]string `json:"home,omitempty"`
+	// Queue is every volunteer in volunteer order, relays or not.
+	Queue []string `json:"queue,omitempty"`
+	// Paused: an older member keeps the room on one relay, and the room
+	// is bigger than RelayMaxPeers, so everyone meshes.
+	Paused bool `json:"paused,omitempty"`
+}
+
+// Caps is what a member reports about itself for relay planning. Sent on
+// change, rate-limited by the client.
+type Caps struct {
+	T string `json:"t"`
+	// UpKbps is its usable upload estimate (0 = unknown), UpSource how it
+	// was found: declared (the user's setting) or passive (highest
+	// sustained send rate seen).
+	UpKbps   int    `json:"upKbps,omitempty"`
+	UpSource string `json:"upSource,omitempty"`
+	// CPUFree is the idle CPU share in percent (-1 unknown).
+	CPUFree int `json:"cpuFree"`
+	// Reach is how peers reach it: public, nat, or turn (only via TURN:
+	// useless as a relay). "" = not known yet.
+	Reach string `json:"reach,omitempty"`
+	// Uptime is how long it has been in the room, in seconds.
+	Uptime int `json:"uptime,omitempty"`
 }
 
 // Transfer (owner) makes PeerID the owner.
@@ -271,4 +364,9 @@ type Report struct {
 	File      string `json:"file,omitempty"`     // the log file's name
 	Log       string `json:"log"`                // the log tail
 	Received  string `json:"received,omitempty"` // set by the server
+	// Zip holds whole log files and a system summary (Send logs). The
+	// server stores it next to the report as ZipFile. Servers from before
+	// it reject such a large report; clients then send without.
+	Zip     []byte `json:"zip,omitempty"`
+	ZipFile string `json:"zipFile,omitempty"`
 }

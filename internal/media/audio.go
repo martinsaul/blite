@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"blite/internal/gst"
@@ -16,7 +17,27 @@ const (
 )
 
 // AudioSource encodes a GStreamer audio source description to Opus frames.
-type AudioSource struct{ *Pipeline }
+type AudioSource struct {
+	*Pipeline
+	live sync.Once    // counted out of liveAudio once
+	loss atomic.Int32 // expected packet loss (%) for Opus in-band FEC
+}
+
+// SetPacketLoss tells the encoder the loss (%) to protect against with
+// in-band FEC; the capture loop applies it.
+func (a *AudioSource) SetPacketLoss(pct int) { a.loss.Store(int32(min(max(pct, 0), 100))) }
+
+// liveAudio counts started, not yet stopped, audio sources (tests).
+var liveAudio atomic.Int64
+
+// LiveAudioSources reports how many audio sources run (tests).
+func LiveAudioSources() int { return int(liveAudio.Load()) }
+
+// Stop tears the source down.
+func (a *AudioSource) Stop() {
+	a.Pipeline.Stop()
+	a.live.Do(func() { liveAudio.Add(-1) })
+}
 
 // TestAudio is a tone generator for synthetic peers and tests.
 const TestAudio = "audiotestsrc is-live=true wave=sine freq=660 volume=0.3"
@@ -28,7 +49,7 @@ func StartAudioSource(src string, onFrame func(frame []byte, d time.Duration)) (
 		return nil, errors.New("no audio source")
 	}
 	desc := fmt.Sprintf("%s ! queue max-size-time=100000000 leaky=downstream ! audioconvert ! audioresample ! "+
-		"audio/x-raw,rate=48000,channels=2 ! opusenc bitrate=%d frame-size=%d audio-type=generic ! "+
+		"audio/x-raw,rate=48000,channels=2 ! opusenc name=aenc bitrate=%d frame-size=%d audio-type=generic inband-fec=true ! "+
 		"appsink name=aout sync=false max-buffers=10 drop=true", src, OpusBitrate, OpusFrame.Milliseconds())
 	p, err := launch(desc)
 	if err != nil {
@@ -39,7 +60,18 @@ func StartAudioSource(src string, onFrame func(frame []byte, d time.Duration)) (
 		p.Stop()
 		return nil, err
 	}
+	enc, err := p.element("aenc")
+	if err != nil {
+		p.Stop()
+		return nil, err
+	}
+	a := &AudioSource{Pipeline: p}
+	applied := int32(0)
 	p.goLoop(func() bool {
+		if l := a.loss.Load(); l != applied {
+			enc.SetUint("packet-loss-percentage", uint(l)) // a gint; same varargs
+			applied = l
+		}
 		data, d, err := sink.Pull(100 * time.Millisecond)
 		switch {
 		case errors.Is(err, gst.ErrTimeout):
@@ -56,7 +88,8 @@ func StartAudioSource(src string, onFrame func(frame []byte, d time.Duration)) (
 	if err := p.start(); err != nil {
 		return nil, err
 	}
-	return &AudioSource{p}, nil
+	liveAudio.Add(1)
+	return a, nil
 }
 
 // AudioPlayer decodes one peer's Opus frames and plays them on a device.

@@ -41,7 +41,7 @@ type Backend interface {
 	DismissUpdateResult()
 	// SetAutostart turns starting at sign-in on or off.
 	SetAutostart(on bool) error
-	Create(ctx context.Context, password string) error
+	Create(ctx context.Context, password string, e2ee bool) error
 	JoinLink(ctx context.Context, link string) error
 	Leave()
 	SetSource(kind string) error
@@ -55,13 +55,23 @@ type Backend interface {
 	SetPeer(id, quality string, volume float64, muted bool) error
 	// SetResolution sets what we share at: 720p, 1080p or 2160p.
 	SetResolution(res string) error
+	// SetMode tunes the share for desktop (sharp text) or game (60 fps).
+	SetMode(mode string) error
 	// SetLayout shows received streams in separate windows ("windows") or
-	// in one window as a grid ("grid", rows x cols, 0 = auto).
-	SetLayout(mode string, rows, cols int) error
+	// in one window as a grid ("grid", rows x cols, 0 = auto), and our own
+	// stream in a preview: "" (none), "window" or "grid".
+	SetLayout(mode string, rows, cols int, preview string) error
 	// SendLogsNow uploads our recent logs for the developers.
 	SendLogsNow(ctx context.Context) error
 	// OpenLogFolder shows the log folder in the file manager.
 	OpenLogFolder() error
+	// Diagnostics is a text block for bug reports.
+	Diagnostics() string
+	// Feedback sends an idea or a problem the user wrote.
+	Feedback(ctx context.Context, kind, text string, withDiag bool) error
+	// ShowWindow reopens a video window the user closed: a peer's, or ""
+	// the grid window.
+	ShowWindow(id string) error
 	// Volunteer joins (on) or leaves the relay queue.
 	Volunteer(on bool) error
 	// SetName sets our display name (kept; shown as name#tag).
@@ -70,6 +80,8 @@ type Backend interface {
 	Transfer(id string) error
 	// Kick (room owner) removes member id; ban keeps them out.
 	Kick(id string, ban bool) error
+	// ShowUI brings the native window to the front (a second launch).
+	ShowUI()
 	// Subscribe returns a channel that receives a value on every state change.
 	Subscribe() (<-chan struct{}, func())
 }
@@ -109,6 +121,9 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 	mux.Handle("GET /api/sources", s.authed(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.be.Sources())
 	})))
+	mux.Handle("GET /api/diagnostics", s.authed(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"text": s.be.Diagnostics()})
+	})))
 	mux.Handle("GET /api/audio", s.authed(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.be.AudioOptions())
 	})))
@@ -135,18 +150,48 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.SetResolution(b.Res)
 	})))
-	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error { return s.be.SendLogsNow(r.Context()) })))
-	mux.Handle("POST /api/logs/open", s.authed(s.post(func(*http.Request) error { return s.be.OpenLogFolder() })))
-	mux.Handle("POST /api/layout", s.authed(s.post(func(r *http.Request) error {
+	mux.Handle("POST /api/feedback", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
-			Mode string `json:"mode"`
-			Rows int    `json:"rows"`
-			Cols int    `json:"cols"`
+			Kind        string `json:"kind"`
+			Text        string `json:"text"`
+			Diagnostics bool   `json:"diagnostics"`
 		}
 		if err := decode(r, &b); err != nil {
 			return err
 		}
-		return s.be.SetLayout(b.Mode, b.Rows, b.Cols)
+		return s.be.Feedback(r.Context(), b.Kind, b.Text, b.Diagnostics)
+	})))
+	mux.Handle("POST /api/window", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			ID string `json:"id"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.ShowWindow(b.ID)
+	})))
+	mux.Handle("POST /api/mode", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			Mode string `json:"mode"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetMode(b.Mode)
+	})))
+	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error { return s.be.SendLogsNow(r.Context()) })))
+	mux.Handle("POST /api/logs/open", s.authed(s.post(func(*http.Request) error { return s.be.OpenLogFolder() })))
+	mux.Handle("POST /api/layout", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			Mode    string `json:"mode"`
+			Rows    int    `json:"rows"`
+			Cols    int    `json:"cols"`
+			Preview string `json:"preview"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetLayout(b.Mode, b.Rows, b.Cols, b.Preview)
 	})))
 	mux.Handle("POST /api/relay", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
@@ -185,6 +230,7 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.Kick(b.ID, b.Ban)
 	})))
+	mux.Handle("POST /api/show", s.authed(s.post(func(*http.Request) error { s.be.ShowUI(); return nil })))
 	mux.Handle("POST /api/update/dismiss", s.authed(s.post(func(*http.Request) error { s.be.DismissUpdateResult(); return nil })))
 
 	s.srv = &http.Server{Handler: s.guard(mux), ReadHeaderTimeout: 5 * time.Second}
@@ -229,7 +275,7 @@ func (s *Server) authed(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		http.Error(w, "open Blite from its tray icon", http.StatusUnauthorized)
+		http.Error(w, "open Bellion Share from its tray icon", http.StatusUnauthorized)
 	})
 }
 
@@ -237,7 +283,7 @@ func (s *Server) index(files http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if t := r.URL.Query().Get("t"); t != "" {
 			if !s.tokenOK(t) {
-				http.Error(w, "stale link: open Blite from its tray icon", http.StatusUnauthorized)
+				http.Error(w, "stale link: open Bellion Share from its tray icon", http.StatusUnauthorized)
 				return
 			}
 			http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
@@ -311,11 +357,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 func (s *Server) create(r *http.Request) error {
 	var b struct {
 		Password string `json:"password"`
+		E2EE     *bool  `json:"e2ee"` // nil = on (older pages)
 	}
 	if err := decode(r, &b); err != nil {
 		return err
 	}
-	return s.be.Create(r.Context(), b.Password)
+	return s.be.Create(r.Context(), b.Password, b.E2EE == nil || *b.E2EE)
 }
 
 func (s *Server) join(r *http.Request) error {

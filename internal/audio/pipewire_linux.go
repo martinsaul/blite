@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,7 +91,7 @@ func NewSharer() (*Sharer, error) {
 	// graph and the capture stays silent.
 	out, err := run(ctx, 5*time.Second, "pactl", "load-module", "module-null-sink",
 		"sink_name="+ShareSinkName,
-		`sink_properties=node.description="Blite share" device.description="Blite share" priority.session=0`)
+		`sink_properties=node.description="Bellion Share" device.description="Bellion Share" priority.session=0`)
 	if err != nil {
 		return nil, fmt.Errorf("create %s sink (is pipewire-pulse running?): %w", ShareSinkName, err)
 	}
@@ -122,7 +123,7 @@ func (s *Sharer) Capture() CaptureSource {
 // Select changes what is shared and applies it immediately.
 func (s *Sharer) Select(sel Selection) error {
 	switch sel.Mode {
-	case "none", "system", "apps":
+	case "none", "system", "apps", "window":
 	default:
 		return errors.New("unknown audio mode")
 	}
@@ -182,6 +183,8 @@ func (s *Sharer) sync(ctx context.Context) error {
 			return true
 		case "apps":
 			return want[appKey(appName(n), n.num("application.process.id"))]
+		case "window":
+			return inProcessTree(n.num("application.process.id"), sel.PID)
 		}
 		return false
 	}
@@ -313,4 +316,27 @@ func PlaybackSink(device string) string {
 		return "pipewiresink"
 	}
 	return fmt.Sprintf("pipewiresink target-object=%q", device)
+}
+
+// inProcessTree reports whether pid is root or one of its descendants
+// (browsers play audio from a child process).
+func inProcessTree(pid, root int) bool {
+	for i := 0; i < 32 && pid > 1 && root > 0; i++ {
+		if pid == root {
+			return true
+		}
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if err != nil {
+			return false
+		}
+		// pid (comm) state ppid ...: comm may hold spaces and parentheses.
+		f := strings.Fields(string(b[bytes.LastIndexByte(b, ')')+1:]))
+		if len(f) < 2 {
+			return false
+		}
+		if pid, err = strconv.Atoi(f[1]); err != nil {
+			return false
+		}
+	}
+	return false
 }

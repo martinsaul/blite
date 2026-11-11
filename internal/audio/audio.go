@@ -21,11 +21,13 @@ type Device struct {
 	Name string `json:"name"` // human description
 }
 
-// Selection is what to share: Mode "none", "system" (all apps except Blite) or
-// "apps" (only Apps, by App.Key).
+// Selection is what to share: Mode "none", "system" (all apps except Blite),
+// "apps" (only Apps, by App.Key) or "window" (the process PID that owns the
+// shared window, and its child processes).
 type Selection struct {
 	Mode string   `json:"mode"`
 	Apps []string `json:"apps,omitempty"`
+	PID  int      `json:"pid,omitempty"`
 }
 
 // CaptureSource is the GStreamer source description for the shared mix, used by

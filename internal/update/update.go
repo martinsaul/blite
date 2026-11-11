@@ -148,7 +148,7 @@ func (u *Updater) Started() {
 	case "updated":
 		u.setResult(fmt.Sprintf("Updated to build %d.", r.ToBuild))
 	case "rolled-back":
-		u.setResult(fmt.Sprintf("The update to build %d didn't start properly, so Blite went back to build %d.", r.ToBuild, r.FromBuild))
+		u.setResult(fmt.Sprintf("The update to build %d didn't start properly, so Bellion Share went back to build %d.", r.ToBuild, r.FromBuild))
 	default:
 		u.setResult(fmt.Sprintf("The update to build %d failed: %s", r.ToBuild, r.Reason))
 	}
@@ -209,16 +209,19 @@ func (u *Updater) Install(ctx context.Context) error {
 		return errors.New("no update available")
 	}
 	if !canApply {
-		return errors.New("this copy of Blite can't update itself; install the release package instead")
+		return errors.New("this copy of Bellion Share can't update itself; install the release package instead")
 	}
 	cache, err := u.c.CacheDir(u.opts)
 	if err != nil {
 		return err
 	}
-	path, err := u.c.Download(ctx, up.Payload, cache)
-	if err == nil {
-		err = u.c.Apply(ctx, up, path, u.opts)
-	}
+	err = retry(ctx, u.log, func() error {
+		path, err := u.c.Download(ctx, up.Payload, cache)
+		if err == nil {
+			err = u.c.Apply(ctx, up, path, u.opts)
+		}
+		return err
+	})
 	if err != nil {
 		u.mu.Lock()
 		u.info.Problem = "Installing the update failed: " + err.Error()
@@ -226,4 +229,28 @@ func (u *Updater) Install(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// retryWaits are the pauses before the second and later install attempts.
+var retryWaits = []time.Duration{2 * time.Second, 5 * time.Second}
+
+// retry runs f again when it fails on the network or with a damaged
+// download: a cold download through the CDN can be cut off part way (seen
+// on 0.1.0 (67)), and the next attempt usually gets it whole. Both happen
+// before molt-swap starts, so trying again is safe.
+func retry(ctx context.Context, log *slog.Logger, f func() error) error {
+	err := f()
+	for _, wait := range retryWaits {
+		if err == nil || !(errors.Is(err, molt.ErrCouldNotCheck) || errors.Is(err, molt.ErrBadPayload)) {
+			return err
+		}
+		log.Warn("update: install attempt failed, trying again", "err", err, "in", wait)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		err = f()
+	}
+	return err
 }

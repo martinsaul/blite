@@ -25,12 +25,12 @@ type Actions struct {
 func Run(a Actions, onReady func()) {
 	systray.Run(func() {
 		systray.SetIcon(icon())
-		systray.SetTitle("Blite")
-		systray.SetTooltip("Blite screen sharing")
-		open := systray.AddMenuItem("Open Blite", "Create or join a session")
+		systray.SetTitle("Bellion Share")
+		systray.SetTooltip("Bellion Share screen sharing")
+		open := systray.AddMenuItem("Open Bellion Share", "Create or join a session")
 		leave := systray.AddMenuItem("Leave session", "Leave the current session")
 		systray.AddSeparator()
-		quit := systray.AddMenuItem("Quit", "Quit Blite")
+		quit := systray.AddMenuItem("Quit", "Quit Bellion Share")
 		systray.SetOnTapped(a.Open) // left click opens the UI where supported
 		go func() {
 			for {
@@ -55,8 +55,17 @@ func Run(a Actions, onReady func()) {
 // Quit removes the icon and makes Run return.
 func Quit() { systray.Quit() }
 
-// icon draws a 32x32 rounded "screen" glyph; Windows needs it wrapped in ICO.
+// icon is the tray icon; Windows needs it wrapped in ICO.
 func icon() []byte {
+	b := PNG()
+	if runtime.GOOS == "windows" {
+		return pngToICO(b, 32)
+	}
+	return b
+}
+
+// PNG draws the 32x32 rounded "screen" glyph.
+func PNG() []byte {
 	const n = 32
 	img := image.NewNRGBA(image.Rect(0, 0, n, n))
 	blue := color.NRGBA{0x3b, 0x63, 0xe6, 0xff}
@@ -76,9 +85,6 @@ func icon() []byte {
 	}
 	var buf bytes.Buffer
 	png.Encode(&buf, img)
-	if runtime.GOOS == "windows" {
-		return pngToICO(buf.Bytes(), n)
-	}
 	return buf.Bytes()
 }
 

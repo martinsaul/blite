@@ -13,6 +13,32 @@ type Target struct {
 	Kind   string `json:"kind"`   // monitor | window
 	Name   string `json:"name"`   // monitor name and size, or window title
 	Source string `json:"source"` // media source kind, e.g. "window:0x3a00007"
+	// Primary marks the primary monitor (the one with the taskbar or panel).
+	Primary bool `json:"primary,omitempty"`
+}
+
+// PrimarySource is the source for the primary monitor, or "screen" (all of
+// them) when there is only one monitor or it can't tell.
+func PrimarySource() string {
+	ts, err := List()
+	if err != nil {
+		return "screen"
+	}
+	var mons []Target
+	for _, t := range ts {
+		if t.Kind == "monitor" {
+			mons = append(mons, t)
+		}
+	}
+	if len(mons) <= 1 {
+		return "screen"
+	}
+	for _, m := range mons {
+		if m.Primary {
+			return m.Source
+		}
+	}
+	return mons[0].Source
 }
 
 // Region is a monitor's rectangle on the virtual screen.
@@ -45,6 +71,20 @@ func ParseWindow(arg string) (uint64, error) {
 		return 0, fmt.Errorf("bad window %q", arg)
 	}
 	return id, nil
+}
+
+// WindowPID returns the process that owns a "window:" source's window, or 0
+// (other sources, or it can't tell).
+func WindowPID(source string) int {
+	arg, ok := strings.CutPrefix(source, "window:")
+	if !ok {
+		return 0
+	}
+	id, err := ParseWindow(arg)
+	if err != nil {
+		return 0
+	}
+	return windowPID(id)
 }
 
 // WindowGone reports whether a "window:" source's window no longer exists.

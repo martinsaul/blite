@@ -40,14 +40,14 @@ func TestGridComposesTwoPlayers(t *testing.T) {
 	if pls[0].Channel == "" || pls[0].Channel == pls[1].Channel {
 		t.Fatalf("channels %q %q", pls[0].Channel, pls[1].Channel)
 	}
-	g, err := StartGrid([]Tile{{pls[0].Channel, "alice#1234"}, {pls[1].Channel, `bob "quoted" ! name`}}, 0, 0, ViewCount)
+	g, err := StartGrid(GridConfig{Tiles: []Tile{{Channel: pls[0].Channel, Label: "alice#1234"}, {Channel: pls[1].Channel, Label: `bob "quoted" ! name`}}, View: ViewCount})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer g.Stop()
 
 	aus := make(chan AccessUnit, 64)
-	src, _, err := StartVideoSource(SourceTest, "", nil, "", func(layer int, au AccessUnit) {
+	src, _, err := StartVideoSource(SourceTest, "", "", nil, "", "", func(layer int, au AccessUnit) {
 		if layer != High {
 			return
 		}
@@ -86,4 +86,129 @@ func TestGridComposesTwoPlayers(t *testing.T) {
 	}
 	pls[1].Stop()
 	wait(15, pls[:1])
+}
+
+// Clicking a tile's buttons reports the tile's peer and the button; the
+// buttons fade after the pointer rests.
+func TestGridControls(t *testing.T) {
+	Init()
+	var pls []*Player
+	for range 2 {
+		pl, err := StartPlayer(ViewGrid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pl.Stop()
+		pls = append(pls, pl)
+	}
+	type click struct {
+		id string
+		c  Control
+		v  float64
+	}
+	got := make(chan click, 8)
+	g, err := StartGrid(GridConfig{
+		Tiles: []Tile{{Channel: pls[0].Channel, Label: "alice", ID: "a", Volume: 1}, {Channel: pls[1].Channel, Label: "bob", ID: "b", Volume: 1}},
+		View:  ViewCount, Width: 1280, Height: 720,
+		OnControl: func(id string, c Control, v float64) { got <- click{id, c, v} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	sink, err := g.element("vsink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Where tile i's controls are: the mute and pause button centres and
+	// the slider at fraction f.
+	at := func(i int, what string, f float64) (float64, float64) {
+		o := g.ctl.ov[i]
+		u := map[string]float64{"mute": barMuteX, "pause": barPauseX, "slider": barSliderX0 + f*(barSliderX1-barSliderX0)}[what]
+		return float64(o.barX) + u*float64(o.barH), float64(o.barY) + float64(o.barH)/2
+	}
+	expect := func(want click) {
+		t.Helper()
+		select {
+		case k := <-got:
+			if k != want {
+				t.Fatalf("got %+v, want %+v", k, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no %+v", want)
+		}
+	}
+	x, y := at(1, "mute", 0)
+	sink.SendMouse(false, x, y)
+	sink.SendMouse(true, x, y)
+	expect(click{"b", ControlMute, 0})
+	x, y = at(0, "pause", 0)
+	sink.SendMouse(false, x, y)
+	sink.SendMouse(true, x, y)
+	expect(click{"a", ControlPause, 0})
+	// drag alice's slider to 75%: 1.5
+	x, y = at(0, "slider", 0.2)
+	sink.SendPress(x, y)
+	expect(click{"a", ControlVolume, 0.4})
+	x, _ = at(0, "slider", 0.75)
+	sink.SendMouse(false, x, y)
+	expect(click{"a", ControlVolume, 1.5})
+	sink.SendMouse(true, x, y)
+	sink.SendMouse(true, 320, 200) // the picture, not a control
+	select {
+	case k := <-got:
+		t.Fatalf("a click on the picture gave %+v", k)
+	case <-time.After(300 * time.Millisecond):
+	}
+	sink.SendMouse(false, 320, 200)
+	time.Sleep(3 * controlTick)
+	g.ctl.Lock()
+	shown, alpha := g.ctl.shown, g.ctl.alpha
+	g.ctl.Unlock()
+	if shown != 0 || alpha < 0.99 {
+		t.Fatalf("controls on tile %d at opacity %.2f after moving over alice, want tile 0 opaque", shown, alpha)
+	}
+	time.Sleep(controlShow + controlFade + 300*time.Millisecond)
+	g.ctl.Lock()
+	alpha = g.ctl.alpha
+	g.ctl.Unlock()
+	if alpha > 0.01 {
+		t.Fatalf("controls at opacity %.2f after the pointer rested, want faded out", alpha)
+	}
+	g.SetState("a", true, true, 0.5)
+	g.SetWaiting("b", true)
+	g.ctl.Lock()
+	st, spin := g.ctl.tiles[0], g.ctl.ov[1].spinShown
+	g.ctl.Unlock()
+	if !st.Muted || !st.Paused || st.Volume != 0.5 || !spin {
+		t.Fatalf("state not kept: %+v, spinner %v", st, spin)
+	}
+	if g.Frames() < 10 {
+		t.Fatalf("composed %d frames", g.Frames())
+	}
+}
+
+// A window with our preview in its corner and tile buttons starts and
+// composes (build 78 lacked videobox on Windows and every such window failed).
+func TestGridWithPreview(t *testing.T) {
+	Init()
+	pl, err := StartPlayer(ViewGrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pl.Stop()
+	g, err := StartGrid(GridConfig{Tiles: []Tile{{Channel: pl.Channel, Label: "alice", ID: "a"}}, View: ViewCount,
+		Pip: NewPreviewChannel(), Width: 1280, Height: 720, OnControl: func(string, Control, float64) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	g.SetState("a", true, true, 1.2) // the muted and paused icons
+	deadline := time.Now().Add(10 * time.Second)
+	for g.Frames() < 10 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := g.Frames(); n < 10 {
+		t.Fatalf("composed %d frames", n)
+	}
 }

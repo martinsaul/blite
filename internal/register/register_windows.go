@@ -4,15 +4,25 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// Register maps blite:// to exe under HKCU\Software\Classes (no admin needed).
+// Register maps our schemes to exe under HKCU\Software\Classes (no admin
+// needed).
 func Register(exe string) error {
-	base := `Software\Classes\` + Scheme
+	for _, s := range Schemes {
+		if err := registerScheme(s, exe); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func registerScheme(scheme, exe string) error {
+	base := `Software\Classes\` + scheme
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, base, registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
 	defer k.Close()
-	if err := k.SetStringValue("", "URL:Blite"); err != nil {
+	if err := k.SetStringValue("", "URL:Bellion Share"); err != nil {
 		return err
 	}
 	if err := k.SetStringValue("URL Protocol", ""); err != nil {

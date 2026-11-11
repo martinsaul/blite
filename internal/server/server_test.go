@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -273,5 +275,118 @@ func TestReportStored(t *testing.T) {
 	m, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	if len(m) != 1 || !strings.Contains(m[0], "-windows-43-crash-") {
 		t.Fatalf("stored %v", m)
+	}
+
+	// Send logs with a zip (base64 "PK\x03\x04zz"): stored beside the
+	// JSON, which names it and no longer carries it. Not a zip: refused.
+	if c := post(`{"platform":"windows","build":76,"kind":"user","log":"x","zip":"UEsDBHp6"}`); c != http.StatusAccepted {
+		t.Fatalf("zip report: status %d", c)
+	}
+	if c := post(`{"platform":"windows","build":76,"kind":"user","log":"x","zip":"aGVsbG8="}`); c != http.StatusBadRequest {
+		t.Fatalf("non-zip: status %d", c)
+	}
+	z, _ := filepath.Glob(filepath.Join(dir, "*-windows-76-user-*.zip"))
+	if len(z) != 1 {
+		t.Fatalf("zips %v", z)
+	}
+	if b, _ := os.ReadFile(z[0]); string(b) != "PK\x03\x04zz" {
+		t.Fatalf("zip content %q", b)
+	}
+	j, _ := os.ReadFile(strings.TrimSuffix(z[0], ".zip") + ".json")
+	if !strings.Contains(string(j), `"zipFile": "`+filepath.Base(z[0])) || strings.Contains(string(j), `"zip":`) {
+		t.Fatalf("report json %s", j)
+	}
+}
+
+func TestSiteSEO(t *testing.T) {
+	s := New(Config{SiteAliases: []string{"www.bellion.app", "old.example.com"}})
+	get := func(host, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	if w := get("old.example.com", "/terms?x=1"); w.Code != 301 || w.Header().Get("Location") != "https://bellion.app/terms?x=1" {
+		t.Fatalf("old host page: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("bellion.app", "/terms"); w.Code != 200 || !strings.Contains(w.Body.String(), `rel="canonical"`) {
+		t.Fatalf("terms: %d", w.Code)
+	}
+	if w := get("old.example.com", "/healthz"); w.Code != 200 {
+		t.Fatalf("healthz on old host: %d", w.Code)
+	}
+	if w := get("bellion.app", "/robots.txt"); !strings.Contains(w.Body.String(), "Disallow: /j/") {
+		t.Fatal("robots.txt")
+	}
+	for _, p := range []string{"/sitemap.xml", "/favicon.ico", "/apple-touch-icon.png", "/static/og.jpg", "/static/icon-512.png"} {
+		if w := get("bellion.app", p); w.Code != 200 || w.Body.Len() == 0 {
+			t.Fatalf("%s: %d", p, w.Code)
+		}
+	}
+	for _, n := range siteShots {
+		w := get("bellion.app", "/static/shots/"+n)
+		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Content-Type") != "image/webp" || !strings.Contains(w.Header().Get("Cache-Control"), "max-age") {
+			t.Fatalf("shot %s: %d %q", n, w.Code, w.Header().Get("Content-Type"))
+		}
+	}
+	sitemap := get("bellion.app", "/sitemap.xml").Body.String()
+	pages := []string{"/terms", "/privacy"}
+	for _, p := range docPages {
+		pages = append(pages, p.Path)
+	}
+	if len(pages) < 9 {
+		t.Fatalf("docs pages: %v", pages)
+	}
+	for _, p := range pages {
+		w := get("bellion.app", p)
+		body := w.Body.String()
+		if w.Code != 200 || !strings.Contains(body, `<link rel="canonical" href="https://bellion.app`+p+`">`) ||
+			!strings.Contains(body, `<meta name="description"`) || !strings.Contains(body, `href="/docs"`) ||
+			!strings.Contains(body, "https://github.com/martinsaul/blite") {
+			t.Fatalf("%s: %d, missing canonical, description or nav", p, w.Code)
+		}
+		if !strings.Contains(sitemap, "<loc>https://bellion.app"+p+"</loc>") {
+			t.Fatalf("%s not in sitemap", p)
+		}
+		if w := get("www.bellion.app", p); w.Code != 301 || w.Header().Get("Location") != "https://bellion.app"+p {
+			t.Fatalf("%s on old host: %d %q", p, w.Code, w.Header().Get("Location"))
+		}
+		// Every image a page shows is served.
+		for _, m := range regexp.MustCompile(`src="(/static/[^"]+)"`).FindAllStringSubmatch(body, -1) {
+			if w := get("bellion.app", m[1]); w.Code != 200 {
+				t.Fatalf("%s: image %s: %d", p, m[1], w.Code)
+			}
+		}
+	}
+	if w := get("bellion.app", "/docs/"); w.Code != 301 || w.Header().Get("Location") != "/docs" {
+		t.Fatalf("/docs/: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("bellion.app", "/docs/nope"); w.Code != 404 {
+		t.Fatalf("/docs/nope: %d", w.Code)
+	}
+}
+
+// TestDownloadPageSite checks the download page's nav, screenshots and
+// source link.
+func TestDownloadPageSite(t *testing.T) {
+	up := httptest.NewServer(http.NotFoundHandler())
+	defer up.Close()
+	s := New(Config{SiteAliases: []string{"www.bellion.app"}, UpdateURL: up.URL, UpdateChannel: "stable"})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "bellion.app"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != 200 || !strings.Contains(body, `href="/docs"`) || !strings.Contains(body, "https://github.com/martinsaul/blite") {
+		t.Fatalf("download page: %d", w.Code)
+	}
+	for _, m := range regexp.MustCompile(`src="(/static/[^"]+)"`).FindAllStringSubmatch(body, -1) {
+		r := httptest.NewRequest("GET", m[1], nil)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("image %s: %d", m[1], w.Code)
+		}
 	}
 }

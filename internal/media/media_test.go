@@ -1,6 +1,7 @@
 package media
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ func TestEncodeDecodeLoopback(t *testing.T) {
 
 	aus := make(chan AccessUnit, 64)
 	low := make(chan struct{}, 1)
-	src, enc, err := StartVideoSource(SourceTest, "", nil, "", func(layer int, au AccessUnit) {
+	src, enc, err := StartVideoSource(SourceTest, "", "", nil, "", "", func(layer int, au AccessUnit) {
 		if layer == Low {
 			select {
 			case low <- struct{}{}:
@@ -104,4 +105,38 @@ func TestOpusLoopback(t *testing.T) {
 		}
 	}
 	t.Logf("decoded %d buffers from %d Opus frames", pl.Buffers(), n)
+}
+
+// SetHighFPS thins HIGH and leaves LOW alone; game mode runs HIGH at 60.
+func TestHighFPS(t *testing.T) {
+	Init()
+	count := func(mode ContentMode, fps int) (high, low int) {
+		var h, l atomic.Int64
+		src, _, err := StartVideoSource(SourceTest, "", mode, nil, "x264enc", "", func(layer int, _ AccessUnit) {
+			switch layer {
+			case High:
+				h.Add(1)
+			case Low:
+				l.Add(1)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer src.Stop()
+		src.SetHighFPS(fps)
+		time.Sleep(time.Second)
+		h0, l0, o0 := h.Load(), l.Load(), src.HighOfferedFrames()
+		time.Sleep(3 * time.Second)
+		if o := src.HighOfferedFrames() - o0; o < int(h.Load()-h0)-2 {
+			t.Errorf("offered %d < encoded %d", o, h.Load()-h0)
+		}
+		return int(h.Load()-h0) / 3, int(l.Load()-l0) / 3
+	}
+	if h, l := count(ModeDesktop, 10); h < 8 || h > 12 || l < 13 {
+		t.Errorf("desktop at 10: HIGH %d fps, LOW %d fps", h, l)
+	}
+	if h, _ := count(ModeGame, 60); h < 50 {
+		t.Errorf("game: HIGH %d fps", h)
+	}
 }

@@ -30,10 +30,10 @@ func TestCreateJoinLeave(t *testing.T) {
 	defer b.Shutdown()
 
 	ctx := context.Background()
-	if err := a.Create(ctx, ""); err != nil {
+	if err := a.Create(ctx, "s3cret-pw", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Create(ctx, ""); err != ErrInSession {
+	if err := a.Create(ctx, "", true); err != ErrInSession {
 		t.Fatalf("second create: %v", err)
 	}
 	link := a.State().(UIState).Session.Link

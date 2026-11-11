@@ -5,12 +5,8 @@
   var code = document.body.dataset.code;
   var pw = location.hash.slice(1);
   history.replaceState(null, "", location.pathname);
-  if (!pw) {
-    document.getElementById("opening").hidden = true;
-    document.getElementById("nopw").hidden = false;
-    return;
-  }
-  var target = "blite://join/" + encodeURIComponent(code) + "#" + pw;
+  // No password: an open room.
+  var target = "blite://join/" + encodeURIComponent(code) + (pw ? "#" + pw : "");
   var retry = document.getElementById("retry");
   retry.href = target;
   location.href = target;

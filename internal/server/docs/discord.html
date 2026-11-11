@@ -1,0 +1,40 @@
+{{define "title"}}Discord integration{{end}}
+{{define "description"}}Connect Discord to Bellion Share to go live in your voice channel, or watch whoever is sharing there, with one click.{{end}}
+{{define "body"}}
+<h1>Discord integration</h1>
+<p class="lead">Bellion Share can follow the Discord voice channel you're in, so your friends in that channel find your stream without anyone pasting a link.</p>
+
+<h2>Connect Discord</h2>
+<ol>
+  <li>Start the Discord desktop app on the same computer as Bellion Share.</li>
+  <li>In Bellion Share, press <strong>Connect Discord</strong>.</li>
+  <li>Approve <em>Bellion</em> in the Discord window that opens. This lets Bellion Share see which voice channel you are in, nothing else.</li>
+</ol>
+<p>You only do this once per computer. If Discord isn't running, Bellion Share says so and shows the normal Go live and Watch buttons.</p>
+
+<h2>Go live in your voice channel</h2>
+<figure>
+  <a href="/static/shots/lobby-discord.webp"><img src="/static/shots/lobby-discord.webp" width="1000" height="330" alt="Bellion Share showing You're in #gaming (Game Night) on Discord, with a Go live in #gaming button" loading="lazy"></a>
+  <figcaption>In a Discord voice channel: one click to go live there.</figcaption>
+</figure>
+<p>Join a voice channel in Discord. Bellion Share shows the channel and a <strong>Go live in #channel</strong> button. Pressing it starts a session tied to that channel, shares your screen and copies the share link as usual (the <em>Options</em> for a password and end-to-end encryption apply too).</p>
+
+<h2>Watch someone in your voice channel</h2>
+<figure>
+  <a href="/static/shots/lobby-watch.webp"><img src="/static/shots/lobby-watch.webp" width="1000" height="330" alt="Bellion Share showing Someone is sharing in #gaming (Game Night) (3 people), with a Watch button" loading="lazy"></a>
+  <figcaption>Someone is sharing in your voice channel: one click to watch.</figcaption>
+</figure>
+<p>When someone in your voice channel has gone live, Bellion Share shows how many people are in that session and a <strong>Watch</strong> button. If the session has a password, it asks for it.</p>
+
+<h2>What Bellion sees</h2>
+<p>Bellion Share only reads which voice channel you're in (and the Discord server's name, to show it). Our server remembers which voice channel a live session is tied to, in memory, until the session ends. Bellion doesn't read your messages, servers or friends. The app keeps its Discord login on your computer. Details are in the <a href="/privacy">Privacy Policy</a>.</p>
+<p>To disconnect, open Discord's <em>User Settings &gt; Authorized Apps</em> and remove <em>Bellion</em>.</p>
+
+<h2>If it doesn't work</h2>
+<ul>
+  <li><strong>"Discord isn't running on this computer"</strong>: start the Discord desktop app (the browser version can't talk to other apps). Bellion Share looks for it again every 15 seconds.</li>
+  <li><strong>"Discord didn't allow it"</strong>: until Discord approves the Bellion app for everyone, only accounts added as testers can connect it.</li>
+  <li><strong>No Go live button</strong>: join a voice channel first; text channels don't count.</li>
+  <li>Share links work without Discord: paste one in any chat.</li>
+</ul>
+{{end}}

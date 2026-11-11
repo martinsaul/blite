@@ -273,3 +273,76 @@ func TestRelayFwdKeepsSeqGaps(t *testing.T) {
 		t.Fatalf("timeline not continued: %d", f.tsOff+90000)
 	}
 }
+
+// The same source arriving on another stream (the origin moved to another
+// relay) is a switch: wait for its keyframe, then continue the output.
+func TestRelayFwdNewStream(t *testing.T) {
+	track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "slot0", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newRelayFwd(track)
+	pkt := func(ssrc uint32, seq uint16, key bool) *rtp.Packet {
+		nal := byte(0x41)
+		if key {
+			nal = 0x65
+		}
+		return &rtp.Packet{Header: rtp.Header{SSRC: ssrc, SequenceNumber: seq}, Payload: []byte{nal, 0}}
+	}
+	f.setWant(srcScreen)
+	f.forward(srcScreen, pkt(1, 100, true))
+	f.forward(srcScreen, pkt(1, 101, false))
+	if !f.forward(srcScreen, pkt(2, 40000, false)) {
+		t.Fatal("a delta on a new stream should ask for a keyframe")
+	}
+	if f.nextSeq != 2 {
+		t.Fatalf("new stream's delta forwarded: nextSeq %d", f.nextSeq)
+	}
+	f.forward(srcScreen, pkt(2, 40001, true))
+	f.forward(srcScreen, pkt(2, 40002, false))
+	if f.nextSeq != 4 {
+		t.Fatalf("after the new stream's keyframe: nextSeq %d", f.nextSeq)
+	}
+}
+
+// A desktop share's sole HIGH viewer steps the frame rate down before the
+// layer, and comes back on HIGH at the lowest rate.
+func TestLayerPolicyFPSSteps(t *testing.T) {
+	lp := layerPolicy{fpsSteps: len(highFPS) - 1}
+	now := time.Unix(0, 0)
+	sec := 0
+	bad := func(cur int) int {
+		sec += 5 // past settle
+		lp.observe(cur, rr{lost: 0.2}, now.Add(time.Duration(sec)*time.Second))
+		return lp.observe(cur, rr{lost: 0.2}, now.Add(time.Duration(sec+1)*time.Second))
+	}
+	for _, want := range []int{20, 15, 10} {
+		if got := bad(levelHigh); got != levelHigh || lp.fpsCap() != want {
+			t.Fatalf("level %d at %d fps, want HIGH at %d", got, lp.fpsCap(), want)
+		}
+	}
+	if got := bad(levelHigh); got != levelLow {
+		t.Fatalf("after the last fps step: level %d, want LOW", got)
+	}
+	// Up again: HIGH at 10 fps, then one fps step per probe.
+	lp.ewma, lp.backoff = 0, minBackoff
+	sec += 600
+	if got := lp.observe(levelLow, rr{}, now.Add(time.Duration(sec)*time.Second)); got != levelHigh || lp.fpsCap() != 10 {
+		t.Fatalf("probe up: level %d at %d fps", got, lp.fpsCap())
+	}
+	sec += 600
+	if got := lp.observe(levelHigh, rr{}, now.Add(time.Duration(sec)*time.Second)); got != levelHigh || lp.fpsCap() != 15 {
+		t.Fatalf("fps probe up: level %d at %d fps", got, lp.fpsCap())
+	}
+	// Steps withdrawn (game mode, or another viewer on HIGH): full rate.
+	lp.fpsSteps = 0
+	sec += 5
+	lp.observe(levelHigh, rr{}, now.Add(time.Duration(sec)*time.Second))
+	if lp.fpsCap() != 0 {
+		t.Fatalf("fps cap %d without steps", lp.fpsCap())
+	}
+	// Without steps, HIGH goes straight down a layer, as before.
+	if got := bad(levelHigh); got != levelLow {
+		t.Fatalf("no steps: level %d, want LOW", got)
+	}
+}

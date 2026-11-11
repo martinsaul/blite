@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -106,6 +108,25 @@ func sendReport(ctx context.Context, server string, r proto.Report) error {
 	return nil
 }
 
+// recentLog is the last n whole lines of the log file at path.
+func recentLog(path string, n int) string {
+	if path == "" {
+		return ""
+	}
+	t, err := tail(path, 16<<10)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(t, "\n"), "\n")
+	if len(lines) > 1 {
+		lines = lines[1:] // the first may be cut
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func tail(path string, n int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -196,6 +217,52 @@ type reporter struct {
 	base   proto.Report // platform, version, build, OS
 	name   func() string
 	log    *slog.Logger
+	// system is a plain-text summary of this computer and our state for
+	// the zip (system.txt); nil = none.
+	system func() string
+}
+
+// Send logs also uploads a zip: whole log files (up to zipFileMax each,
+// the newest zipFiles of them) and system.txt, at most zipMax compressed.
+const (
+	zipFiles   = 6
+	zipFileMax = 32 << 20
+	zipMax     = 8 << 20
+)
+
+// buildZip packs the newest of names (sorted oldest first) from dir with
+// system, dropping the oldest files until it fits zipMax.
+func buildZip(dir string, names []string, system string) ([]byte, []string, error) {
+	if len(names) > zipFiles {
+		names = names[len(names)-zipFiles:]
+	}
+	for len(names) > 0 {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		if system != "" {
+			w, _ := zw.Create("system.txt")
+			io.WriteString(w, system)
+		}
+		for _, n := range names {
+			t, err := tail(filepath.Join(dir, n), zipFileMax)
+			if err != nil {
+				continue
+			}
+			w, err := zw.Create(n)
+			if err != nil {
+				return nil, nil, err
+			}
+			io.WriteString(w, t)
+		}
+		if err := zw.Close(); err != nil {
+			return nil, nil, err
+		}
+		if buf.Len() <= zipMax {
+			return buf.Bytes(), names, nil
+		}
+		names = names[1:]
+	}
+	return nil, nil, errors.New("logs too large to zip")
 }
 
 // previous reports earlier runs' crashes, once each, in the background.
@@ -223,7 +290,36 @@ func (r *reporter) previous() {
 	}
 }
 
-// send uploads our current log and the newest earlier one (the user's
+// pickUserLogs chooses what "Send logs" uploads, oldest first: this run's
+// log and the two newest others. This run's log is ours (current) when we
+// write one, else the guard's newest journal still without "-event": the
+// guard renames a journal only once its run has ended. Going by newest name
+// alone sent only the stubs of short runs (each blite:// link starts one)
+// and left out the session being reported.
+func pickUserLogs(names []string, current string) []string {
+	sort.Strings(names)
+	if current == "." || !slices.Contains(names, current) {
+		current = ""
+		for _, n := range names {
+			if !strings.HasSuffix(n, "-event.log") && !ownSegment.MatchString(n) {
+				current = n
+			}
+		}
+	}
+	var out []string
+	for i := len(names) - 1; i >= 0 && len(out) < 2; i-- {
+		if names[i] != current {
+			out = append(out, names[i])
+		}
+	}
+	if current != "" {
+		out = append(out, current)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// send uploads this run's log and the two newest others (the user's
 // "Send logs").
 func (r *reporter) send(ctx context.Context) error {
 	l := logState()
@@ -237,10 +333,7 @@ func (r *reporter) send(ctx context.Context) error {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Strings(names)
-	if len(names) > 2 {
-		names = names[len(names)-2:]
-	}
+	names = pickUserLogs(names, filepath.Base(l.File))
 	if len(names) == 0 {
 		err := errors.New("no log files in " + l.Dir)
 		setLogs(func(x *logInfo) { x.Report = err.Error() })
@@ -253,12 +346,51 @@ func (r *reporter) send(ctx context.Context) error {
 	}
 	rep := r.base
 	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "user", strings.Join(names, ", "), b.String(), l.Guard
+	var all []string
+	for _, e := range es {
+		if n := e.Name(); strings.HasSuffix(n, ".log") {
+			all = append(all, n)
+		}
+	}
+	sort.Strings(all)
+	system := ""
+	if r.system != nil {
+		system = r.system()
+	}
+	z, zipped, zerr := buildZip(l.Dir, all, system)
+	if zerr != nil {
+		r.log.Warn("log zip", "err", zerr)
+	}
+	rep.Zip = z
 	err := sendReport(ctx, r.server, rep)
+	if err != nil && len(rep.Zip) > 0 && ctx.Err() == nil {
+		// A server from before zips refuses the size: send the tails alone.
+		r.log.Warn("logs with zip refused, sending without", "err", err)
+		rep.Zip = nil
+		err = sendReport(ctx, r.server, rep)
+	} else if err == nil && len(z) > 0 {
+		r.log.Info("log zip sent", "files", strings.Join(zipped, ","), "bytes", len(z))
+	}
 	res := "sent " + time.Now().Format("15:04")
 	if err != nil {
 		res = "could not send: " + err.Error()
 	}
 	setLogs(func(x *logInfo) { x.Report = res })
 	r.log.Info("logs sent by the user", "result", res)
+	return err
+}
+
+// feedback sends what the user wrote in the feedback dialog: an idea or a
+// problem, with the diagnostics (no names, keys or links) if they agreed.
+// The server keeps it as a report of kind "feedback".
+func (r *reporter) feedback(ctx context.Context, kind, text, diag string) error {
+	rep := r.base
+	rep.Name, rep.Kind, rep.Note = r.name(), "feedback", kind
+	rep.Log = "feedback (" + kind + "):\n" + text + "\n"
+	if diag != "" {
+		rep.Log += "\n===== diagnostics\n" + diag
+	}
+	err := sendReport(ctx, r.server, rep)
+	r.log.Info("feedback sent", "kind", kind, "chars", len(text), "err", err)
 	return err
 }

@@ -28,6 +28,7 @@ var (
 	ErrNotOwner         = errors.New(proto.ErrNotOwner)
 	ErrBanned           = errors.New(proto.ErrBanned)
 	ErrNoPeer           = errors.New(proto.ErrNoPeer)
+	ErrChannelBusy      = errors.New(proto.ErrChannelBusy)
 )
 
 // Outbox receives messages for one peer. The server implements it per connection.
@@ -49,13 +50,14 @@ type Peer struct {
 	IDKey string
 	Ver   string // client build label
 	Build int    // client build number (0 = unknown)
+	caps  proto.Caps
 
 	resume string
 	out    Outbox    // nil while disconnected
 	lostAt time.Time // when out became nil
 }
 
-// Room is a set of up to proto.MaxPeers peers sharing a password.
+// Room is a set of peers sharing a password (at most Manager.MaxPeers).
 type Room struct {
 	Code  string
 	pw    passwordHash
@@ -64,16 +66,26 @@ type Room struct {
 	// relayQ is the relay queue in volunteer order; its head is the active
 	// relay, and an empty queue means full mesh.
 	relayQ []string
+	paused bool       // older members were last told relay mode is paused (room too big)
+	plan   proto.Plan // the relay plan newer members were last told (plan.go)
+	e2ee   bool       // media is encrypted end to end: builds below proto.E2EEBuild may not join
+	// channel: the Discord voice channel this room is tied to ("" none).
+	channel string
 
-	// Ownership. The owner is always an online member, or ""
-	// while nobody is. It passes on as soon as the owner's connection
-	// drops: to the earliest-joined online member of allowed if any, else
-	// to the host (a hosted relay, owner of the room it created), else to
-	// the earliest-joined online member.
+	// Ownership. The owner is an online member, or "" while nobody is,
+	// except while held (hold). An owner who leaves hands over at once; one
+	// whose connection drops or who restarts into an update keeps the room
+	// for OwnerReturnWindow. Handing over goes to the earliest-joined
+	// online member of allowed if any, else to the host (a hosted relay,
+	// owner of the room it created), else to the earliest-joined online
+	// member.
 	owner   string
 	host    string          // hosted relay's peer ID ("" = an ordinary room)
 	allowed map[string]bool // identity keys that take ownership from the host
 	banned  map[string]bool // identity keys the owner banned
+	// hold: the owner dropped or left to update. Until hold.until nobody
+	// else gets the room; owner keeps the away peer's ID meanwhile.
+	hold *ownerHold
 
 	emptyAt time.Time // when the last peer left; zero while occupied
 }
@@ -115,6 +127,9 @@ func (r *Room) wantOwner() string {
 // electLocked updates the owner and announces a change to everyone but
 // except (a member whose Welcome, sent after this, carries it).
 func (m *Manager) electLocked(r *Room, except string) {
+	if m.holding(r) {
+		return
+	}
 	if o := r.wantOwner(); o != r.owner {
 		r.owner = o
 		m.broadcastLocked(r, except, proto.Owner{T: proto.TOwner, PeerID: o})
@@ -125,10 +140,54 @@ func (m *Manager) electLocked(r *Room, except string) {
 // owner. (Admin roles would join here.)
 func (r *Room) canModerate(peer string) bool { return peer != "" && peer == r.owner }
 
+// OwnerReturnWindow is how long an owner whose connection dropped, or who
+// restarts into an update (proto.LeaveUpdate), keeps the room: resuming,
+// or rejoining with the same identity key, takes it back. After that it
+// passes on.
+const OwnerReturnWindow = 2 * time.Minute
+
+type ownerHold struct {
+	idKey string // "" = only a resume of the same slot takes it back
+	until time.Time
+}
+
+// holdLocked keeps the room for its owner, who just went away.
+func (m *Manager) holdLocked(r *Room, p *Peer) {
+	if p.ID == r.owner && p.ID != r.host {
+		r.hold = &ownerHold{idKey: p.IDKey, until: m.now().Add(OwnerReturnWindow)}
+	}
+}
+
+// holding reports whether the room is held for an away owner, dropping a
+// hold that has run out or whose owner is back.
+func (m *Manager) holding(r *Room) bool {
+	if r.hold != nil && (r.online(r.owner) || !m.now().Before(r.hold.until)) {
+		r.hold = nil
+	}
+	return r.hold != nil
+}
+
+// reclaimLocked gives a held room back to peerID if it is the away owner's
+// identity rejoining. Call before electLocked.
+func (m *Manager) reclaimLocked(r *Room, peerID string) {
+	p := r.peers[peerID]
+	if p == nil || p.IDKey == "" || !m.holding(r) || r.hold.idKey != p.IDKey {
+		return
+	}
+	r.hold = nil
+	old := r.peers[r.owner]
+	r.owner = peerID
+	if old != nil && old.out == nil {
+		m.removeLocked(r, old.ID) // its dropped slot: it is back as peerID
+	}
+	m.broadcastLocked(r, peerID, proto.Owner{T: proto.TOwner, PeerID: peerID})
+}
+
 // Manager owns all rooms. All methods are safe for concurrent use.
 type Manager struct {
 	mu          sync.Mutex
 	rooms       map[string]*Room
+	channels    map[string]string // Discord channel ID -> room code
 	ResumeGrace time.Duration
 	// EmptyGrace is how long an empty room survives, so people who all
 	// dropped out (or everyone restarting Blite) can come back on the same link.
@@ -137,7 +196,9 @@ type Manager struct {
 	// Nobody may volunteer while a member is below it, and while a relay is
 	// active such clients can't join.
 	MinRelayBuild int
-	now           func() time.Time
+	// MaxPeers caps room size (0 = no cap). Set by the server operator.
+	MaxPeers int
+	now      func() time.Time
 }
 
 // DefaultMinRelayBuild is MinRelayBuild for NewManager: the first release
@@ -150,7 +211,7 @@ const DefaultEmptyGrace = 5 * time.Minute
 // NewManager returns a Manager whose peers keep their slot for resumeGrace after
 // their connection drops.
 func NewManager(resumeGrace time.Duration) *Manager {
-	return &Manager{rooms: map[string]*Room{}, ResumeGrace: resumeGrace, EmptyGrace: DefaultEmptyGrace, MinRelayBuild: DefaultMinRelayBuild, now: time.Now}
+	return &Manager{rooms: map[string]*Room{}, channels: map[string]string{}, ResumeGrace: resumeGrace, EmptyGrace: DefaultEmptyGrace, MinRelayBuild: DefaultMinRelayBuild, now: time.Now}
 }
 
 func randToken(n int) string {
@@ -172,16 +233,26 @@ type Seat struct {
 	PeerID string
 	Resume string
 	Others []proto.Peer
-	// RelayQueue is the room's relay queue (see proto.Topology).
-	RelayQueue []string
+	// RelayQueue, RelayPaused, RelayWaiting: the room's relay queue as
+	// members see it (see proto.Topology and Room.topology).
+	RelayQueue   []string
+	RelayPaused  bool
+	RelayWaiting []string
 	// Owner is the room owner's peer ID.
 	Owner string
+	// Plan is the relay plan (nil for builds below proto.MultiRelayBuild).
+	Plan *proto.Plan
+	// E2EE: the room's media is encrypted end to end.
+	E2EE bool
 }
 
 // Create makes a room with the caller as its first peer. Hashing happens
 // outside the lock.
-func (m *Manager) Create(password, name, idKey, ver string, build int, out Outbox) (Seat, error) {
-	if len(password) < MinPasswordLen || len(password) > MaxPasswordLen || !validName(name) || !validIDKey(idKey) || !validVer(ver) {
+func (m *Manager) Create(password, name, idKey, ver string, build int, e2ee bool, out Outbox) (Seat, error) {
+	if e2ee && build < proto.E2EEBuild {
+		return Seat{}, ErrBadRequest
+	}
+	if !validPassword(password) || !validName(name) || !validIDKey(idKey) || !validVer(ver) {
 		return Seat{}, ErrBadRequest
 	}
 	pw := hashPassword(password)
@@ -192,11 +263,12 @@ func (m *Manager) Create(password, name, idKey, ver string, build int, out Outbo
 	for m.rooms[code] != nil {
 		code = NewCode()
 	}
-	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}}
+	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, e2ee: e2ee}
 	m.rooms[code] = r
 	seat := m.seatLocked(r, name, idKey, ver, build, out)
 	m.electLocked(r, seat.PeerID)
 	seat.Owner = r.owner
+	seat.Plan = r.planFor(r.peers[seat.PeerID])
 	return seat, nil
 }
 
@@ -204,8 +276,11 @@ func (m *Manager) Create(password, name, idKey, ver string, build int, out Outbo
 // already exists, it joins it instead, password and all. Either way the
 // caller is the room's host; owners are the identity keys that take
 // ownership from it.
-func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int, owners []string, out Outbox) (Seat, error) {
-	if NormalizeCode(code) != code || len(password) < MinPasswordLen || len(password) > MaxPasswordLen || !validName(name) || !validIDKey(idKey) || !validVer(ver) || len(owners) > 64 {
+func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int, e2ee bool, owners []string, out Outbox) (Seat, error) {
+	if e2ee && build < proto.E2EEBuild {
+		return Seat{}, ErrBadRequest
+	}
+	if NormalizeCode(code) != code || !validPassword(password) || !validName(name) || !validIDKey(idKey) || !validVer(ver) || len(owners) > 64 {
 		return Seat{}, ErrBadRequest
 	}
 	allowed := map[string]bool{}
@@ -235,12 +310,13 @@ func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int
 		return seat, nil
 	}
 	defer m.mu.Unlock()
-	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, allowed: allowed}
+	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, allowed: allowed, e2ee: e2ee}
 	m.rooms[code] = r
 	seat := m.seatLocked(r, name, idKey, ver, build, out)
 	r.host = seat.PeerID
 	m.electLocked(r, seat.PeerID)
 	seat.Owner = r.owner
+	seat.Plan = r.planFor(r.peers[seat.PeerID])
 	return seat, nil
 }
 
@@ -271,18 +347,22 @@ func (m *Manager) Join(code, password, name, idKey, ver string, build int, out O
 	if idKey != "" && r.banned[idKey] {
 		return Seat{}, ErrBanned
 	}
-	if len(r.peers) >= proto.MaxPeers {
+	if m.MaxPeers > 0 && len(r.peers) >= m.MaxPeers {
 		return Seat{}, ErrRoomFull
 	}
-	if len(r.relayQ) > 0 && build < m.MinRelayBuild {
+	if len(r.relayQ) > 0 && build < m.MinRelayBuild || r.e2ee && build < proto.E2EEBuild {
 		return Seat{}, ErrUpdateRequired
 	}
 	seat := m.seatLocked(r, name, idKey, ver, build, out)
 	r.emptyAt = time.Time{}
-	joined := proto.PeerJoined{T: proto.TPeerJoined, Peer: proto.Peer{PeerID: seat.PeerID, Name: name, IDKey: idKey, Client: ver}}
+	joined := proto.PeerJoined{T: proto.TPeerJoined, Peer: proto.Peer{PeerID: seat.PeerID, Name: name, IDKey: idKey, Client: ver, Build: build}}
 	m.broadcastLocked(r, seat.PeerID, joined)
+	m.reclaimLocked(r, seat.PeerID)
 	m.electLocked(r, seat.PeerID)
+	m.announceLocked(r, seat.PeerID, false)
 	seat.Owner = r.owner
+	seat.RelayQueue, seat.RelayPaused, seat.RelayWaiting = r.topology()
+	seat.Plan = r.planFor(r.peers[seat.PeerID])
 	return seat, nil
 }
 
@@ -291,11 +371,25 @@ func (m *Manager) seatLocked(r *Room, name, idKey, ver string, build int, out Ou
 	others := m.othersLocked(r, "")
 	r.peers[p.ID] = p
 	r.order = append(r.order, p.ID)
-	return Seat{Room: r.Code, PeerID: p.ID, Resume: p.resume, Others: others, RelayQueue: r.queue()}
+	q, paused, waiting := r.topology()
+	return Seat{Room: r.Code, PeerID: p.ID, Resume: p.resume, Others: others, RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, E2EE: r.e2ee}
 }
 
-// queue returns a copy of the relay queue.
-func (r *Room) queue() []string { return append([]string(nil), r.relayQ...) }
+// topology is the relay queue members are told: the queue itself, or, while
+// the room is too big for relay mode, an empty queue (mesh) with the
+// volunteers waiting.
+func (r *Room) topology() (queue []string, paused bool, waiting []string) {
+	q := append([]string(nil), r.relayQ...)
+	if len(q) > 0 && len(r.peers) > proto.RelayMaxPeers {
+		return nil, true, q
+	}
+	return q, false, nil
+}
+
+func (r *Room) topologyMsg() proto.Topology {
+	q, paused, waiting := r.topology()
+	return proto.Topology{T: proto.TTopology, Queue: q, Paused: paused, Waiting: waiting}
+}
 
 func (m *Manager) othersLocked(r *Room, except string) []proto.Peer {
 	others := make([]proto.Peer, 0, len(r.order))
@@ -304,7 +398,7 @@ func (m *Manager) othersLocked(r *Room, except string) []proto.Peer {
 			continue
 		}
 		p := r.peers[id]
-		others = append(others, proto.Peer{PeerID: p.ID, Name: p.Name, IDKey: p.IDKey, Client: p.Ver})
+		others = append(others, proto.Peer{PeerID: p.ID, Name: p.Name, IDKey: p.IDKey, Client: p.Ver, Build: p.Build})
 	}
 	return others
 }
@@ -321,14 +415,10 @@ func (m *Manager) Resume(code, peerID, token string, out Outbox) (Seat, error) {
 	if p == nil || subtle.ConstantTimeCompare([]byte(token), []byte(p.resume)) != 1 {
 		return Seat{}, ErrResumeFailed
 	}
-	if r.owner == p.ID {
-		// Resumed before we noticed its old connection die: it dropped
-		// all the same, and an owner who drops hands over.
-		r.owner = ""
-	}
 	p.out, p.lostAt = out, time.Time{}
 	m.electLocked(r, p.ID) // it may be the only one online
-	return Seat{Room: code, PeerID: p.ID, Resume: p.resume, Others: m.othersLocked(r, p.ID), RelayQueue: r.queue(), Owner: r.owner}, nil
+	q, paused, waiting := r.topology()
+	return Seat{Room: code, PeerID: p.ID, Resume: p.resume, Others: m.othersLocked(r, p.ID), RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, Owner: r.owner, Plan: r.planFor(p), E2EE: r.e2ee}, nil
 }
 
 // Volunteer adds peerID to the end of its room's relay queue (on) or removes
@@ -355,7 +445,7 @@ func (m *Manager) Volunteer(code, peerID string, on bool) error {
 		}
 	}
 	r.relayQ = append(r.relayQ, peerID)
-	m.topologyLocked(r)
+	m.announceLocked(r, "", true)
 	return nil
 }
 
@@ -363,12 +453,8 @@ func (m *Manager) Volunteer(code, peerID string, on bool) error {
 func (m *Manager) unqueueLocked(r *Room, peerID string) {
 	if i := slices.Index(r.relayQ, peerID); i >= 0 {
 		r.relayQ = slices.Delete(r.relayQ, i, i+1)
-		m.topologyLocked(r)
+		m.announceLocked(r, "", true)
 	}
-}
-
-func (m *Manager) topologyLocked(r *Room) {
-	m.broadcastLocked(r, "", proto.Topology{T: proto.TTopology, Queue: r.queue()})
 }
 
 // Relay delivers msg to peer `to` in the same room as `from`. Peers in other
@@ -396,6 +482,22 @@ func (m *Manager) Leave(code, peerID string) {
 	}
 }
 
+// LeaveForUpdate is Leave for a peer restarting into a new build: if it
+// owns the room, its identity gets ownership back on rejoining within
+// OwnerReturnWindow.
+func (m *Manager) LeaveForUpdate(code, peerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.rooms[code]
+	if r == nil {
+		return
+	}
+	if p := r.peers[peerID]; p != nil && p.IDKey != "" { // else it couldn't reclaim
+		m.holdLocked(r, p)
+	}
+	m.removeLocked(r, peerID)
+}
+
 // Disconnected marks a peer's connection as lost, if out is still its current
 // connection (a resumed peer's old socket closing must not detach the new one).
 // The slot is held for ResumeGrace; Sweep removes it after that.
@@ -408,7 +510,8 @@ func (m *Manager) Disconnected(code, peerID string, out Outbox) {
 	}
 	if p := r.peers[peerID]; p != nil && p.out == out {
 		p.out, p.lostAt = nil, m.now()
-		m.electLocked(r, "") // an owner who drops hands over at once
+		m.holdLocked(r, p)
+		m.electLocked(r, "")
 	}
 }
 
@@ -494,8 +597,14 @@ func (m *Manager) Sweep() {
 		if len(r.peers) == 0 {
 			if !r.emptyAt.After(emptyCutoff) {
 				delete(m.rooms, code)
+				if r.channel != "" && m.channels[r.channel] == code {
+					delete(m.channels, r.channel)
+				}
 			}
 			continue
+		}
+		if r.hold != nil {
+			m.electLocked(r, "") // hands over once the hold runs out
 		}
 		for _, id := range append([]string(nil), r.order...) {
 			if p := r.peers[id]; p.out == nil && !p.lostAt.IsZero() && p.lostAt.Before(cutoff) {
@@ -518,12 +627,18 @@ func (m *Manager) removeLocked(r *Room, peerID string) {
 	}
 	if len(r.peers) == 0 {
 		r.relayQ = nil
-		r.owner = ""        // whoever joins next owns it
-		r.emptyAt = m.now() // Sweep deletes it after EmptyGrace
+		r.paused = false
+		r.plan = proto.Plan{Epoch: r.plan.Epoch}
+		r.owner, r.hold = "", nil // whoever joins next owns it
+		r.emptyAt = m.now()       // Sweep deletes it after EmptyGrace
 		return
 	}
 	m.broadcastLocked(r, peerID, proto.PeerLeft{T: proto.TPeerLeft, PeerID: peerID})
-	m.unqueueLocked(r, peerID)
+	queued := slices.Contains(r.relayQ, peerID)
+	if queued {
+		r.relayQ = slices.DeleteFunc(r.relayQ, func(id string) bool { return id == peerID })
+	}
+	m.announceLocked(r, "", queued)
 	m.electLocked(r, "")
 }
 
@@ -540,4 +655,56 @@ func (m *Manager) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.rooms)
+}
+
+// validChannel: a Discord snowflake (digits).
+func validChannel(id string) bool {
+	if len(id) < 5 || len(id) > 25 {
+		return false
+	}
+	for _, c := range id {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// TieChannel ties room code to Discord channel id. It fails while another
+// room with people in it holds the channel.
+func (m *Manager) TieChannel(code, id string) error {
+	if !validChannel(id) {
+		return ErrBadRequest
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.rooms[code]
+	if r == nil {
+		return ErrNoRoom
+	}
+	if old := m.rooms[m.channels[id]]; old != nil && old != r && len(old.peers) > 0 {
+		return ErrChannelBusy
+	}
+	r.channel = id
+	m.channels[id] = code
+	return nil
+}
+
+// ChannelRoom is what GET /v1/channel/{id} tells people in that channel.
+type ChannelRoom struct {
+	Room   string `json:"room"`
+	Open   bool   `json:"open"` // no password needed
+	People int    `json:"people"`
+}
+
+// Channel returns the room tied to Discord channel id, if it has people.
+func (m *Manager) Channel(id string) (ChannelRoom, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	code := m.channels[id]
+	r := m.rooms[code]
+	if r == nil || len(r.peers) == 0 {
+		return ChannelRoom{}, false
+	}
+	return ChannelRoom{Room: code, Open: r.pw.key == nil, People: len(r.peers)}, true
 }

@@ -17,12 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 
 	"blite/internal/identity"
@@ -41,12 +41,19 @@ type signalMsg struct {
 	// Origin, with MaxLayer, sent to the relay: the cap is for this
 	// member's relayed video, not the relay's own.
 	Origin string `json:"origin,omitempty"`
-	// Slots, from the relay: the origin peer ID in each slot ("" = free).
+	// Slots, from a relay: the slot key (origin peer ID, or with "/low"
+	// its screen-low) in each slot ("" = free).
 	Slots []string `json:"slots,omitempty"`
+	// Bye: the sender closes our connection, which the plan no longer
+	// wants (older clients ignore it and notice the close).
+	Bye bool `json:"bye,omitempty"`
 	// Renditions (resize.go); older clients ignore them.
 	Resize      *resizeMsg      `json:"resize,omitempty"`
 	ResizeReply *resizeReplyMsg `json:"resizeReply,omitempty"`
 	Sending     *sendingMsg     `json:"sending,omitempty"`
+	// End-to-end encryption (e2ee.go).
+	KX  *kxMsg  `json:"kx,omitempty"`
+	Key *keyMsg `json:"key,omitempty"`
 }
 
 // Options configure a Mesh.
@@ -54,13 +61,17 @@ type Options struct {
 	// OnVideo receives each remote peer's H.264 access units (Annex-B), from
 	// that peer's receive goroutine.
 	OnVideo func(peerID string, au []byte)
-	// OnPeer is told when a peer connects (state "connected") or goes away ("gone").
+	// OnPeer is told when a peer connects (state "connected"), drops and
+	// reconnects ("reconnecting"), can't be reached for now ("unreachable",
+	// we try again) or goes away ("gone").
 	OnPeer func(peerID, name, state string)
 	// OnAudio receives each remote peer's Opus frames.
 	OnAudio func(peerID string, frame []byte)
 	// OnKeyframe asks the local encoder of a layer for a keyframe (a peer
 	// switched layer or reported picture loss).
 	OnKeyframe func(layer int)
+	// OnHighFPS caps our HIGH encoder's frame rate (0: full rate).
+	OnHighFPS func(fps int)
 	// OnLayer is told when a peer's forwarder starts sending a different layer.
 	OnLayer func(peerID string, layer int)
 	// OnLowBitrate asks the LOW encoder for a new bitrate (kbit/s).
@@ -98,18 +109,32 @@ type Options struct {
 	OnKicked func(by string, ban bool)
 	// ForceRelay sets ICETransportPolicy=relay (TURN tests).
 	ForceRelay bool
-	Log        *slog.Logger
+	// Build is our client build: the slot count toward peers depends on
+	// both builds (relay.go).
+	Build int
+	// Headless: we never play what we receive (a hosted relay), so as relay
+	// we pull only what others want.
+	Headless bool
+	// CPUFree reports our idle CPU share in percent, for caps (nil = unknown).
+	CPUFree func() int
+	// Port is the UDP port to use for all peers (nil = a new one per
+	// candidate, as Pion does by default).
+	Port *Port
+	Log  *slog.Logger
 }
 
 // Mesh is a running mesh for one room.
 type Mesh struct {
 	sig   *sigclient.Client
-	api   *webrtc.API
-	cfg   webrtc.Configuration
-	pkz   [numLayers]*layerPacketizer
-	audio *webrtc.TrackLocalStaticSample // one Opus track bound to every peer
-	opt   Options
-	cap   webrtc.RTPCodecCapability
+	api   *webrtc.API // apiMu
+	apiMu sync.Mutex
+	// newAPI builds the API around a UDP mux (to recycle the port).
+	newAPI func(mux ice.UDPMux) *webrtc.API
+	cfg    webrtc.Configuration
+	pkz    [numLayers]*layerPacketizer
+	audio  *audioTrack // one audio track bound to every peer (RED or Opus each)
+	opt    Options
+	cap    webrtc.RTPCodecCapability
 
 	mu     sync.Mutex
 	peers  map[string]*remote
@@ -118,20 +143,33 @@ type Mesh struct {
 	vers   map[string]string // client build labels
 	done   chan struct{}
 
-	members   map[string]bool // other members now in the room
-	queue     []string        // relay queue; queue[0] is the relay (relay.go)
-	topoAt    time.Time       // when the relay last changed
-	caps      map[string]int  // our quality wish per member (SetMaxLayer)
-	slots     [numSlots]string
-	slotOf    map[string]int // as relay: origin -> slot
-	slotsFrom string         // as viewer: the relay that sent slots
-	owner     string         // the room's owner
+	members  map[string]bool // other members now in the room
+	redials  map[string]int  // connection attempts given up per peer, until one connects
+	builds   map[string]int  // their client builds
+	joinedAt map[string]time.Time
+	plan     proto.Plan      // the relay plan (relay.go)
+	topoAt   time.Time       // when the plan last changed relays or homes
+	caps     map[string]int  // our quality wish per member (SetMaxLayer)
+	relaying bool            // we have relay state: as relay, or since
+	served   map[string]bool // former children we still serve (relay.go)
+	origins  map[string]*origin
+	provider map[string]string // origin -> peer we take its media from (cache)
+	demand   map[demandKey]int // what we asked upstream as relay (wire values)
+	owner    string            // the room's owner
 
+	pacer   *pacer // nil = forward unpaced (pacer.go)
+	started time.Time
 	lowKbps atomic.Int32
-	rend    renditions
+	// HIGH's frame rate steps: allowed (desktop), current cap.
+	fpsSteps atomic.Bool
+	highFPS  atomic.Int32
+	rend     renditions
 	// statsMu keeps GetStats and Close of a PeerConnection apart: Pion
 	// races between the two.
 	statsMu sync.RWMutex
+	port    int       // our UDP port with opt.Port
+	release sync.Once // of opt.Port
+	crypt   *crypt    // nil = the room's media isn't encrypted end to end
 }
 
 // closePC closes a PeerConnection, never during Stats.
@@ -153,6 +191,8 @@ type remote struct {
 	polMu      sync.Mutex    // policy: readRTCP, watchReports and preferences
 	level      atomic.Int32  // send level (levelHigh..levelOff); written under polMu
 	loss       atomic.Uint64 // float64 bits of the last reported fraction lost
+	fpsCap     atomic.Int32  // HIGH frame rate this peer can take (0: no cap); written under polMu
+	offHigh    atomic.Bool   // its level maps to a layer other than HIGH (setLevel)
 	lastRR     atomic.Int64  // unix nanos of the last receiver report for our video
 	relayTracks
 	rendState
@@ -176,7 +216,26 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 		webrtc.WithNackGeneratorOptions(nack.GeneratorMaxNacksPerPacket(2))); err != nil {
 		return nil, err
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir))
+	newAPI := func(mux ice.UDPMux) *webrtc.API {
+		se := webrtc.SettingEngine{}
+		if mux != nil {
+			se.SetICEUDPMux(mux)
+		}
+		return webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se))
+	}
+	var mux ice.UDPMux
+	port := 0
+	if opt.Port != nil {
+		// Without the shared port we still connect, as before port mapping:
+		// only the router mapping goes unused.
+		if mx, p, err := opt.Port.acquire(); err != nil {
+			opt.Log.Warn("no shared UDP port, using a random port per connection", "err", err)
+			opt.Port = nil
+		} else {
+			mux, port = mx, p
+		}
+	}
+	api := newAPI(mux)
 
 	cfg := webrtc.Configuration{}
 	for _, s := range sig.Welcome.ICEServers {
@@ -186,31 +245,46 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
 	}
 
-	m := &Mesh{sig: sig, api: api, cfg: cfg, opt: opt,
+	m := &Mesh{sig: sig, api: api, newAPI: newAPI, cfg: cfg, opt: opt, port: port,
 		cap: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: clockRate,
 			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
 		peers: map[string]*remote{}, names: map[string]string{}, idKeys: map[string]string{}, vers: map[string]string{}, done: make(chan struct{}),
-		members: map[string]bool{}, caps: map[string]int{}, slotOf: map[string]int{}, queue: sig.Welcome.RelayQueue, owner: sig.Welcome.Owner}
+		members: map[string]bool{}, builds: map[string]int{}, joinedAt: map[string]time.Time{}, caps: map[string]int{}, origins: map[string]*origin{},
+		provider: map[string]string{}, served: map[string]bool{}, demand: map[demandKey]int{}, owner: sig.Welcome.Owner}
+	if w := sig.Welcome; w.Plan != nil {
+		m.plan = *w.Plan
+	} else {
+		m.plan = planFromTopology(proto.Topology{Queue: w.RelayQueue, Paused: w.RelayPaused, Waiting: w.RelayWaiting})
+	}
+	if sig.Welcome.E2EE {
+		m.crypt = newCrypt()
+	}
+	m.relaying = m.amRelayLocked()
 	m.rend.init()
+	m.started = time.Now()
+	if opt.UploadKbps > 0 {
+		m.pacer = newPacer(opt.UploadKbps, m.done)
+	}
 	if opt.Identity.Private == nil {
+		m.releasePort()
 		return nil, errors.New("mesh needs an identity key")
 	}
 	for i := range m.pkz {
 		m.pkz[i] = newLayerPacketizer()
 	}
 	m.lowKbps.Store(int32(lowKbps[levelLow]))
-	audio, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1"},
-		"audio", "blite")
-	if err != nil {
-		return nil, err
-	}
-	m.audio = audio
+	m.audio = newAudioTrack(trackAudio)
 	for _, p := range sig.Welcome.Peers {
 		m.names[p.PeerID] = p.Name
 		m.idKeys[p.PeerID] = p.IDKey
 		m.vers[p.PeerID] = p.Client
+		m.builds[p.PeerID] = p.Build
 		m.members[p.PeerID] = true
+	}
+	if m.crypt != nil {
+		for _, p := range sig.Welcome.Peers {
+			m.sendKX(p.PeerID)
+		}
 	}
 	// As the newcomer we offer to everyone we connect to: all of them in a
 	// mesh, only the relay in relay mode.
@@ -224,11 +298,13 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 	}
 	go m.loop()
 	go m.pruneLoop()
+	go m.capsLoop()
 	return m, nil
 }
 
 // registerCodecs registers only what Blite sends: H.264 constrained baseline
-// and Opus, with Pion's default payload types and feedback. With Pion's whole
+// and Opus (plus RED around it), with Pion's default payload types
+// and feedback. With Pion's whole
 // default codec list, the 11 m-lines of relay mode made a 30 KB offer.
 func registerCodecs(me *webrtc.MediaEngine) error {
 	fb := []webrtc.RTCPFeedback{{Type: "goog-remb"}, {Type: "ccm", Parameter: "fir"}, {Type: "nack"}, {Type: "nack", Parameter: "pli"}}
@@ -240,8 +316,9 @@ func registerCodecs(me *webrtc.MediaEngine) error {
 			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", RTCPFeedback: fb}, PayloadType: 125}, webrtc.RTPCodecTypeVideo},
 		{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeRTX, ClockRate: clockRate,
 			SDPFmtpLine: "apt=125"}, PayloadType: 107}, webrtc.RTPCodecTypeVideo},
+		{webrtc.RTPCodecParameters{RTPCodecCapability: redCap, PayloadType: redPT}, webrtc.RTPCodecTypeAudio},
 		{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio},
+			SDPFmtpLine: "minptime=10;useinbandfec=1"}, PayloadType: opusPT}, webrtc.RTPCodecTypeAudio},
 	} {
 		if err := me.RegisterCodec(c.p, c.t); err != nil {
 			return err
@@ -257,7 +334,7 @@ func (m *Mesh) WriteVideo(layer int, au []byte, d time.Duration) {
 	if layer < 0 || layer >= numLayers {
 		return
 	}
-	pkts := m.pkz[layer].packetize(au, d)
+	pkts := m.pkz[layer].packetize(m.encVideo(au), d)
 	m.mu.Lock()
 	fwds := make([]*forwarder, 0, 2*len(m.peers))
 	for _, r := range m.peers {
@@ -282,7 +359,7 @@ func (m *Mesh) WriteVideo(layer int, au []byte, d time.Duration) {
 
 // WriteAudio sends one Opus frame to every peer (audio has no layers).
 func (m *Mesh) WriteAudio(frame []byte, d time.Duration) {
-	m.audio.WriteSample(media.Sample{Data: frame, Duration: d})
+	m.audio.writeOwn(m.encAudio(frame), d)
 }
 
 // Layers returns the layer each peer is currently receiving from us.
@@ -304,10 +381,18 @@ func (m *Mesh) Done() <-chan struct{} { return m.done }
 func (m *Mesh) Close() {
 	m.sig.Leave()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for id, r := range m.peers {
 		m.closePC(r.pc)
 		delete(m.peers, id)
+	}
+	m.mu.Unlock()
+	m.releasePort()
+}
+
+// releasePort gives our UDP port back, once.
+func (m *Mesh) releasePort() {
+	if m.opt.Port != nil {
+		m.release.Do(m.opt.Port.release)
 	}
 }
 
@@ -323,20 +408,33 @@ func (m *Mesh) loop() {
 			m.names[ev.Joined.PeerID] = ev.Joined.Name
 			m.idKeys[ev.Joined.PeerID] = ev.Joined.IDKey
 			m.vers[ev.Joined.PeerID] = ev.Joined.Client
+			m.builds[ev.Joined.PeerID] = ev.Joined.Build
+			m.joinedAt[ev.Joined.PeerID] = time.Now()
 			m.members[ev.Joined.PeerID] = true
 			m.mu.Unlock()
+			if m.crypt != nil {
+				m.sendKX(ev.Joined.PeerID)
+			}
 			// The newcomer will offer; nothing to do until it does. As relay,
 			// give it a slot.
-			m.assignSlots()
+			m.assignAllSlots()
 		case ev.Left != "":
 			m.mu.Lock()
 			delete(m.members, ev.Left)
 			delete(m.caps, ev.Left)
+			delete(m.origins, ev.Left)
+			delete(m.joinedAt, ev.Left)
 			m.mu.Unlock()
 			m.drop(ev.Left)
-			m.assignSlots()
+			if m.crypt != nil {
+				m.cryptLeft(ev.Left)
+			}
+			m.assignAllSlots()
+			m.pushDemand()
 		case ev.Topology != nil:
-			m.setTopology(ev.Topology.Queue)
+			m.setPlan(planFromTopology(*ev.Topology))
+		case ev.Plan != nil:
+			m.setPlan(*ev.Plan)
 		case ev.Renamed != nil:
 			m.mu.Lock()
 			m.names[ev.Renamed.PeerID] = ev.Renamed.Name
@@ -381,7 +479,7 @@ func (m *Mesh) loop() {
 			for _, id := range gone {
 				m.drop(id)
 			}
-			m.assignSlots()
+			m.assignAllSlots()
 		case ev.Signal != nil:
 			if err := m.handleSignal(ev.Signal); err != nil {
 				m.opt.Log.Warn("signal", "from", ev.Signal.From, "err", err)
@@ -391,7 +489,10 @@ func (m *Mesh) loop() {
 }
 
 func (m *Mesh) newPeer(id string) (*remote, error) {
-	pc, err := m.api.NewPeerConnection(m.cfg)
+	m.apiMu.Lock()
+	api := m.api
+	m.apiMu.Unlock()
+	pc, err := api.NewPeerConnection(m.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -402,6 +503,9 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 	}
 	r := &remote{id: id, pc: pc, fwd: newForwarder(track, layerHigh)}
 	r.mid = -1
+	m.mu.Lock()
+	r.nslots = m.slotCountLocked(id)
+	m.mu.Unlock()
 	sender, err := pc.AddTrack(track)
 	if err != nil {
 		pc.Close()
@@ -436,6 +540,12 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 		}
 		ci := c.ToJSON()
 		m.sig.Signal(id, signalMsg{ICE: &ci})
+		if m.opt.Port != nil {
+			if mc := m.opt.Port.mappedCandidate(c, m.port); mc != nil {
+				m.opt.Log.Info("sending mapped candidate", "peer", id, "candidate", mc.Candidate)
+				m.sig.Signal(id, signalMsg{ICE: mc})
+			}
+		}
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		m.opt.Log.Info("peer state", "peer", id, "state", s.String())
@@ -443,18 +553,24 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 		case webrtc.PeerConnectionStateConnected:
 			m.mu.Lock()
 			r.restarts = 0
+			delete(m.redials, id)
 			m.mu.Unlock()
 			m.resendSending(r)
 			if m.opt.OnPeer != nil {
 				m.opt.OnPeer(id, m.name(id), "connected")
 			}
+			m.forgetProviders()
 			m.mu.Lock()
-			relaying, slots := m.relayLocked() == m.me(), m.slots
+			fwd := m.forwardingLocked() && m.peers[id] == r
 			m.mu.Unlock()
-			if relaying {
-				m.sendSlots(id, slots)
+			if fwd {
+				m.updateTargets()
+				m.sendSlots(r)
+				m.forgetDemand(id)
+				m.pushDemand()
 			}
 		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed:
+			m.forgetProviders()
 			if m.opt.OnPeer != nil {
 				m.opt.OnPeer(id, m.name(id), "reconnecting")
 			}
@@ -497,8 +613,7 @@ func (m *Mesh) watchdog(r *remote) {
 	n, offerer := r.restarts, r.offerer
 	m.mu.Unlock()
 	if n > maxRestarts {
-		m.opt.Log.Info("giving up on peer", "peer", r.id)
-		m.drop(r.id)
+		m.unreachable(r, offerer)
 		return
 	}
 	if offerer {
@@ -508,6 +623,94 @@ func (m *Mesh) watchdog(r *remote) {
 		}
 	}
 	go m.watchdog(r)
+}
+
+// A peer we can't connect to stays a member (they are in the room): we
+// close the connection, say "unreachable", and the side that offered
+// offers again after a growing pause, as long as they stay (the other side
+// waits for that offer).
+const (
+	redialFirst = 10 * time.Second
+	redialMax   = time.Minute
+)
+
+func (m *Mesh) unreachable(r *remote, offerer bool) {
+	m.mu.Lock()
+	if m.peers[r.id] == r {
+		delete(m.peers, r.id)
+	}
+	if m.redials == nil {
+		m.redials = map[string]int{}
+	}
+	n := m.redials[r.id]
+	m.redials[r.id] = n + 1
+	name := m.names[r.id]
+	m.mu.Unlock()
+	m.logPairs(r)
+	m.closePC(r.pc)
+	m.recyclePort()
+	wait := min(redialFirst<<n, redialMax)
+	m.opt.Log.Info("can't reach peer, trying again later", "peer", r.id, "offerer", offerer, "in", wait)
+	if m.opt.OnPeer != nil {
+		m.opt.OnPeer(r.id, name, "unreachable")
+	}
+	if !offerer {
+		return
+	}
+	go func() {
+		select {
+		case <-m.done:
+			return
+		case <-time.After(wait):
+		}
+		m.mu.Lock()
+		_, member := m.members[r.id]
+		_, has := m.peers[r.id] // they offered meanwhile
+		m.mu.Unlock()
+		if !member || has {
+			return
+		}
+		if err := m.offer(r.id); err != nil {
+			m.opt.Log.Warn("offer again", "peer", r.id, "err", err)
+		}
+	}()
+}
+
+// recyclePort reopens our UDP socket when no connection uses it.
+func (m *Mesh) recyclePort() {
+	m.mu.Lock()
+	busy := len(m.peers) > 0
+	m.mu.Unlock()
+	if busy || m.opt.Port == nil {
+		return
+	}
+	if mux := m.opt.Port.recycle(); mux != nil {
+		m.apiMu.Lock()
+		m.api = m.newAPI(mux)
+		m.apiMu.Unlock()
+		m.opt.Log.Info("reopened the udp port: nobody else connected")
+	}
+}
+
+// logPairs logs the ICE candidate pairs of a connection that never
+// connected: which paths were tried and whether any answered.
+func (m *Mesh) logPairs(r *remote) {
+	m.statsMu.RLock()
+	st := r.pc.GetStats()
+	m.statsMu.RUnlock()
+	n := 0
+	for _, v := range st {
+		cp, ok := v.(webrtc.ICECandidatePairStats)
+		if !ok || n >= 12 {
+			continue
+		}
+		n++
+		l, _ := st[cp.LocalCandidateID].(webrtc.ICECandidateStats)
+		rc, _ := st[cp.RemoteCandidateID].(webrtc.ICECandidateStats)
+		m.opt.Log.Info("ice pair", "peer", r.id, "state", cp.State,
+			"local", fmt.Sprintf("%s %s:%d", l.CandidateType, l.IP, l.Port), "remote", fmt.Sprintf("%s %s:%d", rc.CandidateType, rc.IP, rc.Port),
+			"reqSent", cp.RequestsSent, "reqRecv", cp.RequestsReceived, "respSent", cp.ResponsesSent, "respRecv", cp.ResponsesReceived)
+	}
 }
 
 func (m *Mesh) current(r *remote) bool {
@@ -610,7 +813,10 @@ func (m *Mesh) observe(r *remote, rep rr) {
 	r.polMu.Lock()
 	defer r.polMu.Unlock()
 	cur := int(r.level.Load())
+	r.policy.fpsSteps = m.fpsStepsFor(r)
 	target := r.policy.observe(cur, rep, time.Now())
+	r.fpsCap.Store(int32(r.policy.fpsCap()))
+	defer m.updateHighFPS()
 	if target == cur {
 		return
 	}
@@ -622,7 +828,8 @@ func (m *Mesh) observe(r *remote, rep rr) {
 // the shared LOW bitrate.
 func (m *Mesh) setLevel(r *remote, level int) {
 	r.level.Store(int32(level))
-	target := levelLayer(level, r.mid)
+	target := levelLayer(max(level, r.wireCap), r.mid)
+	r.offHigh.Store(target != layerHigh)
 	m.noteSending(r)
 	if _, want := r.fwd.layers(); want != target {
 		if r.fwd.setWant(target) && target < numLayers && m.opt.OnKeyframe != nil {
@@ -634,6 +841,69 @@ func (m *Mesh) setLevel(r *remote, level int) {
 	}
 	m.updateLowBitrate()
 }
+
+// SetFPSSteps allows (desktop shares) or forbids (game) lowering HIGH's
+// frame rate for a congested viewer before switching it to a lower layer.
+func (m *Mesh) SetFPSSteps(on bool) {
+	m.fpsSteps.Store(on)
+	if !on {
+		for _, r := range m.peerList() {
+			r.fpsCap.Store(0) // the policy forgets its step on the next report
+		}
+		m.updateHighFPS()
+	}
+}
+
+// fpsStepsFor is how many frame rate steps r's policy may take: all of
+// them when r is the only peer on our HIGH (lowering it for one viewer
+// would slow the others too), else none.
+func (m *Mesh) fpsStepsFor(r *remote) int {
+	if !m.fpsSteps.Load() {
+		return 0
+	}
+	for _, v := range m.peerList() {
+		if v != r && v.onHigh() {
+			return 0
+		}
+	}
+	return len(highFPS) - 1
+}
+
+// limit is why r gets less than our best (PeerStats.Limit).
+func (r *remote) limit() string {
+	r.polMu.Lock()
+	wire := r.wireCap
+	r.polMu.Unlock()
+	switch level := int(r.level.Load()); {
+	case wire > levelHigh && wire >= level:
+		return "viewer"
+	case level > levelHigh || r.fpsCap.Load() > 0:
+		return "bandwidth"
+	}
+	return ""
+}
+
+// onHigh reports whether r receives our HIGH.
+func (r *remote) onHigh() bool { return !r.offHigh.Load() }
+
+// updateHighFPS runs HIGH at the lowest frame rate a viewer on it can take.
+func (m *Mesh) updateHighFPS() {
+	fps := 0
+	for _, r := range m.peerList() {
+		if c := int(r.fpsCap.Load()); c > 0 && r.onHigh() && (fps == 0 || c < fps) {
+			fps = c
+		}
+	}
+	if int(m.highFPS.Swap(int32(fps))) != fps {
+		m.opt.Log.Info("high frame rate", "fps", fps)
+		if m.opt.OnHighFPS != nil {
+			m.opt.OnHighFPS(fps)
+		}
+	}
+}
+
+// HighFPSCap is the frame rate HIGH runs at for congested viewers (0: full).
+func (m *Mesh) HighFPSCap() int { return int(m.highFPS.Load()) }
 
 // updateLowBitrate runs the LOW encoder at the bitrate of the worst-off peer
 // that receives LOW.
@@ -680,9 +950,9 @@ func ntpMiddle(t time.Time) uint32 {
 }
 
 // receive reads one remote track until it ends. What it carries depends on
-// its ID (relay.go): the sender's own media, which we play if we get that
-// member directly and, as relay, forward to the others; screen-low, which
-// only the relay forwards; or a relay slot, played as the slot's origin.
+// its ID (relay.go): the sender's own media, or screen-low, or a relay slot
+// carrying another origin's. Either way, if the sender is that origin's
+// provider, we play it (not screen-low) and, as relay, forward it.
 func (m *Mesh) receive(r *remote, t *webrtc.TrackRemote) {
 	id := t.ID()
 	video := t.Kind() == webrtc.RTPCodecTypeVideo
@@ -690,85 +960,88 @@ func (m *Mesh) receive(r *remote, t *webrtc.TrackRemote) {
 	if !video {
 		slot, isSlot = slotIndex(id, aslotPrefix)
 	}
-	src := srcScreen // screen, or an older client's video track
+	own := srcScreen // screen, or an older client's video track
 	if video && id == trackScreenLow {
-		src = srcLow
+		own = srcLow
 	}
 	if video && !isSlot {
-		r.srcMu.Lock()
-		r.src[src] = t
-		r.srcMu.Unlock()
+		m.originOf(r.id).setSrc(own, r, t)
 	}
 	var sb *samplebuilder.SampleBuilder
 	var kg *keyGate
-	if video {
+	newDecode := func() {
 		sb = samplebuilder.New(512, &codecs.H264Packet{}, t.Codec().ClockRate)
 		kg = &keyGate{pli: func() {
 			r.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(t.SSRC())}})
 		}}
 	}
+	var last *origin // the origin this track carried last
+	var rx audioRx   // audio: in order, gaps filled from RED
+	var rxOf *origin // the origin rx followed
 	for {
 		pkt, _, err := t.ReadRTP()
 		if err != nil {
 			return
 		}
-		origin := r.id
+		oid, src := r.id, own
 		if isSlot {
-			if origin = m.relayedOrigin(r.id, slot); origin == "" {
+			if oid, src = m.relayedOrigin(r.id, slot); oid == "" {
 				continue
 			}
-		} else {
+		} else if !m.ownProvided(r) {
+			continue
+		}
+		o := last
+		if o == nil || o.id != oid {
+			o = m.originOf(oid)
 			if video {
-				if src == srcLow {
-					r.srcMu.Lock()
-					r.lowAt = time.Now()
-					r.srcMu.Unlock()
+				if isSlot {
+					o.setSrc(src, r, t)
 				}
-				m.fanVideo(r, src, pkt)
-			} else {
-				m.fanAudio(r, pkt)
+				newDecode()
 			}
-			play := src != srcLow && m.direct(r.id) && !m.localCapOff(r.id)
-			var tr Transcoder
-			if video && src == srcScreen {
-				tr = m.transcoderOf(r.id)
+			last = o
+		}
+		o.saw(src, time.Now())
+		if !video {
+			if o != rxOf {
+				rx.reset()
+				rxOf = o
 			}
-			if !play && tr == nil {
-				continue
-			}
-			if !video {
-				if m.opt.OnAudio != nil && len(pkt.Payload) > 0 {
-					m.opt.OnAudio(origin, pkt.Payload)
-				}
-				continue
-			}
-			sb.Push(pkt)
-			for s := sb.Pop(); s != nil; s = sb.Pop() {
-				if !kg.pass(s.Data, s.PrevDroppedPackets) {
-					continue
-				}
-				if tr != nil {
-					tr.Push(s.Data)
-				}
-				if play && m.opt.OnVideo != nil {
-					m.opt.OnVideo(origin, s.Data)
+			for _, f := range rx.push(pkt) {
+				m.fanAudio(o, r.id, f)
+				if m.opt.OnAudio != nil && len(f.data) > 0 && !m.opt.Headless {
+					if d, ok := m.decAudio(f.data); ok {
+						m.opt.OnAudio(oid, d)
+					}
 				}
 			}
 			continue
 		}
-		if !video {
-			if m.opt.OnAudio != nil && len(pkt.Payload) > 0 {
-				m.opt.OnAudio(origin, pkt.Payload)
-			}
+		m.fanVideo(o, r.id, src, pkt)
+		if src == srcLow {
+			continue
+		}
+		play := !m.localCapOff(oid)
+		tr := m.transcoderOf(oid)
+		if !play && tr == nil {
 			continue
 		}
 		sb.Push(pkt)
 		for s := sb.Pop(); s != nil; s = sb.Pop() {
-			if !kg.pass(s.Data, s.PrevDroppedPackets) {
+			au, ok := m.decVideo(s.Data)
+			if !ok {
+				kg.lost() // what follows references frames we couldn't decode
 				continue
 			}
-			if m.opt.OnVideo != nil {
-				m.opt.OnVideo(origin, s.Data)
+			if !kg.pass(au, s.PrevDroppedPackets) {
+				continue
+			}
+			if tr != nil {
+				tr.Push(au)
+			}
+			if play && m.opt.OnVideo != nil {
+				m.opt.OnVideo(oid, au)
 			}
 		}
 	}
@@ -885,6 +1158,22 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 		m.gotSlots(from, msg.Slots)
 		return nil
 
+	case msg.KX != nil:
+		if m.crypt != nil {
+			m.gotKX(from, *msg.KX)
+		}
+		return nil
+
+	case msg.Key != nil:
+		if m.crypt != nil {
+			m.gotKey(from, *msg.Key)
+		}
+		return nil
+
+	case msg.Bye:
+		m.gotBye(from)
+		return nil
+
 	case msg.MaxLayer != nil && msg.Origin != "":
 		// A viewer's cap on a member we relay to it.
 		capLevel, ok := wireLevel(*msg.MaxLayer)
@@ -897,6 +1186,7 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 		}
 		r.originCap[msg.Origin] = capLevel
 		r.polMu.Unlock()
+		m.pushDemand()
 		return nil
 
 	case msg.MaxLayer != nil:
@@ -957,6 +1247,7 @@ func (m *Mesh) drop(id string) {
 	m.mu.Unlock()
 	m.stopTranscoder(id)
 	m.forgetView(id)
+	m.forgetProviders()
 	if r != nil {
 		m.closePC(r.pc)
 		m.updateLowBitrate() // the worst-off peer may have left
@@ -1020,6 +1311,22 @@ type PeerStats struct {
 	TxBytes uint64  // bytes sent to this peer (all candidate pairs)
 	RxBytes uint64  // bytes received from this peer
 	Loss    float64 // last fraction lost they reported for our video (0..1)
+	// Limit is why we send them less than our best: "viewer" (their
+	// choice), "bandwidth" (congestion: a lower layer or frame rate); ""
+	// when not limited.
+	Limit string
+}
+
+// AudioLossPct is the worst loss (%) a direct peer reported lately, for
+// Opus in-band FEC.
+func (m *Mesh) AudioLossPct() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	worst := 0.0
+	for _, r := range m.peers {
+		worst = max(worst, math.Float64frombits(r.loss.Load()))
+	}
+	return int(math.Ceil(min(worst, 0.3) * 100))
 }
 
 // Stats returns a transport snapshot per peer.
@@ -1032,7 +1339,7 @@ func (m *Mesh) Stats() map[string]PeerStats {
 	m.mu.Unlock()
 	out := map[string]PeerStats{}
 	for _, r := range peers {
-		ps := PeerStats{Loss: math.Float64frombits(r.loss.Load())}
+		ps := PeerStats{Loss: math.Float64frombits(r.loss.Load()), Limit: r.limit()}
 		switch r.pc.ConnectionState() {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			// Pion may be closing it itself (DTLS failure), which races
@@ -1059,10 +1366,10 @@ func (m *Mesh) Stats() map[string]PeerStats {
 		out[r.id] = ps
 	}
 	m.mu.Lock()
-	if rel := m.relayLocked(); rel != "" && rel != m.me() {
-		for id := range m.members {
-			if _, ok := out[id]; !ok && !m.directLocked(id) {
-				out[id] = PeerStats{Pair: "via " + m.names[rel]}
+	for id := range m.members {
+		if _, ok := out[id]; !ok && !m.directLocked(id) {
+			if via := m.providerLocked(id); via != "" {
+				out[id] = PeerStats{Pair: "via " + m.names[via]}
 			}
 		}
 	}

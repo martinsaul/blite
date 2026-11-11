@@ -1,0 +1,56 @@
+{{define "title"}}Self-hosting{{end}}
+{{define "description"}}Run your own Bellion Share server: the signaling server behind a TLS proxy, optional TURN for strict NATs, a hosted relay that keeps rooms open, and client builds that point at your server.{{end}}
+{{define "body"}}
+<h1>Self-hosting</h1>
+<p class="lead">A Bellion Share deployment is one small signaling server. Media flows peer to peer (or through a member acting as relay); the server only introduces peers. Optionally add a TURN server for peers behind strict NAT, and a hosted relay that keeps fixed rooms open.</p>
+<p>The code, binaries and environment variables still use the old <code>blite</code> name. Everything here builds from the <a href="https://github.com/martinsaul/blite">source code on GitHub</a>; the repository's <code>docs/SELF_HOSTING.md</code> has the same steps.</p>
+
+<h2 id="signal">1. Signaling server</h2>
+<p><code>blite-signal</code> is a single static Go binary (no cgo) listening on plain HTTP.</p>
+<pre><code>go build -o bin/blite-signal ./cmd/blite-signal
+BLITE_ADDR=:8080 ./bin/blite-signal
+# or
+docker build -f Dockerfile.signal -t blite-signal .
+docker run -p 127.0.0.1:8080:8080 blite-signal</code></pre>
+<p>Its routes: <code>GET /ws</code> (WebSocket signaling), <code>GET /j/{code}</code> (the share-link landing page), <code>POST /v1/report</code> (client log reports, only with <code>BLITE_REPORT_DIR</code>) and <code>GET /healthz</code>.</p>
+<p>Put it behind any reverse proxy that terminates TLS and passes WebSocket upgrades (nginx, Caddy, HAProxy, ...). For example with Caddy:</p>
+<pre><code>share.example.com {
+    reverse_proxy 127.0.0.1:8080
+}</code></pre>
+<p>Set <code>BLITE_TRUST_PROXY=true</code> only when the proxy sets <code>X-Forwarded-For</code> (rate limits are per client IP). Keep proxy idle timeouts above 30 seconds; the server pings every 30 seconds.</p>
+<table>
+  <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+  <tr><td><code>BLITE_ADDR</code></td><td><code>:8080</code></td><td>Listen address</td></tr>
+  <tr><td><code>BLITE_TRUST_PROXY</code></td><td><code>false</code></td><td>Take the client IP from <code>CF-Connecting-IP</code> / <code>X-Forwarded-For</code></td></tr>
+  <tr><td><code>BLITE_TURN_SECRET</code> + <code>BLITE_TURN_URLS</code></td><td>unset</td><td>coturn <code>use-auth-secret</code> credentials handed to peers (6 h lifetime)</td></tr>
+  <tr><td><code>BLITE_ICE_JSON</code></td><td>unset</td><td>A fixed ICE server list (JSON array) instead</td></tr>
+  <tr><td><code>BLITE_REPORT_DIR</code></td><td>unset</td><td>Accept client log reports into this directory (kept 30 days)</td></tr>
+  <tr><td><code>BLITE_HOST_KEY</code></td><td>unset</td><td>Shared secret with a hosted relay (fixed room codes)</td></tr>
+  <tr><td><code>BLITE_MAX_PEERS</code></td><td><code>0</code></td><td>Cap room size (0 = no cap)</td></tr>
+  <tr><td><code>BLITE_MIN_COMPATIBLE_BUILD</code></td><td><code>0</code></td><td>Refuse clients below this build</td></tr>
+  <tr><td><code>BLITE_MIN_RECOMMENDED_BUILD</code></td><td><code>0</code></td><td>Ask clients below this build to update</td></tr>
+</table>
+<p>With no ICE settings peers get public STUN only, so peers behind symmetric NAT can't connect; add TURN for those.</p>
+
+<h2 id="turn">2. TURN (optional)</h2>
+<p>Run <a href="https://github.com/coturn/coturn">coturn</a> with <code>use-auth-secret</code> and <code>static-auth-secret=&lt;secret&gt;</code>, open its ports (3478/udp, and 5349/tcp for TLS), and give the signaling server the same secret plus the URLs:</p>
+<pre><code>BLITE_TURN_SECRET=&lt;secret&gt;
+BLITE_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp</code></pre>
+
+<h2 id="hosted-relay">3. Hosted relay (optional)</h2>
+<p><code>blite -host rooms.json</code> keeps the listed rooms open around the clock and volunteers as each room's <a href="/docs/relays">relay</a>, so a room works without a member's machine relaying. It needs the GStreamer runtime (see <code>Dockerfile.host</code>) and the signaling server's <code>BLITE_HOST_KEY</code>.</p>
+<p>Give it good upload bandwidth, run it with host networking, and tell it that bandwidth with <code>-relay-upload-kbps</code> (for example <code>-relay-upload-kbps 200000</code> on a fast port): the server then gives it up to 16 members per room instead of 4, and it paces what it forwards to that rate. Member volunteers can relay alongside it when a room outgrows it.</p>
+<pre><code>[
+  {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Our relay",
+   "owners": ["&lt;identity key from Room &gt; Your identity key...&gt;"]}
+]</code></pre>
+<p>People whose identity keys are listed in <code>owners</code> own the room while they're in it. They find their key in the app under <em>Room &gt; Your identity key...</em> during a session.</p>
+<p>The repository's <a href="https://github.com/martinsaul/blite/tree/HEAD/docs/examples"><code>docs/examples/</code></a> has a Docker Compose file running both services and an <code>env.example</code>.</p>
+
+<h2 id="clients">4. Clients</h2>
+<p>Point the app at your server with <code>-server wss://share.example.com/ws</code> or the <code>BLITE_SERVER</code> environment variable, or build it in:</p>
+<pre><code>export BLITE_DEFAULT_SERVER=wss://share.example.com/ws
+scripts/build-windows.sh dist/windows   # or scripts/build-deb.sh dist/linux</code></pre>
+<p>Share links then look like <code>https://share.example.com/j/CODE#password</code>. The joining app still uses its own configured server, so everyone in a room must point at the same one.</p>
+<p>Self-update is off unless the build is given an update server and release signing keys (<code>BLITE_UPDATE_URL</code>, <code>BLITE_UPDATE_KEYS</code>; see <code>scripts/version.sh</code>).</p>
+{{end}}

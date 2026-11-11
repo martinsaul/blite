@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy - Bellion Share</title>
+<meta name="description" content="What Bellion Share collects and what it does not: screens and audio are end-to-end encrypted, go peer to peer, and are never recorded.">
+<link rel="canonical" href="https://bellion.app/privacy">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/static/icon-512.png" type="image/png" sizes="512x512">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#3a6df0">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bellion Share">
+<meta property="og:title" content="Privacy Policy - Bellion Share">
+<meta property="og:description" content="What Bellion Share collects and what it does not: screens and audio are end-to-end encrypted, go peer to peer, and are never recorded.">
+<meta property="og:url" content="https://bellion.app/privacy">
+<meta property="og:image" content="https://bellion.app/static/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Bellion Share: share your screen with friends">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --accent:#3a6df0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --accent:#7c9cff; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui, sans-serif; padding:2rem 16px; }
+  main { max-width:44rem; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 1rem; }
+  h2 { font-size:1.15rem; margin:1.6rem 0 .4rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.5rem; color:var(--muted); font-size:.9rem; }
+  .top { max-width:44rem; margin:0 auto 2rem; display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.2rem; }
+  .top .brand { font-weight:700; color:var(--fg); text-decoration:none; margin-right:auto; }
+  .top a { color:var(--muted); text-decoration:none; }
+  .top a:hover, .top a[aria-current] { color:var(--fg); }
+  footer a { color:var(--muted); }
+</style>
+</head>
+<body>
+<nav class="top" aria-label="Site">
+  <a class="brand" href="/">Bellion Share</a>
+  <a href="/">Download</a>
+  <a href="/docs">Docs</a>
+  <a href="https://github.com/martinsaul/blite">GitHub</a>
+</nav>
+<main>
+<h1>Privacy Policy</h1>
+<p>Bellion Share is a screen-sharing app for small groups of friends. This policy explains what data it handles. Last updated: November 11, 2026.</p>
+<h2>What we collect and why</h2>
+<ul>
+<li><strong>Display name and tag.</strong> You choose a name; the app adds a random tag (like #1234). Others in your session see it.</li>
+<li><strong>Session data.</strong> To connect people, our server briefly holds who is in which session, along with their network address (IP address and port). This lives in memory only and is gone when the session ends.</li>
+<li><strong>Your screen and audio.</strong> These go directly between the people in a session (peer to peer). When a direct connection isn't possible they pass through our relay server, which forwards them without recording. Sessions are encrypted end to end by default, so the relay can't see them.</li>
+<li><strong>Discord (optional).</strong> If you press "Connect Discord", Discord asks you to let Bellion see which voice channel you are in. We use this only to show a session started in that channel, and to tie your session to it.</li>
+<li><strong>Discord login.</strong> Our server passes the one-time login code to Discord and hands the access token back to the app, without keeping it. The app keeps the token on your computer only. The server keeps the ID of a voice channel tied to a live session in memory, until the session ends. We do not read your messages, servers, friends or anything else.</li>
+<li><strong>Logs and crash reports.</strong> The app writes a log on your computer. If the app crashes, it sends the end of that log to our server on the next start. When you press "Send logs" or "Send feedback", it sends the log and your message. Logs contain your display name, your operating system and hardware, your network addresses, and the names and addresses of people you were in a session with. We use them only to fix problems. They are deleted after 30 days.</li>
+<li><strong>Server logs.</strong> Our servers log requests, including IP addresses, for security and abuse prevention. These logs are kept only as long as needed for that.</li>
+<li><strong>Updates.</strong> The app checks our update server for new versions. That server sees your IP address and the app version.</li>
+</ul>
+<h2>What we don't do</h2>
+<p>We don't sell your data, show ads, or use trackers or analytics. We don't record sessions.</p>
+<h2>Sharing</h2>
+<p>We share data only with Discord, when you use "Connect Discord", and as required by law.</p>
+<h2>Your choices</h2>
+<p>You can disconnect Discord at any time in Discord: User Settings &gt; Authorized Apps &gt; Bellion. What the app keeps on your computer (its settings, the Discord token and logs) is in its settings and log folders, which you can delete. To have your reports deleted earlier, or for any question, contact us at <a href="mailto:admin@zenithnetwork.com">admin@zenithnetwork.com</a>.</p>
+<h2>Children</h2>
+<p>Bellion Share is not meant for children under 13.</p>
+<h2>Changes</h2>
+<p>If this policy changes, we update this page and the date above.</p>
+<footer><a href="/">Download</a> &middot; <a href="/docs">Docs</a> &middot; <a href="/terms">Terms of Service</a> &middot; <a href="/privacy">Privacy Policy</a> &middot; <a href="https://github.com/martinsaul/blite">Source code on GitHub</a> (AGPL-3.0)</footer>
+</main>
+</body>
+</html>

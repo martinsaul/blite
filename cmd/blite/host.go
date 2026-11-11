@@ -21,11 +21,13 @@ import (
 type hostRoom struct {
 	Code     string `json:"code"`     // fixed room code, e.g. "7K3Q-X9MD"
 	Password string `json:"password"` // room password (at least 4 characters)
-	Name     string `json:"name"`     // our display name in the room; default "Blite relay"
+	Name     string `json:"name"`     // our display name in the room; default "Bellion Share relay"
 	// Owners are identity keys (shown in each member's Blite window) of
 	// the members who own the room while any of them is in it; otherwise
 	// the relay owns it.
 	Owners []string `json:"owners,omitempty"`
+	// E2EE: encrypt the room's media end to end (default on).
+	E2EE *bool `json:"e2ee,omitempty"`
 }
 
 // runHost is the hosted relay: it keeps every room in the
@@ -56,8 +58,9 @@ func runHost(cfg session.Config, log *slog.Logger, file string) {
 		}
 		c := cfg
 		c.HostRoom, c.Name, c.HostOwners = code, r.Name, r.Owners
+		c.E2EE = r.E2EE == nil || *r.E2EE
 		if c.Name == "" {
-			c.Name = "Blite relay"
+			c.Name = "Bellion Share relay"
 		}
 		wg.Add(1)
 		go func() {

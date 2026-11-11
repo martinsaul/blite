@@ -48,9 +48,10 @@ func saveLayout(l session.Layout) error {
 }
 
 // SetLayout implements ui.Backend: separate windows, or one window with the
-// streams in a grid (rows x cols, 0 = auto). Kept for later sessions.
-func (a *App) SetLayout(mode string, rows, cols int) error {
-	l := session.Layout{Mode: mode, Rows: rows, Cols: cols}
+// streams in a grid (rows x cols, 0 = auto), and where our self-preview
+// shows. Kept for later sessions.
+func (a *App) SetLayout(mode string, rows, cols int, preview string) error {
+	l := session.Layout{Mode: mode, Rows: rows, Cols: cols, Preview: preview}
 	if !l.Valid() {
 		return errors.New("unknown layout")
 	}
