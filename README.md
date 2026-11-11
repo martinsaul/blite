@@ -25,6 +25,28 @@ More screenshots: [the Share menu](docs/screenshots/share-menu.png),
 [the People menu](docs/screenshots/people-menu.png),
 [watching someone in your Discord voice channel](docs/screenshots/discord-watch.png).
 
+## Bigger groups: relays
+
+By default everyone sends their video straight to everyone, so each sharer
+uploads their screen once per viewer. That's fine for a handful of people;
+**with more than about 5, set up a relay**: a member with a fast upload
+forwards everyone's video, so each sharer uploads once. Three ways, from
+easiest:
+
+1. **Volunteer from the app:** *People > Volunteer as relay* on a PC with a
+   fast, wired upload that isn't busy gaming.
+2. **A dedicated relay machine for your group:** a spare PC, home server or
+   VPS joins your room by its share link and relays, on any server including
+   bellion.app:
+   `blite -headless -link 'https://bellion.app/j/CODE#password' -volunteer -source none -view none -name "Group relay" -relay-upload-kbps 50000`
+3. **A hosted relay on your own server:** `blite -host rooms.json` keeps
+   fixed rooms open around the clock (needs your own signaling server; see
+   [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md#3-hosted-relay-optional)).
+
+The full guide, with upload sizing, a systemd unit and troubleshooting:
+[bellion.app/docs/relays](https://bellion.app/docs/relays) (also in
+[docs/RELAYS.md](docs/RELAYS.md)).
+
 ## Features
 
 **Sharing**
@@ -79,8 +101,10 @@ More screenshots: [the Share menu](docs/screenshots/share-menu.png),
   the room needs (up to 4), homes everyone on one, and any stream crosses at
   most two. Relays pull only what someone watches; when one leaves, its
   members move to another without dropping the call.
-- A hosted relay (`blite -host rooms.json`) keeps fixed rooms open around the
-  clock on a server. See [Relays](https://bellion.app/docs/relays).
+- A spare PC or server can relay for your group around the clock
+  (`blite -headless -link ... -volunteer`), on any server; a hosted relay
+  (`blite -host rooms.json`) keeps fixed rooms open on your own server. See
+  [Bigger groups: relays](#bigger-groups-relays).
 
 **The app**
 - A native window plus a tray icon; optional start at sign-in.
@@ -94,6 +118,14 @@ More screenshots: [the Share menu](docs/screenshots/share-menu.png),
 **Platforms:** Windows 10 and 11 (64-bit), and Linux on X11 (Ubuntu 24.04,
 Mint 22 or newer for the .deb; Wayland sessions aren't supported yet). The
 signaling server runs anywhere Go does.
+
+**Languages:** the app follows the system language: English, Chinese
+(Simplified and Traditional), Hindi, Spanish, French, Bengali, Portuguese,
+Russian, Indonesian, German, Japanese, Korean, Turkish, Vietnamese, Italian,
+Polish, Ukrainian, Thai, Dutch, Tamil, Telugu, Marathi, Filipino and Swahili.
+Arabic, Urdu and Persian are a preview you can pick in View > Language
+(right-to-left layout isn't there yet). Translations were made by AI;
+corrections are welcome.
 
 ## Quick start
 

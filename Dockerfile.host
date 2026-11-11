@@ -1,7 +1,8 @@
 # The hosted relay: blite -host, on Ubuntu 24.04's
-# GStreamer. It never encodes, decodes or plays media, so only the libraries
-# the binary links are needed at runtime (GStreamer, and the GL/X11/wayland
-# libraries of the native window, which -host never opens).
+# GStreamer. It doesn't capture or play media, but it transcodes smaller
+# renditions for viewers who need them, so it needs the decoder and x264
+# plugins, plus the GL/X11/wayland libraries the binary links (the native
+# window, which -host never opens).
 FROM ubuntu:24.04 AS build
 ARG GO_VERSION=1.26.10
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -23,6 +24,8 @@ RUN eval "$(scripts/version.sh)" && go build -trimpath -ldflags="$LDFLAGS" -o /o
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-ugly gstreamer1.0-libav \
       libgl1 libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 \
       libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/* \

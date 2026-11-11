@@ -89,6 +89,13 @@ alongside it when a room outgrows it.
 `docs/examples/` has a compose file running both services and an
 `env.example`.
 
+Step by step, with upload sizing and troubleshooting: the relay guide,
+[docs/RELAYS.md](RELAYS.md) or [bellion.app/docs/relays](https://bellion.app/docs/relays).
+A hosted relay only works with your own server (it needs the server's
+`BLITE_HOST_KEY`). With the official bellion.app server, run a
+[dedicated relay machine](RELAYS.md#2-a-dedicated-relay-machine-for-your-group)
+instead: it joins a room by its share link and volunteers.
+
 ## 4. Clients
 
 Official builds can use your server as they are: under *Room > Servers...*,

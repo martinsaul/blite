@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 
 	"fyne.io/fyne/v2"
 	fapp "fyne.io/fyne/v2/app"
@@ -19,6 +21,7 @@ import (
 
 	"blite/internal/app"
 	"blite/internal/audio"
+	"blite/internal/i18n"
 	"blite/internal/session"
 	"blite/internal/tray"
 	"blite/internal/ui"
@@ -45,6 +48,7 @@ type UI struct {
 	ownLink string // the share link we copied for our own session
 	devices []audio.Device
 
+	icon     fyne.Resource
 	view     *fyne.Container
 	viewKind string // lobby | call
 	lobby    *lobbyView
@@ -62,7 +66,9 @@ func Run(a ui.Backend, o Options) {
 	fa := fapp.NewWithID("com.bellion.share")
 	icon := fyne.NewStaticResource("icon.png", tray.PNG())
 	fa.SetIcon(icon)
-	u := &UI{a: a, fa: fa}
+	u := &UI{a: a, fa: fa, icon: icon}
+	setFyneLanguage()
+	fa.Settings().SetTheme(themeFor())
 	curMu.Lock()
 	cur = u
 	curMu.Unlock()
@@ -77,11 +83,7 @@ func Run(a ui.Backend, o Options) {
 
 	if d, ok := fa.(desktop.App); ok {
 		d.SetSystemTrayIcon(icon)
-		d.SetSystemTrayMenu(fyne.NewMenu("Bellion Share",
-			fyne.NewMenuItem("Open Bellion Share", u.Show),
-			fyne.NewMenuItem("Show video", u.showVideo),
-			fyne.NewMenuItem("Leave session", a.Leave),
-		))
+		u.setTrayMenu()
 	}
 
 	go u.loadDevices()
@@ -133,6 +135,22 @@ func get() *UI {
 	curMu.Lock()
 	defer curMu.Unlock()
 	return cur
+}
+
+// setTrayMenu sets the tray icon's menu (again after a language change).
+func (u *UI) setTrayMenu() {
+	d, ok := u.fa.(desktop.App)
+	if !ok {
+		return
+	}
+	quit := quitItem()
+	d.SetSystemTrayMenu(fyne.NewMenu("Bellion Share",
+		fyne.NewMenuItem(i18n.L("Open Bellion Share"), u.Show),
+		fyne.NewMenuItem(i18n.L("Show video"), u.showVideo),
+		fyne.NewMenuItem(i18n.L("Leave session"), u.a.Leave),
+		fyne.NewMenuItemSeparator(),
+		quit,
+	))
 }
 
 // Show implements the tray's "Open".
@@ -195,8 +213,16 @@ func (u *UI) showVideo() {
 }
 
 func (u *UI) showErr(err error) {
-	d := dialogError(err, u.win)
+	d := dialogError(i18n.Err(err), u.win)
 	d.Show()
+}
+
+// quitItem is our own Quit, so it's in our language (Fyne adds its own
+// where a menu has none; it quits the app).
+func quitItem() *fyne.MenuItem {
+	q := fyne.NewMenuItem(i18n.L("Quit"), nil)
+	q.IsQuit = true
+	return q
 }
 
 func ctx() context.Context { return context.Background() }
@@ -229,44 +255,69 @@ func kbps(k int) string {
 	return fmt.Sprintf("%d kbit/s", k)
 }
 
-var limitText = map[string]string{"viewer": "their choice", "bandwidth": "their link", "cpu": "your CPU"}
+func limitText(limit string) string {
+	switch limit {
+	case "viewer":
+		return i18n.L("their choice")
+	case "bandwidth":
+		return i18n.L("their link")
+	case "cpu":
+		return i18n.L("your CPU")
+	}
+	return limit
+}
 
-var layerText = map[string]string{"high": "full quality", "low": "low quality", "off": "nothing"}
+func layerText(layer string) string {
+	switch layer {
+	case "high":
+		return i18n.L("full quality")
+	case "low":
+		return i18n.L("low quality")
+	case "off":
+		return i18n.L("nothing")
+	}
+	return layer
+}
 
 func sendText(m session.Member) string {
-	t := m.Layer
-	if l, ok := layerText[t]; ok {
-		t = l
-	}
+	t := layerText(m.Layer)
 	if t != "" && m.Limit != "" {
-		l := limitText[m.Limit]
-		if l == "" {
-			l = m.Limit
-		}
-		t += " (" + l + ")"
+		t = i18n.L("{{.What}} ({{.Why}})", i18n.D{"What": t, "Why": limitText(m.Limit)})
 	}
 	if m.Auto != "" {
-		if t != "" {
-			t += ", "
-		}
+		a := i18n.L("low: small tile")
 		if m.Auto == "off" {
-			t += "paused: windows minimized"
-		} else {
-			t += "low: small tile"
+			a = i18n.L("paused: windows minimized")
 		}
+		if t != "" {
+			a = i18n.L("{{.First}}, {{.Second}}", i18n.D{"First": t, "Second": a})
+		}
+		t = a
 	}
 	if t == "" {
-		t = "-"
+		return "-"
 	}
-	return strings.ToUpper(t[:1]) + t[1:]
+	return upperFirst(t)
+}
+
+// upperFirst capitalizes the first letter (scripts without case keep it).
+func upperFirst(t string) string {
+	r, n := utf8.DecodeRuneInString(t)
+	return string(unicode.ToUpper(r)) + t[n:]
 }
 
 func stateText(m session.Member) string {
 	switch m.State {
 	case "unreachable":
-		return "can't connect, retrying"
+		return i18n.L("can't connect, retrying")
 	case "untrusted":
-		return "refused: keys don't match"
+		return i18n.L("refused: keys don't match")
+	case "connected":
+		return i18n.L("connected")
+	case "connecting":
+		return i18n.L("connecting")
+	case "reconnecting":
+		return i18n.L("reconnecting")
 	}
 	return m.State
 }
@@ -277,7 +328,7 @@ func linkText(m session.Member) string {
 		parts = append(parts, fmt.Sprintf("%d ms", m.RTTms))
 	}
 	if m.Loss > 0 {
-		parts = append(parts, fmt.Sprintf("%.1f%% loss", m.Loss*100))
+		parts = append(parts, i18n.L("{{.Percent}}% loss", i18n.D{"Percent": fmt.Sprintf("%.1f", m.Loss*100)}))
 	}
 	if m.TxKbps > 0 || m.RxKbps > 0 {
 		parts = append(parts, "↑ "+kbps(m.TxKbps)+"  ↓ "+kbps(m.RxKbps))

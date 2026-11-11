@@ -379,6 +379,18 @@ func TestSiteSEO(t *testing.T) {
 	if !strings.Contains(get("bellion.app", "/docs").Body.String(), vibecoded) {
 		t.Fatal("docs overview: missing the vibecoded statement")
 	}
+	// The relay guide covers all three ways, and the overview and
+	// troubleshooting point to it.
+	for _, id := range []string{"volunteer", "dedicated", "hosted", "upload", "troubleshooting"} {
+		if !strings.Contains(relays, `<h2 id="`+id+`">`) || !strings.Contains(relays, `<a href="#`+id+`">`) {
+			t.Fatalf("relay guide: missing section %q", id)
+		}
+	}
+	for _, p := range []string{"/docs", "/docs/troubleshooting", "/docs/self-hosting"} {
+		if !strings.Contains(get("bellion.app", p).Body.String(), `href="/docs/relays`) {
+			t.Fatalf("%s doesn't link the relay guide", p)
+		}
+	}
 	if w := get("bellion.app", "/docs/"); w.Code != 301 || w.Header().Get("Location") != "/docs" {
 		t.Fatalf("/docs/: %d %q", w.Code, w.Header().Get("Location"))
 	}
@@ -407,6 +419,10 @@ func TestDownloadPageSite(t *testing.T) {
 	}
 	if !strings.Contains(body, vibecoded) || !strings.Contains(body, `href="`+siteCSSURL+`"`) {
 		t.Fatal("download page: missing the vibecoded statement or stylesheet")
+	}
+	// Bigger groups find the relay guide from the home page.
+	if !strings.Contains(body, "Set up a relay") || !strings.Contains(body, `href="/docs/relays"`) {
+		t.Fatal("download page: missing the relay callout")
 	}
 	for _, m := range regexp.MustCompile(`src="(/static/[^"]+)"`).FindAllStringSubmatch(body, -1) {
 		r := httptest.NewRequest("GET", m[1], nil)

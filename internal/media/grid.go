@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"blite/internal/gst"
+	"blite/internal/i18n"
 )
 
 // tileSeq numbers the intervideo channels of ViewGrid players.
@@ -122,6 +123,7 @@ type Grid struct {
 		drag   int     // tile whose slider is being dragged (-1 none)
 		phase  float64 // spinner
 		fades  []fade  // per tile: fading out (Fade)
+		big    []bool  // per tile: the name shows at full size
 		done   bool    // Stop began: the elements may go
 	}
 }
@@ -279,21 +281,21 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 		}
 		wait := ""
 		if ovs[i].barPad != "" {
-			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=\"Waiting for video\" valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i)
+			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=%s valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i, launchQuote(i18n.L("Waiting for video")))
 		}
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! videoscale add-borders=true ! "+
 			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
-			"textoverlay name=label%d valignment=top halignment=left font-desc=\"Sans 14\" shaded-background=true ! %smix.sink_%d",
-			t.Channel, interHold, tw, th, i, wait, i)
+			"textoverlay name=label%d valignment=top halignment=left font-desc=\"%s\" shaded-background=true ! %smix.sink_%d",
+			t.Channel, interHold, tw, th, i, labelFont(ovs[i].barPad == ""), wait, i)
 	}
 	if cfg.Pip != "" {
 		// videobox draws the frame: a separate live source for it broke
 		// the compositor's latency query and flooded the logs with errors.
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! videoscale add-borders=true ! "+
 			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
-			"textoverlay text=You valignment=bottom halignment=left font-desc=\"Sans 24\" shaded-background=true ! "+
+			"textoverlay text=%s valignment=bottom halignment=left font-desc=\"Sans 24\" shaded-background=true ! "+
 			"videobox left=-%d right=-%d top=-%d bottom=-%d fill=white ! mix.sink_%d",
-			cfg.Pip, interHold, pipW, pipH, gridPipFrame, gridPipFrame, gridPipFrame, gridPipFrame, pipPad)
+			cfg.Pip, interHold, pipW, pipH, launchQuote(i18n.L("You")), gridPipFrame, gridPipFrame, gridPipFrame, gridPipFrame, pipPad)
 	}
 	for _, l := range layers {
 		// intervideosrc repeats the last frame we drew, like the tiles.
@@ -345,6 +347,7 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	g.ctl.tiles, g.ctl.rects, g.ctl.on, g.ctl.shown, g.ctl.drag = slices.Clone(tiles), rects, cfg.OnControl, -1, -1
 	g.ctl.labels, g.ctl.ov = make([]*gst.Element, len(tiles)), ovs
 	g.ctl.fades = make([]fade, len(tiles))
+	g.ctl.big = make([]bool, len(tiles))
 	if g.ctl.mix, err = p.element("mix"); err != nil {
 		return fail(err)
 	}
@@ -416,6 +419,15 @@ const (
 	spinTurn    = 1200 * time.Millisecond // one spinner turn
 )
 
+// labelFont is a tile's name: full size while its controls show, a quarter
+// of that otherwise so it covers little of the picture.
+func labelFont(big bool) string {
+	if big {
+		return "Sans 14"
+	}
+	return "Sans 3.5"
+}
+
 // tick handles the pointer events since the last call, fades the controls
 // and the tiles going away, and turns the spinners.
 func (g *Grid) tick(nav *gst.Nav, now time.Time) {
@@ -444,6 +456,16 @@ func (g *Grid) tick(nav *gst.Nav, now time.Time) {
 	if i := g.ctl.shown; i >= 0 && g.ctl.ov[i].barPad != "" && math.Abs(a-g.ctl.alpha) > 0.01 {
 		g.ctl.alpha = a
 		g.ctl.mix.SetPadDouble(g.ctl.ov[i].barPad, "alpha", a)
+	}
+	// names: full size with the controls, small otherwise
+	for i := range g.ctl.big {
+		if g.ctl.ov[i].barPad == "" {
+			continue
+		}
+		if big := i == g.ctl.shown && a > 0; big != g.ctl.big[i] {
+			g.ctl.big[i] = big
+			g.ctl.labels[i].SetString("font-desc", labelFont(big))
+		}
 	}
 	// tiles going away
 	for i := range g.ctl.fades {
@@ -655,19 +677,29 @@ func (g *Grid) Fade(id string, d time.Duration) {
 // showStateLocked writes tile i's state into its label and controls.
 func (g *Grid) showStateLocked(i int) {
 	t := g.ctl.tiles[i]
-	label := t.Label
-	switch {
-	case t.Stopped:
-		label += " stopped sharing"
-	case t.Muted && t.Paused:
-		label += "  (muted, video paused)"
-	case t.Muted:
-		label += "  (muted)"
-	case t.Paused:
-		label += "  (video paused)"
-	}
+	label := tileText(t)
 	g.ctl.labels[i].SetString("text", label) // a property, so no escaping in the launch line
 	g.pushBarLocked(i)
+}
+
+// tileText is the tile's label: their name and what's off.
+func tileText(t Tile) string {
+	switch {
+	case t.Stopped:
+		return i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": t.Label})
+	case t.Muted && t.Paused:
+		return t.Label + "  " + i18n.L("(muted, video paused)")
+	case t.Muted:
+		return t.Label + "  " + i18n.L("(muted)")
+	case t.Paused:
+		return t.Label + "  " + i18n.L("(video paused)")
+	}
+	return t.Label
+}
+
+// launchQuote quotes s as a property value in a gst-launch line.
+func launchQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 // Tiles is what the grid shows.

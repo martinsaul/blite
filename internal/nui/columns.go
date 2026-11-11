@@ -6,23 +6,61 @@ import (
 )
 
 // columns lays cells out side by side with widths in proportion to weights,
-// so the People rows line up with their header.
-type columns struct{ weights []float32 }
+// but no column narrower than its widest cell needs, so the People rows
+// line up with their header. The header and every row share one columns:
+// mins holds each column's widest need over all of them.
+type columns struct {
+	weights []float32
+	mins    []float32
+}
 
-func (c *columns) total() float32 {
-	var t float32
-	for _, w := range c.weights {
-		t += w
+func newColumns(weights ...float32) *columns {
+	return &columns{weights: weights, mins: make([]float32, len(weights))}
+}
+
+// reset forgets the rows' needs (the rows changed).
+func (c *columns) reset() { clear(c.mins) }
+
+// widths shares free out: proportionally, then columns that would get
+// less than they need get their need and the others share the rest.
+func (c *columns) widths(free float32) []float32 {
+	w := make([]float32, len(c.weights))
+	fixed := make([]bool, len(c.weights))
+	rest, weights := free, float32(0)
+	for _, x := range c.weights {
+		weights += x
 	}
-	return t
+	for changed := true; changed && weights > 0; {
+		changed = false
+		for i, x := range c.weights {
+			if !fixed[i] && rest*x/weights < c.mins[i] {
+				w[i], fixed[i] = c.mins[i], true
+				rest -= c.mins[i]
+				weights -= x
+				changed = true
+			}
+		}
+	}
+	for i, x := range c.weights {
+		if !fixed[i] {
+			w[i] = rest * x / weights
+		}
+	}
+	return w
+}
+
+func (c *columns) need(objs []fyne.CanvasObject) {
+	for i, o := range objs {
+		c.mins[i] = max(c.mins[i], o.MinSize().Width)
+	}
 }
 
 func (c *columns) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	c.need(objs)
 	pad := theme.Padding()
-	free := size.Width - pad*float32(len(objs)-1)
 	x := float32(0)
-	for i, o := range objs {
-		w := free * c.weights[i] / c.total()
+	for i, w := range c.widths(size.Width - pad*float32(len(objs)-1)) {
+		o := objs[i]
 		h := min(o.MinSize().Height, size.Height)
 		o.Resize(fyne.NewSize(w, h))
 		o.Move(fyne.NewPos(x, (size.Height-h)/2))
@@ -31,12 +69,11 @@ func (c *columns) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 }
 
 func (c *columns) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	c.need(objs)
 	var w, h float32
 	for i, o := range objs {
-		m := o.MinSize()
-		// The narrowest a column may get: its share of the widest need.
-		w = max(w, m.Width*c.total()/c.weights[i])
-		h = max(h, m.Height)
+		w += c.mins[i]
+		h = max(h, o.MinSize().Height)
 	}
 	return fyne.NewSize(w+theme.Padding()*float32(len(objs)-1), h)
 }

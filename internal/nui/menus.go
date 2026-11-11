@@ -6,6 +6,7 @@ import (
 
 	"fyne.io/fyne/v2"
 
+	"blite/internal/i18n"
 	"blite/internal/session"
 )
 
@@ -23,7 +24,7 @@ func (u *UI) updateMenu() {
 func (u *UI) menuSignature() string {
 	st := u.st
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%s|%v|%v|", st.Name, st.Tag, st.Autostart != nil && *st.Autostart, st.Layout)
+	fmt.Fprintf(&b, "%s|%s|%s|%v|%v|", i18n.Current(), st.Name, st.Tag, st.Autostart != nil && *st.Autostart, st.Layout)
 	if st.Update != nil {
 		fmt.Fprintf(&b, "%s|%v|%v|", st.Update.Available, st.Update.CanApply, st.Update.Checking)
 	}
@@ -60,24 +61,26 @@ func sub(label string, items ...*fyne.MenuItem) *fyne.MenuItem {
 func (u *UI) roomMenu() *fyne.Menu {
 	s := u.st.Session
 	in := s != nil
-	return fyne.NewMenu("Room",
-		disabled(fyne.NewMenuItem("Start a session...", u.createDialog), in),
-		disabled(fyne.NewMenuItem("Join a session...", u.joinDialog), in),
+	return fyne.NewMenu(i18n.L("Room"),
+		disabled(fyne.NewMenuItem(i18n.L("Start a session..."), u.createDialog), in),
+		disabled(fyne.NewMenuItem(i18n.L("Join a session..."), u.joinDialog), in),
 		fyne.NewMenuItemSeparator(),
-		disabled(fyne.NewMenuItem("Copy share link", u.copyLink), !in),
-		disabled(fyne.NewMenuItem("Safety code...", u.safetyDialog), !in),
-		disabled(fyne.NewMenuItem("Leave session", u.leave), !in),
+		disabled(fyne.NewMenuItem(i18n.L("Copy share link"), u.copyLink), !in),
+		disabled(fyne.NewMenuItem(i18n.L("Safety code..."), u.safetyDialog), !in),
+		disabled(fyne.NewMenuItem(i18n.L("Leave session"), u.leave), !in),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Your name...", u.nameDialog),
-		fyne.NewMenuItem("Your identity key...", u.idKeyDialog),
-		fyne.NewMenuItem("Servers...", u.serversDialog),
+		fyne.NewMenuItem(i18n.L("Your name..."), u.nameDialog),
+		fyne.NewMenuItem(i18n.L("Your identity key..."), u.idKeyDialog),
+		fyne.NewMenuItem(i18n.L("Servers..."), u.serversDialog),
+		fyne.NewMenuItemSeparator(),
+		quitItem(),
 	)
 }
 
 func (u *UI) shareMenu() *fyne.Menu {
 	s := u.st.Session
 	if s == nil {
-		return fyne.NewMenu("Share", disabled(fyne.NewMenuItem("Start or join a session to share", nil), true))
+		return fyne.NewMenu(i18n.L("Share"), disabled(fyne.NewMenuItem(i18n.L("Start or join a session to share"), nil), true))
 	}
 	src := func(label, kind string) *fyne.MenuItem {
 		return check(label, s.Source == kind, func() { u.do(func() error { return u.a.SetSource(kind) }) })
@@ -96,26 +99,26 @@ func (u *UI) shareMenu() *fyne.Menu {
 	am := func(label, v string) *fyne.MenuItem {
 		return check(label, s.Audio.Mode == v, func() { u.do(func() error { return u.a.SetAudio(v, s.Audio.Apps) }) })
 	}
-	outs := []*fyne.MenuItem{check("System default", s.Output == "", func() { u.do(func() error { return u.a.SetOutput("") }) })}
+	outs := []*fyne.MenuItem{check(i18n.L("System default"), s.Output == "", func() { u.do(func() error { return u.a.SetOutput("") }) })}
 	for _, d := range u.devices {
 		d := d
 		outs = append(outs, check(d.Name, s.Output == d.ID, func() { u.do(func() error { return u.a.SetOutput(d.ID) }) }))
 	}
-	outs = append(outs, fyne.NewMenuItemSeparator(), fyne.NewMenuItem("Refresh devices", func() { go u.loadDevices() }))
-	return fyne.NewMenu("Share",
-		src("All screens combined", "screen"),
-		check("A monitor or window...", other, u.sourceDialog),
-		src("Test pattern", "test"),
-		src("Nothing (watch only)", "none"),
+	outs = append(outs, fyne.NewMenuItemSeparator(), fyne.NewMenuItem(i18n.L("Refresh devices"), func() { go u.loadDevices() }))
+	return fyne.NewMenu(i18n.L("Share"),
+		src(i18n.L("All screens combined"), "screen"),
+		check(i18n.L("A monitor or window..."), other, u.sourceDialog),
+		src(i18n.L("Test pattern"), "test"),
+		src(i18n.L("Nothing (watch only)"), "none"),
 		fyne.NewMenuItemSeparator(),
-		sub("Resolution", res("720p", "720p"), res("1080p", "1080p"), res("4K", "2160p")),
-		sub("Tuned for", mode("Desktop: sharp text, 30 fps", "desktop"), mode("Game: smooth motion, 60 fps", "game")),
-		sub("Preview of your stream", prev("Off", ""), prev("Small floating window", "window"), prev("In a corner of the video window", "grid")),
+		sub(i18n.L("Resolution"), res("720p", "720p"), res("1080p", "1080p"), res("4K", "2160p")),
+		sub(i18n.L("Tuned for"), mode(i18n.L("Desktop: sharp text, 30 fps"), "desktop"), mode(i18n.L("Game: smooth motion, 60 fps"), "game")),
+		sub(i18n.L("Preview of your stream"), prev(i18n.L("Off"), ""), prev(i18n.L("Small floating window"), "window"), prev(i18n.L("In a corner of the video window"), "grid")),
 		fyne.NewMenuItemSeparator(),
-		sub("Audio you share", am("No audio", "none"), am("All apps (except Bellion Share)", "system"),
-			check("Only these apps...", s.Audio.Mode == "apps", u.audioDialog),
+		sub(i18n.L("Audio you share"), am(i18n.L("No audio"), "none"), am(i18n.L("All apps (except Bellion Share)"), "system"),
+			check(i18n.L("Only these apps..."), s.Audio.Mode == "apps", u.audioDialog),
 			windowAudioItem(s.Audio.Mode == "window")),
-		sub("Play the call on", outs...),
+		sub(i18n.L("Play the call on"), outs...),
 	)
 }
 
@@ -124,12 +127,14 @@ func (u *UI) viewMenu() *fyne.Menu {
 	set := func(mode string) func() {
 		return func() { u.do(func() error { return u.a.SetLayout(mode, l.Rows, l.Cols, l.Preview) }) }
 	}
-	return fyne.NewMenu("View",
-		check("A separate window for each person", l.Mode != "grid", set("windows")),
-		check("All in one window", l.Mode == "grid", set("grid")),
-		disabled(fyne.NewMenuItem("Arrange the window...", u.arrangeDialog), l.Mode != "grid"),
+	return fyne.NewMenu(i18n.L("View"),
+		check(i18n.L("A separate window for each person"), l.Mode != "grid", set("windows")),
+		check(i18n.L("All in one window"), l.Mode == "grid", set("grid")),
+		disabled(fyne.NewMenuItem(i18n.L("Arrange the window..."), u.arrangeDialog), l.Mode != "grid"),
 		fyne.NewMenuItemSeparator(),
-		disabled(fyne.NewMenuItem("Show video", u.showVideo), !anyClosed(u.st.Session)),
+		disabled(fyne.NewMenuItem(i18n.L("Show video"), u.showVideo), !anyClosed(u.st.Session)),
+		fyne.NewMenuItemSeparator(),
+		u.languageMenu(),
 	)
 }
 
@@ -137,14 +142,14 @@ func (u *UI) viewMenu() *fyne.Menu {
 func (u *UI) peopleMenu() *fyne.Menu {
 	s := u.st.Session
 	if s == nil {
-		return fyne.NewMenu("People", disabled(fyne.NewMenuItem("Nobody yet", nil), true))
+		return fyne.NewMenu(i18n.L("People"), disabled(fyne.NewMenuItem(i18n.L("Nobody yet"), nil), true))
 	}
 	var items []*fyne.MenuItem
 	for _, m := range s.Members {
 		items = append(items, sub(displayName(m.Name, m.Tag), u.personItems(m, s.IsOwner)...))
 	}
 	if len(items) == 0 {
-		items = append(items, disabled(fyne.NewMenuItem("Nobody else yet", nil), true))
+		items = append(items, disabled(fyne.NewMenuItem(i18n.L("Nobody else yet"), nil), true))
 	}
 	meRelay, meWaiting := false, false
 	for _, e := range s.Relay {
@@ -153,17 +158,17 @@ func (u *UI) peopleMenu() *fyne.Menu {
 	for _, e := range s.RelayWaiting {
 		meWaiting = meWaiting || e.Me
 	}
-	relay := "Volunteer as relay"
+	relay := i18n.L("Volunteer as relay")
 	if meRelay {
-		relay = "Stop relaying"
+		relay = i18n.L("Stop relaying")
 	} else if meWaiting {
-		relay = "Leave the relay queue"
+		relay = i18n.L("Leave the relay queue")
 	}
 	on := !meRelay && !meWaiting
 	items = append(items, fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(relay, func() { u.do(func() error { return u.a.Volunteer(on) }) }),
-		fyne.NewMenuItem("About relays...", u.relayDialog))
-	return fyne.NewMenu("People", items...)
+		fyne.NewMenuItem(i18n.L("About relays..."), u.relayDialog))
+	return fyne.NewMenu(i18n.L("People"), items...)
 }
 
 func (u *UI) personItems(m session.Member, owner bool) []*fyne.MenuItem {
@@ -174,26 +179,26 @@ func (u *UI) personItems(m session.Member, owner bool) []*fyne.MenuItem {
 		return check(label, m.Quality == v, func() { set(v, m.Volume, m.Muted) })
 	}
 	items := []*fyne.MenuItem{
-		sub("Their video", q("Best", "auto"), q("Low", "low"), q("Off (audio only)", "off")),
-		check("Mute", m.Muted, func() { set(m.Quality, m.Volume, !m.Muted) }),
+		sub(i18n.L("Their video"), q(i18n.L("Best"), "auto"), q(i18n.L("Low"), "low"), q(i18n.L("Off (audio only)"), "off")),
+		check(i18n.L("Mute"), m.Muted, func() { set(m.Quality, m.Volume, !m.Muted) }),
 	}
 	if m.Pair != "" {
-		items = append(items, disabled(fyne.NewMenuItem("Network path: "+m.Pair, nil), true))
+		items = append(items, disabled(fyne.NewMenuItem(i18n.L("Network path: {{.Path}}", i18n.D{"Path": m.Pair}), nil), true))
 	}
 	if m.WindowClosed {
-		items = append(items, fyne.NewMenuItem("Show their window", func() { u.do(func() error { return u.a.ShowWindow(m.ID) }) }))
+		items = append(items, fyne.NewMenuItem(i18n.L("Show their window"), func() { u.do(func() error { return u.a.ShowWindow(m.ID) }) }))
 	}
 	if owner {
 		name := m.Name
 		items = append(items, fyne.NewMenuItemSeparator(),
-			disabled(fyne.NewMenuItem("Make owner...", func() {
-				u.confirm("Make "+name+" the owner?", "You can't take it back yourself.", func() error { return u.a.Transfer(m.ID) })
+			disabled(fyne.NewMenuItem(i18n.L("Make owner..."), func() {
+				u.confirm(i18n.L("Make {{.Name}} the owner?", i18n.D{"Name": name}), i18n.L("You can't take it back yourself."), func() error { return u.a.Transfer(m.ID) })
 			}), m.State != "connected"),
-			fyne.NewMenuItem("Disconnect...", func() {
-				u.confirm("Disconnect "+name+"?", "They can rejoin with the link.", func() error { return u.a.Kick(m.ID, false) })
+			fyne.NewMenuItem(i18n.L("Disconnect..."), func() {
+				u.confirm(i18n.L("Disconnect {{.Name}}?", i18n.D{"Name": name}), i18n.L("They can rejoin with the link."), func() error { return u.a.Kick(m.ID, false) })
 			}),
-			fyne.NewMenuItem("Ban...", func() {
-				u.confirm("Ban "+name+"?", "They won't be able to rejoin this room.", func() error { return u.a.Kick(m.ID, true) })
+			fyne.NewMenuItem(i18n.L("Ban..."), func() {
+				u.confirm(i18n.L("Ban {{.Name}}?", i18n.D{"Name": name}), i18n.L("They won't be able to rejoin this room."), func() error { return u.a.Kick(m.ID, true) })
 			}))
 	}
 	return items
@@ -201,23 +206,23 @@ func (u *UI) personItems(m session.Member, owner bool) []*fyne.MenuItem {
 
 func (u *UI) helpMenu() *fyne.Menu {
 	up := u.st.Update
-	install := fyne.NewMenuItem("Install update and restart", func() { u.do(func() error { return u.a.InstallUpdate(ctx()) }) })
+	install := fyne.NewMenuItem(i18n.L("Install update and restart"), func() { u.do(func() error { return u.a.InstallUpdate(ctx()) }) })
 	install.Disabled = up == nil || up.Available == "" || !up.CanApply
 	if up != nil && up.Available != "" {
-		install.Label = "Install " + up.Available + " and restart"
+		install.Label = i18n.L("Install {{.Version}} and restart", i18n.D{"Version": up.Available})
 	}
-	checkUp := disabled(fyne.NewMenuItem("Check for updates", func() { u.do(func() error { return u.a.CheckUpdate(ctx()) }) }), up == nil || up.Checking)
-	auto := check("Start Bellion Share when I sign in", u.st.Autostart != nil && *u.st.Autostart, func() {
+	checkUp := disabled(fyne.NewMenuItem(i18n.L("Check for updates"), func() { u.do(func() error { return u.a.CheckUpdate(ctx()) }) }), up == nil || up.Checking)
+	auto := check(i18n.L("Start Bellion Share when I sign in"), u.st.Autostart != nil && *u.st.Autostart, func() {
 		on := !(u.st.Autostart != nil && *u.st.Autostart)
 		u.do(func() error { return u.a.SetAutostart(on) })
 	})
 	auto.Disabled = u.st.Autostart == nil
-	return fyne.NewMenu("Help",
-		fyne.NewMenuItem("Send feedback...", u.feedbackDialog),
-		sub("Logs and problem reports",
-			fyne.NewMenuItem("Send logs to the developers", u.sendLogs),
-			fyne.NewMenuItem("Open log folder", func() { u.do(u.a.OpenLogFolder) }),
-			fyne.NewMenuItem("Copy diagnostics", func() {
+	return fyne.NewMenu(i18n.L("Help"),
+		fyne.NewMenuItem(i18n.L("Send feedback..."), u.feedbackDialog),
+		sub(i18n.L("Logs and problem reports"),
+			fyne.NewMenuItem(i18n.L("Send logs to the developers"), u.sendLogs),
+			fyne.NewMenuItem(i18n.L("Open log folder"), func() { u.do(u.a.OpenLogFolder) }),
+			fyne.NewMenuItem(i18n.L("Copy diagnostics"), func() {
 				go func() {
 					t := u.a.Diagnostics()
 					fyne.Do(func() { u.fa.Clipboard().SetContent(t) })
@@ -226,14 +231,33 @@ func (u *UI) helpMenu() *fyne.Menu {
 		fyne.NewMenuItemSeparator(),
 		checkUp, install, auto,
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("About Bellion Share", u.aboutDialog),
+		fyne.NewMenuItem(i18n.L("About Bellion Share"), u.aboutDialog),
 	)
 }
 
 // windowAudioItem shows that the audio follows the shared window; choosing
 // another audio option overrides it.
 func windowAudioItem(on bool) *fyne.MenuItem {
-	it := fyne.NewMenuItem("The shared window's app (automatic)", nil)
+	it := fyne.NewMenuItem(i18n.L("The shared window's app (automatic)"), nil)
 	it.Checked, it.Disabled = on, true
 	return it
+}
+
+// languageMenu picks the app's language: the system's, or one by hand.
+// The window and menus switch at once.
+func (u *UI) languageMenu() *fyne.MenuItem {
+	pref := i18n.Preference()
+	sys, _ := i18n.Lookup(i18n.System())
+	items := []*fyne.MenuItem{
+		check(i18n.L("Automatic: {{.Language}}", i18n.D{"Language": sys.Name}), pref == "", func() { u.setLanguage("") }),
+		fyne.NewMenuItemSeparator(),
+	}
+	for _, l := range i18n.Languages {
+		tag, name := l.Tag, l.Name
+		if l.RTL { // Fyne can't lay right-to-left text out yet: mixed lines read wrong
+			name = i18n.L("{{.Language}} (preview)", i18n.D{"Language": name})
+		}
+		items = append(items, check(name, pref == tag, func() { u.setLanguage(tag) }))
+	}
+	return sub(i18n.L("Language"), items...)
 }

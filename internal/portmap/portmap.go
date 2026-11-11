@@ -308,7 +308,7 @@ func publicAddr(ip netip.Addr) bool {
 // Describe is a line for the user: whether others can reach us, and
 // whether that's fine.
 func (s State) Describe() (ok bool, text string) {
-	const strict = " Calls with people behind strict routers may fail."
+	// Whole sentences: the native UI translates them as they are.
 	switch {
 	case s.Trying:
 		return true, "Checking whether others can reach you..."
@@ -317,7 +317,7 @@ func (s State) Describe() (ok bool, text string) {
 	case s.Public:
 		return true, "Your computer has a public address: others can reach it directly unless a firewall blocks them."
 	case s.Method != "":
-		return false, "Not reachable: your router opened the port, but it sits behind another router or your provider's NAT." + strict
+		return false, "Not reachable: your router opened the port, but it sits behind another router or your provider's NAT. Calls with people behind strict routers may fail."
 	}
-	return false, "Not reachable: your router doesn't allow port mapping (UPnP, NAT-PMP or PCP)." + strict
+	return false, "Not reachable: your router doesn't allow port mapping (UPnP, NAT-PMP or PCP). Calls with people behind strict routers may fail."
 }

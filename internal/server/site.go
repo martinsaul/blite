@@ -122,7 +122,7 @@ var docPages = []docPage{
 	{"/docs/getting-started", "Getting started", "getting-started.html"},
 	{"/docs/features", "Features", "features.html"},
 	{"/docs/discord", "Discord", "discord.html"},
-	{"/docs/relays", "Relays", "relays.html"},
+	{"/docs/relays", "Relays: bigger groups", "relays.html"},
 	{"/docs/self-hosting", "Self-hosting", "self-hosting.html"},
 	{"/docs/troubleshooting", "Troubleshooting", "troubleshooting.html"},
 }

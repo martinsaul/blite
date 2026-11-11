@@ -45,6 +45,7 @@ BLITE_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:
    "owners": ["&lt;identity key from Room &gt; Your identity key...&gt;"]}
 ]</code></pre>
 <p>People whose identity keys are listed in <code>owners</code> own the room while they're in it. They find their key in the app under <em>Room &gt; Your identity key...</em> during a session.</p>
+<p>The <a href="/docs/relays">relay guide</a> walks through it step by step, with upload sizing. A hosted relay only works with your own server; with the official bellion.app server, run a <a href="/docs/relays#dedicated">dedicated relay machine</a> instead, which joins a room by its share link.</p>
 <p>The repository's <a href="https://github.com/martinsaul/blite/tree/HEAD/docs/examples"><code>docs/examples/</code></a> has a Docker Compose file running both services and an <code>env.example</code>.</p>
 
 <h2 id="clients">4. Clients</h2>

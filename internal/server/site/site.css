@@ -153,6 +153,10 @@ figcaption { color: var(--muted); font-size: .9rem; margin-top: .6rem; }
 .callout p a { color: #fff; text-decoration-thickness: 1.5px; }
 .callout-actions { display: flex; flex-wrap: wrap; gap: .8rem; }
 .callout :focus-visible { outline-color: #fff; }
+.how + .callout { margin-top: clamp(2.2rem, 5vw, 3.5rem); }
+.callout.soft { color: var(--fg); background: var(--tint); border: 1px solid var(--line); }
+.callout.soft p { color: var(--muted); }
+.callout.soft :focus-visible { outline-color: var(--brand); }
 
 /* Footer */
 .site-footer { border-top: 1px solid var(--line); background: var(--bg-alt); color: var(--muted); font-size: .93rem; padding: 3rem 0 1.5rem; margin-top: 0; }
@@ -181,6 +185,7 @@ figcaption { color: var(--muted); font-size: .9rem; margin-top: .6rem; }
 .prose pre code { background: none; border: 0; padding: 0; overflow-wrap: normal; }
 .prose table { border-collapse: collapse; width: 100%; font-size: .93rem; display: block; overflow-x: auto; margin: 1.2rem 0; }
 .prose td:last-child { min-width: 13rem; }
+.prose table.flags td:first-child { white-space: nowrap; }
 .prose th, .prose td { text-align: left; padding: .5rem .8rem .5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 .prose .note { background: var(--tint); border-left: 3px solid var(--brand); border-radius: 8px; padding: .7rem 1.1rem; margin: 1.4rem 0; }
 .prose .note p { margin: .2rem 0; }

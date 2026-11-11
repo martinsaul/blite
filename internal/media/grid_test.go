@@ -3,6 +3,8 @@ package media
 import (
 	"testing"
 	"time"
+
+	"blite/internal/i18n"
 )
 
 func TestGridSize(t *testing.T) {
@@ -241,7 +243,8 @@ func TestGridStoppedTile(t *testing.T) {
 		}
 	}
 	frames(10)
-	if got := g.ctl.labels[1].GetString("text"); got != `bob "quoted" ! name stopped sharing` {
+	// In the language the tests run in (BLITE_LANG, the locale).
+	if got, want := g.ctl.labels[1].GetString("text"), i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": `bob "quoted" ! name`}); got != want {
 		t.Fatalf("stopped tile says %q", got)
 	}
 	if g.ctl.ov[1].bar != nil {
@@ -261,4 +264,24 @@ func TestGridStoppedTile(t *testing.T) {
 		t.Fatalf("fade: %.2f then %.2f, live tile %+v", mid, end, live)
 	}
 	frames(10)
+}
+
+func TestGridLabelText(t *testing.T) {
+	for _, c := range []struct {
+		t    Tile
+		want string
+	}{
+		{Tile{Label: "Bob"}, "Bob"},
+		{Tile{Label: "Bob", Muted: true}, "Bob  " + i18n.L("(muted)")},
+		{Tile{Label: "Bob", Paused: true}, "Bob  " + i18n.L("(video paused)")},
+		{Tile{Label: "Bob", Muted: true, Paused: true}, "Bob  " + i18n.L("(muted, video paused)")},
+		{Tile{Label: "Bob", Stopped: true, Muted: true}, i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": "Bob"})},
+	} {
+		if got := tileText(c.t); got != c.want {
+			t.Errorf("tileText(%+v) = %q, want %q", c.t, got, c.want)
+		}
+	}
+	if got := launchQuote(`a "b" \ c`); got != `"a \"b\" \\ c"` {
+		t.Error(got)
+	}
 }

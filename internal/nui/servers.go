@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"blite/internal/app"
+	"blite/internal/i18n"
 )
 
 // serversBackend is what the app adds for the user's signaling servers.
@@ -25,7 +26,7 @@ type serversBackend interface {
 // serverName is how a server shows in the window.
 func serverName(s app.Server) string {
 	if s.BuiltIn {
-		return s.Host + " (Bellion Share)"
+		return s.Host + " (Bellion Share)" // a name: not translated
 	}
 	return s.Host
 }
@@ -50,7 +51,7 @@ func newServerPicker(u *UI) *serverPicker {
 		url := p.urls[name]
 		u.do(func() error { return sb.SelectServer(url) })
 	})
-	l := widget.NewLabel("Start sessions on")
+	l := widget.NewLabel(i18n.L("Start sessions on"))
 	l.SizeName = theme.SizeNameCaptionText
 	sel := container.NewGridWrap(fyne.NewSize(300, p.sel.MinSize().Height), p.sel) // names don't fit its minimum
 	p.box = container.NewHBox(layout.NewSpacer(), l, sel)
@@ -93,7 +94,7 @@ func discordServerNote(s *app.Servers) string {
 	if s.SelectedBuiltIn() {
 		return ""
 	}
-	return "Discord works on " + s.List[0].Host + " only for now."
+	return i18n.L("Discord works on {{.Host}} only for now.", i18n.D{"Host": s.List[0].Host})
 }
 
 // serversDialog lists the servers: add and remove the user's own, and
@@ -101,7 +102,7 @@ func discordServerNote(s *app.Servers) string {
 func (u *UI) serversDialog() {
 	sb, ok := u.a.(serversBackend)
 	if !ok {
-		u.info("Servers", "This build always uses its built-in server.", nil)
+		u.info(i18n.L("Servers"), i18n.L("This build always uses its built-in server."), nil)
 		return
 	}
 	rows := container.NewVBox()
@@ -111,7 +112,7 @@ func (u *UI) serversDialog() {
 	var fill func()
 	act := func(f func() error) {
 		if err := f(); err != nil {
-			msg.SetText(err.Error())
+			msg.SetText(upperFirst(i18n.Msg(err.Error())))
 			msg.Show()
 		} else {
 			msg.Hide()
@@ -129,11 +130,11 @@ func (u *UI) serversDialog() {
 			name := widget.NewLabel(serverName(srv))
 			var right []fyne.CanvasObject
 			if srv.URL == st.Servers.Default {
-				d := widget.NewLabel("Default")
+				d := widget.NewLabel(i18n.L("Default"))
 				d.TextStyle.Bold = true
 				right = append(right, d)
 			} else {
-				b := widget.NewButton("Make default", func() { act(func() error { return sb.SetDefaultServer(srv.URL) }) })
+				b := widget.NewButton(i18n.L("Make default"), func() { act(func() error { return sb.SetDefaultServer(srv.URL) }) })
 				b.Importance = widget.LowImportance
 				right = append(right, b)
 			}
@@ -148,7 +149,7 @@ func (u *UI) serversDialog() {
 	fill()
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("share.example.com or wss://share.example.com/ws")
-	add := widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), func() {
+	add := widget.NewButtonWithIcon(i18n.L("Add"), theme.ContentAddIcon(), func() {
 		s := strings.TrimSpace(entry.Text)
 		act(func() error {
 			err := sb.AddServer(s)
@@ -159,12 +160,10 @@ func (u *UI) serversDialog() {
 		})
 	})
 	entry.OnSubmitted = func(string) { add.OnTapped() }
-	intro := label("Sessions you start run on the default server. Links you click always join on the server they came from, " +
-		"so you don't need to add a server to watch someone. Add a server of your own to start sessions there: " +
-		"a server picker then shows at the bottom right of the window.")
+	intro := label(i18n.L("Sessions you start run on the default server. Links you click always join on the server they came from, so you don't need to add a server to watch someone. Add a server of your own to start sessions there: a server picker then shows at the bottom right of the window."))
 	content := container.NewVBox(intro, widget.NewSeparator(), rows, widget.NewSeparator(),
 		container.NewBorder(nil, nil, nil, add, entry), msg)
-	d := dialog.NewCustom("Servers", "Close", content, u.win)
+	d := dialog.NewCustom(i18n.L("Servers"), i18n.L("Close"), content, u.win)
 	d.Resize(fyne.NewSize(600, 0))
 	d.Show()
 }
@@ -179,8 +178,8 @@ func ConfirmServer(host string) bool {
 	ch := make(chan bool, 1)
 	fyne.Do(func() {
 		u.Show()
-		d := dialog.NewCustomConfirm("Join a session on "+host+"?", "Join", "Cancel",
-			label("This server isn't run by Bellion Share."), func(ok bool) { ch <- ok }, u.win)
+		d := dialog.NewCustomConfirm(i18n.L("Join a session on {{.Host}}?", i18n.D{"Host": host}), i18n.L("Join"), i18n.L("Cancel"),
+			label(i18n.L("This server isn't run by Bellion Share.")), func(ok bool) { ch <- ok }, u.win)
 		d.Show()
 	})
 	select {

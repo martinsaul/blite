@@ -1,34 +1,164 @@
-{{define "title"}}Relays{{end}}
-{{define "description"}}How Bellion Share rooms grow past a full mesh: members with a fast upload volunteer as relays that forward everyone's video. How relays are picked, and how to volunteer.{{end}}
+{{define "title"}}Relays: bigger groups{{end}}
+{{define "description"}}Sharing with more than about 5 people? Set up a relay: volunteer from the app, run a dedicated relay machine for your group on any server, or host one on your own server. Step by step, with upload sizing and troubleshooting.{{end}}
 {{define "body"}}
-<h1>Relays</h1>
-<p class="lead">Relays let rooms grow beyond what a full mesh can carry, without a streaming server in the middle.</p>
+<h1>Relays: bigger groups</h1>
+<p class="lead">Sharing with more than about 5 people? Set up a relay. A relay is a member of the room with a fast upload that forwards everyone's video, so nobody else has to upload their screen once per viewer.</p>
 
-<h2>Full mesh: the default</h2>
-<p>In a new room everyone sends their video directly to everyone else. That gives the lowest delay, but every sharer uploads their screen once per viewer: in a room of 6, each sharer uploads it 5 times. Most home connections can't keep that up at good quality, so above about 5 people Bellion Share shows a warning suggesting a relay.</p>
+<h2 id="why">Why bigger groups need a relay</h2>
+<p>In a new room everyone sends their video directly to everyone else (a <em>full mesh</em>). That gives the lowest delay, but every sharer uploads their screen once per viewer: in a room of 8, each sharer uploads it 7 times. Most home connections can't keep that up at good quality, so with more than 5 people in a full mesh Bellion Share shows a warning: <em>"6 people in a full mesh: everyone who shares uploads their screen 5 times. Expect lower quality, or have someone with a fast upload volunteer as relay (People menu)."</em></p>
+<p>With a relay, everyone sends their video once, to the relay, and the relay sends it on to whoever watches it.</p>
 
-<h2>Relay mode</h2>
-<p>Members with a fast upload can <strong>volunteer as relays</strong>. The others then send their video only to their relay, once, and the relay forwards it to everyone who watches it.</p>
+<h2 id="relay-mode">Relay mode</h2>
 <ul>
-  <li><strong>Several relays.</strong> The server picks as many volunteers as the room needs, up to 4, preferring the ones with the most upload. Each member is homed on one relay. Relays forward to each other, so any stream crosses at most two relays on its way.</li>
-  <li><strong>Capacity.</strong> A relay serves between 2 and 16 members, depending on its measured upload (each member costs it roughly 4.5 Mbit/s); a relay whose upload isn't known yet serves 4. Volunteers the room doesn't need yet stand by.</li>
+  <li><strong>Relay mode starts as soon as someone volunteers.</strong> Any member can volunteer; the server decides who relays.</li>
+  <li><strong>Several relays.</strong> The server picks as many volunteers as the room needs, up to 4, preferring the ones with the most upload. Each member is homed on one relay. Relays forward to each other, so any stream crosses at most two relays. Volunteers the room doesn't need yet stand by.</li>
+  <li><strong>Capacity.</strong> A relay serves between 2 and 16 members, depending on its upload (see <a href="#upload">How much upload do I need?</a>).</li>
   <li><strong>Only what's watched.</strong> Relays pull only the streams someone is watching, and up to 8 people can share at once in any room size.</li>
-  <li><strong>Adapts to viewers.</strong> A relay can make smaller versions (1080p, 720p) of a stream for viewers whose connection or computer can't take the top size.</li>
+  <li><strong>Adapts to viewers.</strong> A relay can make smaller versions (1080p, 720p) of a stream for viewers whose connection or computer can't take the top size, if it has the processing power to spare (a hardware encoder, or a CPU less than half busy).</li>
   <li><strong>Leaving is fine.</strong> When a relay leaves, its members move to another relay without dropping the call; if there's no other volunteer, the room goes back to full mesh.</li>
-  <li><strong>Encryption still applies.</strong> With end-to-end encryption on, media stays encrypted with the room members' keys.</li>
+  <li><strong>Encryption still applies.</strong> With end-to-end encryption on (the default), a relay is a member like any other: it gets the room's keys, forwards the encrypted media unchanged, and decrypts only what it shrinks for a viewer. Only run a relay on a machine you trust with your stream.</li>
+</ul>
+<p>Relay mode needs everyone in the room on build 31 or newer, and several relays need build 56 or newer. If someone runs a build that only knows one relay, the room uses a single relay and pauses relay mode above 5 people until they update.</p>
+
+<h2 id="three-ways">Three ways to set up a relay</h2>
+<ol>
+  <li><a href="#volunteer"><strong>Volunteer from the app.</strong></a> Easiest: a member with a fast upload clicks one menu item. Works on any server.</li>
+  <li><a href="#dedicated"><strong>A dedicated relay machine for your group.</strong></a> A spare PC, a home server or a rented server (VPS) joins your room by its share link and relays, so nobody's gaming PC has to. Works on any server, including bellion.app.</li>
+  <li><a href="#hosted"><strong>A hosted relay on your own server.</strong></a> Keeps fixed rooms open around the clock. Needs your own Bellion Share server; it doesn't work with bellion.app.</li>
+</ol>
+
+<h2 id="volunteer">1. Volunteer from the app</h2>
+<p>Good for: a group where one person has a fast, stable upload.</p>
+<ol>
+  <li>Join the call as usual.</li>
+  <li>Open the <em>People</em> menu.</li>
+  <li>Choose <strong>Volunteer as relay</strong>.</li>
+  <li>Check the line under the People table: it should say <em>Relays: You relay for 4 people.</em> (the number is how many people you serve), or <em>You are standing by</em> if the room doesn't need you yet.</li>
+</ol>
+<p>To stop, choose <strong>Stop relaying</strong> (or <strong>Leave the relay queue</strong> while standing by) in the same menu. Your members move to another relay, or back to full mesh.</p>
+<div class="note">
+  <p>Volunteer when you have a fast, stable upload (a wired connection helps) and a computer that isn't busy with a demanding game. Relaying while you play makes both worse. Several people can volunteer; the server uses the ones it needs.</p>
+</div>
+
+<h2 id="dedicated">2. A dedicated relay machine for your group</h2>
+<p>Good for: a regular group that is often bigger than 5, when nobody wants to relay from their own PC. Any machine with a fast upload can do it: a spare PC, a home server, or a small rented server (VPS). It runs Bellion Share without a window, joins your room by its share link and volunteers. It works on any server, including the official bellion.app one.</p>
+<p>The relay machine needs no screen and no desktop: it shares nothing and shows nothing. Forwarding uses little CPU; making smaller versions for viewers is video encoding, so it helps to have a hardware encoder or a few free CPU cores.</p>
+
+<h3>Step 1: install Bellion Share on the relay machine</h3>
+<ul>
+  <li><strong>Linux</strong> (Ubuntu 24.04, Mint 22 or newer, including server installs without a desktop): download the .deb from <a href="/">bellion.app</a> and run <code>sudo apt install ./blite_*.deb</code>. This installs <code>/usr/bin/blite</code> and the GStreamer plugins it needs.</li>
+  <li><strong>Windows</strong> 10 or 11: download the zip from <a href="/">bellion.app</a> and unzip it, for example to <code>C:\BellionRelay</code>. The program you run is <code>bin\blite.exe</code> in the unzipped <code>blite</code> folder.</li>
 </ul>
 
-<h2>How to volunteer</h2>
-<ol>
-  <li>In a call, open the <em>People</em> menu.</li>
-  <li>Choose <strong>Volunteer as relay</strong>.</li>
-</ol>
-<p>The line under the People table then shows the relays and how many people each one serves, for example <em>Relays: You relay for 4</em>, or <em>standing by</em> if the room doesn't need you yet. Choose <em>Stop relaying</em> (or <em>Leave the relay queue</em>) in the same menu to stop.</p>
-<div class="note">
-  <p>Volunteer when you have a fast, stable upload (a wired connection helps) and a computer that isn't busy with a demanding game. A volunteer that others can only reach through a TURN server is never picked as a relay.</p>
-</div>
-<p>Relay mode needs everyone in the room on build 31 or newer. If someone runs a build that only knows one relay, the room uses a single relay and pauses relay mode above 5 people until they update.</p>
+<h3>Step 2: get your room's share link</h3>
+<p>In the app on your own PC, start or join the session your group uses, and choose <em>Room &gt; Copy share link</em>. It looks like <code>https://bellion.app/j/CODE#password</code>. Keep it private: it contains the room password.</p>
 
-<h2>Hosted relay</h2>
-<p>A server can also run Bellion Share without a window as a <strong>hosted relay</strong>: it keeps fixed rooms open around the clock and volunteers as their relay, usually the biggest one, so the room doesn't depend on a member's machine. Member volunteers can relay alongside it when the room outgrows it. See <a href="/docs/self-hosting#hosted-relay">Self-hosting</a> to run one.</p>
+<h3>Step 3: start the relay</h3>
+<p>On Linux, in a terminal (keep the single quotes; replace the link and the upload with yours):</p>
+<pre><code>blite -headless -link 'https://bellion.app/j/CODE#password' \
+  -volunteer -source none -view none \
+  -name "Group relay" -relay-upload-kbps 50000</code></pre>
+<p>On Windows, in PowerShell or a Command Prompt, in the unzipped <code>blite</code> folder:</p>
+<pre><code>bin\blite.exe -headless -link "https://bellion.app/j/CODE#password" -volunteer -source none -view none -name "Group relay" -relay-upload-kbps 50000</code></pre>
+<p>It prints <code>room CODE link ...</code>, then <code>volunteered as relay</code>, and a status line per member every 5 seconds. In the app, the relay appears in the People table as <em>Group relay</em>, and the line under the table says <em>Relays: Group relay relays for N people.</em> Press Ctrl+C to stop it; it leaves the room cleanly.</p>
+<table class="flags">
+  <tr><th>Flag</th><th>What it does</th></tr>
+  <tr><td><code>-headless</code></td><td>No window or tray: runs one session from the command line.</td></tr>
+  <tr><td><code>-link URL</code></td><td>The share link to join. It joins on the link's server, so no other server setting is needed.</td></tr>
+  <tr><td><code>-volunteer</code></td><td>Volunteers as relay as soon as it's in.</td></tr>
+  <tr><td><code>-source none</code></td><td>Shares nothing. Required: without it the relay tries to share its screen, and on a machine without a display it stops right away.</td></tr>
+  <tr><td><code>-view none</code></td><td>Shows and plays nothing (no windows, no decoding). Needed on a machine without a display.</td></tr>
+  <tr><td><code>-name NAME</code></td><td>How it shows in the People table (default: the computer's name).</td></tr>
+  <tr><td><code>-relay-upload-kbps N</code></td><td>Its upload in kbit/s (Mbit/s &times; 1000). The server uses it to decide how many members it serves, and the relay never sends faster than this. See <a href="#upload">How much upload do I need?</a></td></tr>
+  <tr><td><code>-udp-port N</code></td><td>The UDP port for all its connections (default 30471; if that's taken, the next free one). See <a href="#troubleshooting">Troubleshooting</a>.</td></tr>
+</table>
+<div class="note">
+  <p>Don't add <code>-relay</code>: despite its name, it forces all connections through a TURN server, and a volunteer that others can only reach through TURN is never picked as a relay.</p>
+</div>
+
+<h3>Step 4: keep it running</h3>
+<p>The relay keeps running until you stop it, and keeps the room open while it's in it: everyone else can leave, and the same link still works days later. It rides out short network drops (up to about a minute) without leaving the room. After a longer outage, or when the server restarts, it exits, so let the system start it again.</p>
+<p><strong>Linux: a systemd service.</strong> Put the link in a file only root can read, <code>/etc/bellion-relay.env</code> (<code>sudo chmod 600 /etc/bellion-relay.env</code>):</p>
+<pre><code>RELAY_LINK="https://bellion.app/j/CODE#password"</code></pre>
+<p>Create a user for it (<code>sudo useradd --system --create-home --home-dir /var/lib/bellion-relay bellion-relay</code>) and the service, <code>/etc/systemd/system/bellion-relay.service</code>:</p>
+<pre><code>[Unit]
+Description=Bellion Share relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=bellion-relay
+EnvironmentFile=/etc/bellion-relay.env
+ExecStart=/usr/bin/blite -headless -link ${RELAY_LINK} -volunteer \
+  -source none -view none -name "Group relay" -relay-upload-kbps 50000
+Restart=always
+RestartSec=3min
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+<p>Then <code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl enable --now bellion-relay</code>, and <code>journalctl -u bellion-relay -f</code> to watch its log. Use <code>Restart=always</code> rather than <code>on-failure</code>: when its session ends (for example after a server restart) the relay exits normally. Keep <code>RestartSec</code> at a few minutes: when the link no longer works, the server counts each failed join from your address, and too many in 10 minutes block joins from it for a while, for everyone on your connection.</p>
+<p><strong>Windows.</strong> The simplest way is to leave the command running in its terminal window. To start it at boot without a window, create a task in Task Scheduler: trigger <em>At startup</em>, action <em>Start a program</em> with <code>C:\BellionRelay\blite\bin\blite.exe</code> and the flags above as arguments, <em>Run whether user is logged on or not</em>, and under Settings, <em>If the task fails, restart every</em> 5 minutes. Update the relay from time to time by downloading the new zip; the headless relay doesn't update itself.</p>
+
+<h3>When things change</h3>
+<ul>
+  <li><strong>The person who started the room leaves.</strong> The room carries on. Ownership passes to whoever has been in the room longest, which can be the relay machine, and a relay can't disconnect or ban anyone. If you own the room, hand ownership to a person before you go: <em>People &gt; their name &gt; Make owner...</em></li>
+  <li><strong>The link stops working.</strong> A room ends 5 minutes after the last person (relay included) leaves, and when the server restarts. The relay then can't rejoin: start a new session, put its link in the relay's command (or <code>/etc/bellion-relay.env</code>) and restart the relay.</li>
+  <li><strong>Encryption.</strong> The relay is a room member and gets the room's keys, like everyone else. It shows up with its own name tag (which changes each time it restarts), and the safety code includes it.</li>
+  <li><strong>Updates.</strong> When a relay's build is too old for the server, it can't join; install the new version.</li>
+</ul>
+
+<h2 id="hosted">3. A hosted relay on your own server</h2>
+<p>Good for: groups that run their own Bellion Share server. <code>blite -host rooms.json</code> keeps the listed rooms open around the clock with fixed room codes, so their share links never change, and volunteers as each room's relay. Member volunteers can relay alongside it when a room outgrows it.</p>
+<div class="note">
+  <p>A hosted relay needs your own signaling server: the fixed room codes are authorized with the server's secret <code>BLITE_HOST_KEY</code>, and the official bellion.app server doesn't hand that out. On bellion.app, use a <a href="#dedicated">dedicated relay machine</a> instead.</p>
+</div>
+<ol>
+  <li>Set up your server as in <a href="/docs/self-hosting">Self-hosting</a>, with <code>BLITE_HOST_KEY</code> set to a long random secret.</li>
+  <li>Write <code>rooms.json</code>. Codes are 8 letters and digits (no I, L, O or U); passwords need at least 4 characters. <code>owners</code> lists the identity keys of the people who own the room while they're in it (from <em>Room &gt; Your identity key...</em> in their app); otherwise the relay owns it.
+<pre><code>[
+  {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Our relay",
+   "owners": ["&lt;identity key from Room &gt; Your identity key...&gt;"]}
+]</code></pre></li>
+  <li>Run it with the same key and your server, with good upload and host networking:
+<pre><code>BLITE_HOST_KEY=&lt;secret&gt; blite -host rooms.json -server wss://share.example.com/ws -relay-upload-kbps 200000</code></pre>
+  The repository's <code>Dockerfile.host</code> builds an image for it, and <code>docs/examples/</code> has a Docker Compose file running both services.</li>
+  <li>Share <code>https://share.example.com/j/7K3QX9MD#a-room-password</code> with your group. The link works around the clock.</li>
+</ol>
+<p>The hosted relay restarts its rooms by itself when the connection drops. The Docker image includes the GStreamer plugins it needs to make smaller versions for viewers (software x264 encoding, so give it a few free CPU cores).</p>
+
+<h2 id="upload">How much upload do I need?</h2>
+<p>Each member a relay serves costs it about 4.5 Mbit/s of upload (about one full-size stream plus small previews). The server plans with 70% of the relay's upload, so serving one member takes about 6.5 Mbit/s of upload, and a relay serves at least 2 and at most 16 members:</p>
+<table>
+  <tr><th>Relay's upload</th><th>Members it serves</th></tr>
+  <tr><td>up to 25 Mbit/s</td><td>2 to 3</td></tr>
+  <tr><td>30 Mbit/s</td><td>4</td></tr>
+  <tr><td>50 Mbit/s</td><td>7</td></tr>
+  <tr><td>100 Mbit/s</td><td>15</td></tr>
+  <tr><td>105 Mbit/s or more</td><td>16 (the most)</td></tr>
+  <tr><td>not known yet</td><td>4</td></tr>
+</table>
+<ul>
+  <li><strong>In the app</strong> the relay's upload isn't known at first, so it serves 4; once it has sent more, the server uses the most it has seen (never fewer than 4).</li>
+  <li><strong>A dedicated or hosted relay</strong> should set <code>-relay-upload-kbps</code> to its real upload (from a speed test, in kbit/s; round down if it varies). Too high, and it gets more members than it can feed; too low, and it serves fewer and sends slower than it could, because it never sends faster than that.</li>
+  <li>For more members than one relay can serve, add relays: up to 4 relays share a room. With four 100 Mbit/s relays a room can have about 60 people.</li>
+  <li>Download matters too: a relay receives each stream that someone it serves watches, once.</li>
+</ul>
+
+<h2 id="check">How to tell it's working</h2>
+<ul>
+  <li>The line under the People table lists the relays and how many people each serves, for example <em>Relays: Group relay relays for 6 people; Sam relays for 4 people; Alex is standing by.</em> Without a relay it says <em>Everyone sends their video to everyone (full mesh).</em></li>
+  <li>In a member's <em>People &gt; their name &gt; Network path</em>, people whose video comes through a relay show <em>via</em> the relay's name.</li>
+  <li>A dedicated relay's log shows <code>volunteered as relay</code>, then <code>plan ... relays=[...]</code> lines when the server changes the plan, and per member <code>upKbps</code>, the rate it sends that member.</li>
+</ul>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+  <li><strong>It says "standing by" and never relays.</strong> The room doesn't need another relay yet: the relays already picked have room for everyone. It takes over when one leaves or the room grows.</li>
+  <li><strong>The volunteer is never picked, even alone.</strong> A volunteer that others can only reach through a TURN server is never picked. Make it reachable directly: let it open its UDP port on the router (UPnP, NAT-PMP or PCP, on by default), or forward UDP port 30471 (or the one you set with <code>-udp-port</code>) to it on your router, and allow that port in its firewall. On a VPS, open the UDP port in the provider's firewall too. A note at the top of the app window says whether others can reach you.</li>
+  <li><strong>Two copies on one machine</strong> (for example the app and a relay): each needs its own UDP port. The second one takes the next free port, but a router forward only covers the one you forwarded; give the relay its own with <code>-udp-port 30480</code> and forward that.</li>
+  <li><strong>"Relay mode needs everyone in the room on Bellion Share build 31 or newer."</strong> Someone runs an old version; they need to update. With someone on a build older than 56, only one relay is used and relay mode pauses above 5 people.</li>
+  <li><strong>The relay exits right away with "video source".</strong> Add <code>-source none</code>.</li>
+  <li><strong>The relay exits with "signaling".</strong> The link is wrong, the room has ended (start a new session and use its link), or the relay's build is too old.</li>
+  <li><strong>Viewers still get low quality.</strong> Check the relay's upload (set <code>-relay-upload-kbps</code> honestly), and that it's on a wired connection. Each sharer's own upload still has to carry their stream once.</li>
+</ul>
 {{end}}
