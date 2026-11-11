@@ -212,3 +212,53 @@ func TestGridWithPreview(t *testing.T) {
 		t.Fatalf("composed %d frames", n)
 	}
 }
+
+// A tile whose sharer stopped says so on black next to a live one; frames
+// keep coming, and Fade takes it out.
+func TestGridStoppedTile(t *testing.T) {
+	Init()
+	pl, err := StartPlayer(ViewGrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pl.Stop()
+	g, err := StartGrid(GridConfig{Tiles: []Tile{{Channel: pl.Channel, Label: "alice", ID: "a", Volume: 1},
+		{Label: `bob "quoted" ! name`, ID: "b", Stopped: true}}, View: ViewCount, Width: 1280, Height: 720,
+		OnControl: func(string, Control, float64) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	frames := func(n int) {
+		t.Helper()
+		start := g.Frames()
+		deadline := time.Now().Add(10 * time.Second)
+		for g.Frames()-start < n && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if d := g.Frames() - start; d < n {
+			t.Fatalf("composed %d frames", d)
+		}
+	}
+	frames(10)
+	if got := g.ctl.labels[1].GetString("text"); got != `bob "quoted" ! name stopped sharing` {
+		t.Fatalf("stopped tile says %q", got)
+	}
+	if g.ctl.ov[1].bar != nil {
+		t.Fatal("a stopped tile has controls")
+	}
+	g.SetState("b", true, false, 1) // no controls to update: nothing breaks
+	g.Fade("b", 300*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	g.ctl.Lock()
+	mid := g.ctl.fades[1].alpha
+	g.ctl.Unlock()
+	time.Sleep(400 * time.Millisecond)
+	g.ctl.Lock()
+	end, live := g.ctl.fades[1].alpha, g.ctl.fades[0]
+	g.ctl.Unlock()
+	if mid <= 0 || mid >= 1 || end != 0 || !live.at.IsZero() {
+		t.Fatalf("fade: %.2f then %.2f, live tile %+v", mid, end, live)
+	}
+	frames(10)
+}

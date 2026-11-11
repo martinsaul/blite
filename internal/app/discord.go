@@ -90,10 +90,20 @@ func httpBase(server string) string {
 	return scheme + "://" + u.Host
 }
 
+// discordServer is the server that exchanges Discord tokens and ties
+// sessions to voice channels. For now that is always the built-in one:
+// Discord isn't available on the user's own servers yet (they would need
+// their own Discord app, configured on the server).
+func (a *App) discordServer() string { return a.builtIn() }
+
+// discordReadyLocked reports whether the server picked for new sessions is the
+// Discord server; a.mu is held.
+func (a *App) discordReadyLocked() bool { return a.selectedLocked() == a.cfg.Server }
+
 // exchange gets a Discord token from our server for a code or a refresh token.
 func (a *App) exchange(ctx context.Context, code, refresh string) (*discordToken, error) {
 	body, _ := json.Marshal(map[string]string{"code": code, "refresh": refresh})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpBase(a.config().Server)+"/v1/discord/token", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpBase(a.discordServer())+"/v1/discord/token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
@@ -116,7 +126,7 @@ func (a *App) exchange(ctx context.Context, code, refresh string) (*discordToken
 
 // lookupChannel asks the server which session is tied to a voice channel.
 func (a *App) lookupChannel(ctx context.Context, id string) (room string, open bool, people int) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpBase(a.config().Server)+"/v1/channel/"+url.PathEscape(id), nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpBase(a.discordServer())+"/v1/channel/"+url.PathEscape(id), nil)
 	res, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		return "", false, 0
@@ -268,10 +278,13 @@ func (a *App) followDiscord(ctx context.Context, c *discord.Conn) error {
 // GoLiveInChannel starts a session tied to the user's Discord voice channel.
 func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) error {
 	a.mu.Lock()
-	id := a.discord.ChannelID
+	id, ok := a.discord.ChannelID, a.discordReadyLocked()
 	a.mu.Unlock()
 	if id == "" {
 		return errors.New("you're not in a Discord voice channel")
+	}
+	if !ok {
+		return ErrDiscordServer
 	}
 	return a.create(ctx, password, e2ee, id)
 }
@@ -279,10 +292,17 @@ func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) e
 // JoinChannel joins the session tied to the user's Discord voice channel.
 func (a *App) JoinChannel(ctx context.Context, password string) error {
 	a.mu.Lock()
-	code := a.discord.Room
+	code, ok := a.discord.Room, a.discordReadyLocked()
 	a.mu.Unlock()
 	if code == "" {
 		return errors.New("nobody shares in this Discord channel yet")
 	}
-	return a.join(ctx, code, password)
+	if !ok {
+		return ErrDiscordServer
+	}
+	return a.join(ctx, a.discordServer(), code, password)
 }
+
+// ErrDiscordServer: Discord voice channels work on the built-in server
+// only, for now.
+var ErrDiscordServer = errors.New("Discord works on the Bellion Share server only for now: pick it at the bottom right")

@@ -37,6 +37,8 @@ type App struct {
 	mode    media.ContentMode // last chosen content mode; new sessions keep it
 	layout  session.Layout    // how we show received streams; kept on disk
 	discord Discord           // the user's Discord voice channel (RunDiscord)
+	servers serverSettings    // the user's signaling servers; kept on disk
+	picked  string            // the lobby's server for new sessions; "" = the default
 	// discordAuth wakes RunDiscord to ask Discord for permission.
 	discordAuth chan struct{}
 	// DefaultSource is what a new session shares first.
@@ -63,6 +65,10 @@ type App struct {
 	RecentLog func() string
 	// Show brings the native window to the front.
 	Show func()
+	// ConfirmServer asks the user whether to join a session on host, a
+	// server not run by Bellion Share, and waits for the answer. nil =
+	// such links are refused.
+	ConfirmServer func(host string) bool
 }
 
 // ErrUpdateRequired: the installed build is below the update channel's
@@ -74,7 +80,7 @@ func New(cfg session.Config, def media.SourceKind) *App {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
-	return &App{cfg: cfg, log: cfg.Log, DefaultSource: def, layout: loadLayout(), discordAuth: make(chan struct{}, 1)}
+	return &App{cfg: cfg, log: cfg.Log, DefaultSource: def, layout: loadLayout(), servers: loadServers(), discordAuth: make(chan struct{}, 1)}
 }
 
 // UIState is what /api/state returns.
@@ -97,6 +103,8 @@ type UIState struct {
 	// Discord: the user's voice channel and its session (nil until the
 	// watcher runs).
 	Discord *Discord `json:"discord,omitempty"`
+	// Servers: the signaling servers and which one new sessions use.
+	Servers *Servers `json:"servers,omitempty"`
 }
 
 // Reach is the reachability line; OK false is a warning.
@@ -114,8 +122,9 @@ func (a *App) State() any {
 		d := a.discord
 		dc = &d
 	}
+	servers := a.serverState()
 	a.mu.Unlock()
-	st := UIState{Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), Layout: a.currentLayout(), Discord: dc}
+	st := UIState{Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), Layout: a.currentLayout(), Discord: dc, Servers: servers}
 	if a.cfg.Identity.Private != nil {
 		st.Tag = identity.Tag(a.cfg.Identity.Public())
 	}
@@ -321,7 +330,10 @@ func (a *App) create(ctx context.Context, password string, e2ee bool, channel st
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	cfg := a.config()
+	a.mu.Lock()
+	cfg := a.cfg
+	cfg.Server = a.selectedLocked()
+	a.mu.Unlock()
 	cfg.E2EE, cfg.Channel = e2ee, channel
 	s, err := session.Create(ctx, cfg, password)
 	if err != nil {
@@ -331,17 +343,24 @@ func (a *App) create(ctx context.Context, password string, e2ee bool, channel st
 	return nil
 }
 
-// JoinLink implements ui.Backend.
+// JoinLink implements ui.Backend: the room is on the link's server.
 func (a *App) JoinLink(ctx context.Context, link string) error {
-	code, pw, err := session.ParseLink(link)
+	server, code, pw, err := session.ParseLinkServer(link)
 	if err != nil {
 		return err
 	}
-	return a.join(ctx, code, pw)
+	server = a.linkServer(server)
+	if a.busy() {
+		return ErrInSession
+	}
+	if err := a.confirmServer(server); err != nil {
+		return err
+	}
+	return a.join(ctx, server, code, pw)
 }
 
-// join joins room code.
-func (a *App) join(ctx context.Context, code, pw string) error {
+// join joins room code on server.
+func (a *App) join(ctx context.Context, server, code, pw string) error {
 	if a.busy() {
 		return ErrInSession
 	}
@@ -350,7 +369,9 @@ func (a *App) join(ctx context.Context, code, pw string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	s, err := session.Join(ctx, a.config(), code, pw)
+	cfg := a.config()
+	cfg.Server = server
+	s, err := session.Join(ctx, cfg, code, pw)
 	if err != nil {
 		return friendly(err)
 	}

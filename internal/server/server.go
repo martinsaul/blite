@@ -126,6 +126,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /apple-touch-icon.png", siteFile("apple-touch-icon.png", "image/png"))
 	s.mux.HandleFunc("GET /static/icon-512.png", siteFile("icon-512.png", "image/png"))
 	s.mux.HandleFunc("GET /static/og.jpg", siteFile("og.jpg", "image/jpeg"))
+	s.mux.HandleFunc("GET /static/site.css", handleSiteCSS)
 	for _, n := range siteShots {
 		s.mux.HandleFunc("GET /static/shots/"+n, siteFile("shots/"+n, "image/webp"))
 	}

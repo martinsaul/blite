@@ -97,7 +97,11 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	s, err := session.Join(ctx, a.config(), r.Room, r.Password)
+	cfg := a.config()
+	if r.Server != "" { // the server the call was on; older files: the default
+		cfg.Server = r.Server
+	}
+	s, err := session.Join(ctx, cfg, r.Room, r.Password)
 	// Keep the file until a join worked or clearly can't: a build that
 	// crashes before this point is rolled back, and the old one rejoins.
 	removeResume()

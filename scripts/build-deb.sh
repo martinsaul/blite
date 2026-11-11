@@ -34,9 +34,9 @@ Depends: gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plug
 Recommends: gstreamer1.0-vaapi
 Section: net
 Priority: optional
-Description: Bellion Share - peer-to-peer screen sharing (POC)
- Share your screen and chosen apps' audio with up to 4 people,
- directly peer to peer. Runs as a tray app with a local web UI.
+Description: Bellion Share - peer-to-peer screen sharing with friends
+ Share your screen, a window and app audio with friends, up to 4K60,
+ directly peer to peer and end-to-end encrypted.
 CTRL
 cat > "$pkg/DEBIAN/postinst" <<'POST'
 #!/bin/sh

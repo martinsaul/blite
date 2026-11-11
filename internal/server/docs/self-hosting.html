@@ -48,9 +48,11 @@ BLITE_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:
 <p>The repository's <a href="https://github.com/martinsaul/blite/tree/HEAD/docs/examples"><code>docs/examples/</code></a> has a Docker Compose file running both services and an <code>env.example</code>.</p>
 
 <h2 id="clients">4. Clients</h2>
-<p>Point the app at your server with <code>-server wss://share.example.com/ws</code> or the <code>BLITE_SERVER</code> environment variable, or build it in:</p>
+<p>Official builds can use your server as they are: under <em>Room &gt; Servers...</em>, add <code>share.example.com</code> (or <code>wss://share.example.com/ws</code>) and, if you like, make it the default. Once a server is added, a picker at the bottom right of the window chooses where new sessions start. Share links name their server (<code>https://share.example.com/j/CODE#password</code>), so anyone can join from a link without adding the server; the first time, the app asks whether to join a session on a server not run by Bellion Share.</p>
+<p>Discord integration isn't available on self-hosted servers yet.</p>
+<p>Or point the app at your server with <code>-server wss://share.example.com/ws</code> or the <code>BLITE_SERVER</code> environment variable, or build it in:</p>
 <pre><code>export BLITE_DEFAULT_SERVER=wss://share.example.com/ws
 scripts/build-windows.sh dist/windows   # or scripts/build-deb.sh dist/linux</code></pre>
-<p>Share links then look like <code>https://share.example.com/j/CODE#password</code>. The joining app still uses its own configured server, so everyone in a room must point at the same one.</p>
+<p>That server then replaces the built-in default.</p>
 <p>Self-update is off unless the build is given an update server and release signing keys (<code>BLITE_UPDATE_URL</code>, <code>BLITE_UPDATE_KEYS</code>; see <code>scripts/version.sh</code>).</p>
 {{end}}

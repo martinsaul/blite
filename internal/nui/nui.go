@@ -79,6 +79,7 @@ func Run(a ui.Backend, o Options) {
 		d.SetSystemTrayIcon(icon)
 		d.SetSystemTrayMenu(fyne.NewMenu("Bellion Share",
 			fyne.NewMenuItem("Open Bellion Share", u.Show),
+			fyne.NewMenuItem("Show video", u.showVideo),
 			fyne.NewMenuItem("Leave session", a.Leave),
 		))
 	}
@@ -185,6 +186,12 @@ func (u *UI) do(f func() error) {
 			fyne.Do(func() { u.showErr(err) })
 		}
 	}()
+}
+
+// showVideo reopens every video window the user closed (nothing outside
+// a call).
+func (u *UI) showVideo() {
+	go u.a.ShowWindow("*")
 }
 
 func (u *UI) showErr(err error) {

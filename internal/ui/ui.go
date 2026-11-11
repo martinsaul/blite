@@ -69,8 +69,8 @@ type Backend interface {
 	Diagnostics() string
 	// Feedback sends an idea or a problem the user wrote.
 	Feedback(ctx context.Context, kind, text string, withDiag bool) error
-	// ShowWindow reopens a video window the user closed: a peer's, or ""
-	// the grid window.
+	// ShowWindow reopens a video window the user closed: a peer's, "" the
+	// grid window, "self" our preview, or "*" all of them.
 	ShowWindow(id string) error
 	// Volunteer joins (on) or leaves the relay queue.
 	Volunteer(on bool) error

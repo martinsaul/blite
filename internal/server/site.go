@@ -2,26 +2,23 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
-//go:embed terms.html
-var termsHTML []byte
-
-//go:embed privacy.html
-var privacyHTML []byte
-
-//go:embed download.html
-var downloadHTML string
+//go:embed chrome.html download.html terms.html privacy.html
+var pageFiles embed.FS
 
 //go:embed site
 var siteFiles embed.FS
@@ -58,6 +55,59 @@ func siteFile(name, ctype string) http.HandlerFunc {
 	}
 }
 
+// siteCSS is the stylesheet every public page shares, served at
+// /static/site.css. Pages link it with a content hash (siteCSSURL), so
+// browsers can cache it for long and still get a new one after a deploy.
+var siteCSS = func() []byte {
+	b, err := siteFiles.ReadFile("site/site.css")
+	if err != nil {
+		panic(err)
+	}
+	return b
+}()
+
+var siteCSSVersion = func() string {
+	h := sha256.Sum256(siteCSS)
+	return hex.EncodeToString(h[:6])
+}()
+
+var siteCSSURL = "/static/site.css?v=" + siteCSSVersion
+
+func handleSiteCSS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	if r.URL.Query().Get("v") == siteCSSVersion {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	}
+	w.Write(siteCSS)
+}
+
+// siteFuncs are the template functions the page chrome (chrome.html) uses.
+var siteFuncs = template.FuncMap{
+	"hasPrefix": strings.HasPrefix,
+	"css":       func() string { return siteCSSURL },
+}
+
+// sitePage parses a page from pageFiles together with the shared chrome.
+func sitePage(name string) *template.Template {
+	return template.Must(template.New(name).Funcs(siteFuncs).ParseFS(pageFiles, "chrome.html", name))
+}
+
+// renderPage renders a page that doesn't change at runtime.
+func renderPage(name string) []byte {
+	var b strings.Builder
+	if err := sitePage(name).ExecuteTemplate(&b, name, nil); err != nil {
+		panic(err)
+	}
+	return []byte(b.String())
+}
+
+var (
+	termsHTML   = renderPage("terms.html")
+	privacyHTML = renderPage("privacy.html")
+)
+
 // siteShots are the app screenshots on the download page and in the docs,
 // served at /static/shots/<name>.
 var siteShots = []string{"call.webp", "lobby.webp", "lobby-discord.webp", "lobby-watch.webp", "share-menu.webp", "people-menu.webp"}
@@ -77,14 +127,59 @@ var docPages = []docPage{
 	{"/docs/troubleshooting", "Troubleshooting", "troubleshooting.html"},
 }
 
+// tocEntry is one section in a docs page's "On this page" list.
+type tocEntry struct {
+	ID    string
+	Label template.HTML
+}
+
+// docSection matches a docs page's section headings: the h2s that start a
+// line (cards and the like nest theirs in other elements).
+var docSection = regexp.MustCompile(`(?m)^<h2(?: id="([^"]*)")?>(.*?)</h2>`)
+
+var (
+	tagRE  = regexp.MustCompile(`<[^>]*>`)
+	slugRE = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
+// sectionTOC gives every section heading in body an id (a slug of its text,
+// unless it has one) and returns the body and its table of contents.
+func sectionTOC(body string) (string, []tocEntry) {
+	var toc []tocEntry
+	seen := map[string]bool{}
+	body = docSection.ReplaceAllStringFunc(body, func(h string) string {
+		m := docSection.FindStringSubmatch(h)
+		id, label := m[1], m[2]
+		if id == "" {
+			id = strings.Trim(slugRE.ReplaceAllString(strings.ToLower(tagRE.ReplaceAllString(label, "")), "-"), "-")
+			for base, n := id, 2; seen[id]; n++ {
+				id = fmt.Sprintf("%s-%d", base, n)
+			}
+		}
+		seen[id] = true
+		toc = append(toc, tocEntry{id, template.HTML(tagRE.ReplaceAllString(label, ""))})
+		return `<h2 id="` + id + `">` + label + `</h2>`
+	})
+	return body, toc
+}
+
 // renderDocs renders every docs page once: they don't change at runtime.
 func renderDocs() map[string][]byte {
 	out := map[string][]byte{}
-	funcs := template.FuncMap{"hasPrefix": strings.HasPrefix}
 	for _, p := range docPages {
-		t := template.Must(template.New("").Funcs(funcs).ParseFS(docsFiles, "docs/_layout.html", "docs/"+p.File))
+		t := template.Must(template.New("").Funcs(siteFuncs).ParseFS(pageFiles, "chrome.html"))
+		t = template.Must(t.ParseFS(docsFiles, "docs/_layout.html", "docs/"+p.File))
+		var body strings.Builder
+		if err := t.ExecuteTemplate(&body, "body", nil); err != nil {
+			panic(err)
+		}
+		html, toc := sectionTOC(body.String())
+		if len(toc) < 2 {
+			toc = nil
+		}
 		var b strings.Builder
-		if err := t.ExecuteTemplate(&b, "layout", map[string]any{"Path": p.Path, "Pages": docPages}); err != nil {
+		data := map[string]any{"Path": p.Path, "Pages": docPages, "Body": template.HTML(html), "TOC": toc}
+		if err := t.ExecuteTemplate(&b, "layout", data); err != nil {
 			panic(err)
 		}
 		out[p.Path] = []byte(b.String())
@@ -125,7 +220,7 @@ func textFile(body, ctype string) http.HandlerFunc {
 	}
 }
 
-var downloadTmpl = template.Must(template.New("download").Parse(downloadHTML))
+var downloadTmpl = sitePage("download.html")
 
 func staticPage(b []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {

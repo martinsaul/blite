@@ -460,7 +460,7 @@ function renderLogs(l) {
 }
 
 function renderLayout(l, s) {
-  $("gridClosed").hidden = !(s && s.gridClosed);
+  $("gridClosed").hidden = !(s && (s.gridClosed || s.previewClosed || (s.members || []).some((m) => m.windowClosed)));
   l = l || { mode: "windows" };
   if (document.activeElement !== $("preview")) $("preview").value = l.preview || "";
   for (const el of document.querySelectorAll("input[name=layout]")) el.checked = el.value === l.mode;
@@ -574,7 +574,7 @@ function wire() {
     }
   };
   $("showGrid").onclick = async () => {
-    try { render((await post("/api/window", { id: "" })).state); } catch (e) { showError(e.message); }
+    try { render((await post("/api/window", { id: "*" })).state); } catch (e) { showError(e.message); }
   };
   $("logsOpen").onclick = async () => {
     try { await post("/api/logs/open"); } catch (e) { showError(e.message); }

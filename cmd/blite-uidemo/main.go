@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"os"
+	"slices"
 
 	"blite/internal/app"
 	"blite/internal/audio"
@@ -18,7 +19,13 @@ type demo struct {
 	src    string
 	dc     string // Discord state: "" | login | ready | room
 	ch     chan struct{}
+	// servers: the user's own signaling servers; def and pick: the default
+	// and the lobby's pick ("" = the built-in one).
+	servers   []string
+	def, pick string
 }
+
+const demoServer = "wss://bellion.example.com/ws"
 
 func (d *demo) changed() {
 	select {
@@ -40,6 +47,17 @@ func (d *demo) State() any {
 	case "room":
 		st.Discord = &app.Discord{Status: "ready", ChannelID: "111", Channel: "gaming", Guild: "Game Night", Room: "K7PQ-2M4X", Open: true, People: 3}
 	}
+	srv := &app.Servers{List: []app.Server{{URL: demoServer, Host: "bellion.example.com", BuiltIn: true}}, Default: demoServer, Selected: demoServer}
+	for _, c := range d.servers {
+		srv.List = append(srv.List, app.Server{URL: c, Host: session.ServerHost(c)})
+	}
+	if d.def != "" {
+		srv.Default, srv.Selected = d.def, d.def
+	}
+	if d.pick != "" {
+		srv.Selected = d.pick
+	}
+	st.Servers = srv
 	if !d.inCall {
 		return st
 	}
@@ -99,10 +117,46 @@ func (d *demo) GoLiveInChannel(context.Context, string, bool) error {
 }
 func (d *demo) JoinChannel(context.Context, string) error { d.inCall = true; d.changed(); return nil }
 
+func (d *demo) AddServer(s string) error {
+	n, err := session.NormalizeServer(s)
+	if err != nil {
+		return err
+	}
+	d.servers = append(d.servers, n)
+	d.changed()
+	return nil
+}
+
+func (d *demo) RemoveServer(url string) error {
+	d.servers = slices.DeleteFunc(d.servers, func(c string) bool { return c == url })
+	if d.def == url {
+		d.def = ""
+	}
+	d.changed()
+	return nil
+}
+
+func (d *demo) SetDefaultServer(url string) error {
+	d.def, d.pick = url, ""
+	if url == demoServer {
+		d.def = ""
+	}
+	d.changed()
+	return nil
+}
+
+func (d *demo) SelectServer(url string) error { d.pick = url; d.changed(); return nil }
+
 func main() {
 	arg := ""
 	if len(os.Args) > 1 {
 		arg = os.Args[1]
 	}
-	nui.Run(&demo{inCall: arg == "call", dc: arg, src: "screen", ch: make(chan struct{}, 1)}, nui.Options{})
+	d := &demo{inCall: arg == "call", dc: arg, src: "screen", ch: make(chan struct{}, 1)}
+	if arg == "servers" { // a server of the user's, picked: the server picker shows, Discord is off
+		d.dc = "ready"
+		d.servers = []string{"wss://share.example.com/ws"}
+		d.pick = d.servers[0]
+	}
+	nui.Run(d, nui.Options{})
 }

@@ -108,6 +108,7 @@ type lobbyView struct {
 	dcText   *widget.Label
 	dcBtn    *widget.Button
 	dcAct    func()
+	server   *serverPicker // bottom right, once the user added a server
 }
 
 func newLobby(u *UI) *lobbyView {
@@ -153,7 +154,9 @@ func newLobby(u *UI) *lobbyView {
 	})
 	v.link.OnSubmitted = func(string) { v.join.OnTapped() }
 
-	opts := widget.NewAccordion(widget.NewAccordionItem("Options", container.NewVBox(v.needPw, v.pw, v.e2ee)))
+	servers := widget.NewButton("Servers...", u.serversDialog)
+	servers.Importance = widget.LowImportance
+	opts := widget.NewAccordion(widget.NewAccordionItem("Options", container.NewVBox(v.needPw, v.pw, v.e2ee, container.NewHBox(servers))))
 	start := widget.NewCard("Share your screen", "Starts a session, shares your screen and copies the link to send.",
 		container.NewVBox(container.NewHBox(v.live, v.liveWin), opts))
 	watch := widget.NewCard("Watch someone", "Click a share link in Discord, or paste it here.",
@@ -170,7 +173,9 @@ func newLobby(u *UI) *lobbyView {
 	v.dcBtn.Importance = widget.HighImportance
 	v.dc = container.NewVBox(widget.NewCard("", "", container.NewBorder(nil, nil, nil, v.dcBtn, v.dcText)))
 	v.dc.Hide()
-	v.root = container.NewPadded(container.NewVBox(head, v.notes.box, v.dc, container.NewGridWithColumns(2, start, watch)))
+	v.server = newServerPicker(u)
+	v.root = container.NewPadded(container.NewBorder(nil, v.server.box, nil, nil,
+		container.NewVBox(head, v.notes.box, v.dc, container.NewGridWithColumns(2, start, watch))))
 	v.checkClipboard(u)
 	return v
 }
@@ -192,6 +197,7 @@ func (v *lobbyView) checkClipboard(u *UI) {
 func (v *lobbyView) update(st app.UIState) {
 	v.who.SetText("You are " + displayName(st.Name, st.Tag))
 	v.notes.set(v.u, st)
+	v.server.update(st)
 	v.updateDiscord(v.u, st.Discord)
 	if st.Update != nil && st.Update.Mandatory {
 		v.live.Disable()
@@ -209,7 +215,8 @@ type callView struct {
 	room    *widget.Label
 	enc     *widget.Label
 	safety  *widget.Label
-	warn    *widget.Label // our share or the mesh needs attention
+	warn    *widget.Label   // our share or the mesh needs attention
+	closed  *fyne.Container // the user closed a video window: show it again
 	relay   *widget.Label
 	alone   *widget.Label
 	rows    *fyne.Container
@@ -230,6 +237,10 @@ func newCall(u *UI) *callView {
 	v.warn = label("")
 	v.warn.Importance = widget.WarningImportance
 	v.relay = caption("")
+	closedText := label("You closed the video window.")
+	closedText.Importance = widget.WarningImportance
+	v.closed = container.NewHBox(closedText, widget.NewButtonWithIcon("Show video", theme.VisibilityIcon(), u.showVideo))
+	v.closed.Hide()
 	v.alone = widget.NewLabel("Nobody else yet. Send them the share link (Room > Copy share link).")
 	copyBtn := widget.NewButtonWithIcon("Copy share link", theme.ContentCopyIcon(), u.copyLink)
 	v.share = widget.NewButtonWithIcon("Go live: main monitor", theme.MediaRecordIcon(), func() {
@@ -251,7 +262,7 @@ func newCall(u *UI) *callView {
 	head := peerGrid(bold("Name"), bold("Status"), bold("You send"), bold("Connection"), bold("Their video"), bold("Volume"), widget.NewLabel(""))
 	people := widget.NewCard("People", "", container.NewBorder(container.NewVBox(head, widget.NewSeparator()), v.relay, nil, nil,
 		container.NewVScroll(container.NewVBox(v.alone, v.rows))))
-	v.root = container.NewPadded(container.NewBorder(container.NewVBox(v.notes.box, header, v.warn), nil, nil, nil, people))
+	v.root = container.NewPadded(container.NewBorder(container.NewVBox(v.notes.box, header, v.warn, v.closed), nil, nil, nil, people))
 	return v
 }
 
@@ -334,6 +345,11 @@ func (v *callView) update(st app.UIState) {
 	} else {
 		v.warn.Hide()
 	}
+	if anyClosed(s) {
+		v.closed.Show()
+	} else {
+		v.closed.Hide()
+	}
 	v.relay.SetText(relayText(s))
 
 	// Rows: rebuild only when people come or go, so a slider being
@@ -366,6 +382,19 @@ func (v *callView) update(st app.UIState) {
 	} else {
 		v.alone.Hide()
 	}
+}
+
+// anyClosed reports whether the user closed a video window: the grid, a
+// person's or our preview.
+func anyClosed(s *session.State) bool {
+	if s == nil {
+		return false
+	}
+	closed := s.GridClosed || s.PreviewClosed
+	for _, m := range s.Members {
+		closed = closed || m.WindowClosed
+	}
+	return closed
 }
 
 func relayText(s *session.State) string {
@@ -408,6 +437,7 @@ type peerRow struct {
 	vol      *widget.Slider
 	mute     *widget.Check
 	more     *widget.Button
+	show     *widget.Button // their window is closed: open it again
 	m        session.Member
 	owner    bool
 	setting  bool // update() is setting widgets: don't send their callbacks
@@ -449,7 +479,9 @@ func newPeerRow(u *UI, id string) *peerRow {
 		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(r.more)
 		widget.ShowPopUpMenuAtPosition(menu, c, pos.Add(fyne.NewPos(0, r.more.Size().Height)))
 	})
-	r.root = peerGrid(container.NewVBox(r.name, r.client, r.notice), r.status, r.send, container.NewVBox(r.link, r.linkSub),
+	r.show = widget.NewButtonWithIcon("Show video", theme.VisibilityIcon(), func() { u.do(func() error { return u.a.ShowWindow(id) }) })
+	r.show.Hide()
+	r.root = peerGrid(container.NewVBox(r.name, r.client, r.notice, container.NewHBox(r.show)), r.status, r.send, container.NewVBox(r.link, r.linkSub),
 		container.NewCenter(r.quality), container.NewBorder(nil, nil, nil, r.mute, r.vol), container.NewCenter(r.more))
 	return r
 }
@@ -482,14 +514,16 @@ func (r *peerRow) update(m session.Member, owner bool) {
 	if m.Hint != "" {
 		notes = append(notes, m.Hint)
 	}
-	if m.WindowClosed {
-		notes = append(notes, "You closed their window: People > "+m.Name+" > Show their window.")
-	}
 	r.notice.SetText(strings.Join(notes, " "))
 	if len(notes) > 0 {
 		r.notice.Show()
 	} else {
 		r.notice.Hide()
+	}
+	if m.WindowClosed {
+		r.show.Show()
+	} else {
+		r.show.Hide()
 	}
 	r.status.SetText(stateText(m))
 	switch m.State {
@@ -624,5 +658,10 @@ func (v *lobbyView) updateDiscord(u *UI, d *app.Discord) {
 			}
 			u.goLiveWith(func() error { return dc.GoLiveInChannel(ctx(), pw, e) }, false)
 		}
+	}
+	if note := discordServerNote(u.st.Servers); note != "" && d.Status == "ready" && d.ChannelID != "" {
+		v.dcText.SetText(v.dcText.Text + " " + note)
+		v.dcBtn.Disable()
+		v.dcBtn.Importance, v.live.Importance = widget.MediumImportance, widget.HighImportance
 	}
 }

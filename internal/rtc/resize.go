@@ -128,6 +128,12 @@ func (m *Mesh) SetTop(height int) {
 	if int(m.rend.top.Swap(int32(height))) == height {
 		return
 	}
+	m.ResetRenditions()
+}
+
+// ResetRenditions drops our renditions, as a new top does, without telling
+// viewers we stopped sharing (a new source or size: SetTop follows).
+func (m *Mesh) ResetRenditions() {
 	m.rend.mu.Lock()
 	m.rend.own = map[int]time.Time{}
 	m.rend.mu.Unlock()

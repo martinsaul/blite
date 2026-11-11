@@ -6,10 +6,7 @@
 <title>{{template "title"}} - Bellion Share</title>
 <meta name="description" content="{{template "description"}}">
 <link rel="canonical" href="https://bellion.app{{.Path}}">
-<link rel="icon" href="/favicon.ico" sizes="48x48">
-<link rel="icon" href="/static/icon-512.png" type="image/png" sizes="512x512">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<meta name="theme-color" content="#3a6df0">
+{{template "assets"}}
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Bellion Share">
 <meta property="og:title" content="{{template "title"}} - Bellion Share">
@@ -20,66 +17,37 @@
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Bellion Share: share your screen with friends">
 <meta name="twitter:card" content="summary_large_image">
-<style>
-  :root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --accent:#3a6df0; --card:#ffffff; --line:#e2e2de; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --accent:#7c9cff; --card:#1f1f1e; --line:#2e2e2c; } }
-  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui, sans-serif; padding:2rem 16px; }
-  main, .top { max-width:44rem; margin:0 auto; }
-  .top { display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.2rem; margin-bottom:2rem; }
-  .top .brand { font-weight:700; color:var(--fg); text-decoration:none; margin-right:auto; }
-  .top a { color:var(--muted); text-decoration:none; }
-  .top a:hover, .top a[aria-current] { color:var(--fg); }
-  h1 { font-size:1.8rem; margin:0 0 .3rem; }
-  h2 { font-size:1.25rem; margin:2rem 0 .4rem; }
-  h3 { font-size:1.05rem; margin:1.4rem 0 .3rem; }
-  .lead { color:var(--muted); margin:0 0 1.2rem; }
-  .docnav { display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 1.6rem; padding:0; list-style:none; font-size:.92rem; }
-  .docnav a { display:block; padding:.2rem .7rem; border-radius:999px; background:var(--card); text-decoration:none; color:var(--fg); }
-  .docnav a[aria-current] { background:var(--accent); color:#fff; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(17rem, 1fr)); gap:1rem; }
-  .card { background:var(--card); border-radius:12px; padding:1rem 1.2rem; }
-  .card h2 { font-size:1.1rem; margin:0 0 .2rem; }
-  .card p { margin:0; color:var(--muted); }
-  a.card { text-decoration:none; color:inherit; }
-  a.card h2 { color:var(--accent); }
-  a.card:hover h2 { text-decoration:underline; }
-  figure { margin:1.2rem 0; }
-  figure a { display:block; }
-  figure img { display:block; max-width:100%; height:auto; border-radius:10px; border:1px solid var(--line); }
-  figcaption { color:var(--muted); font-size:.9rem; margin-top:.4rem; }
-  ul, ol { padding-left:1.3rem; }
-  li { margin:.2rem 0; }
-  code { font:.9em ui-monospace, monospace; background:var(--card); padding:.05rem .3rem; border-radius:4px; }
-  pre { background:var(--card); border-radius:8px; padding:.8rem 1rem; overflow-x:auto; }
-  pre code { background:none; padding:0; }
-  table { border-collapse:collapse; width:100%; font-size:.92rem; display:block; overflow-x:auto; }
-  td:last-child { min-width:13rem; }
-  th, td { text-align:left; padding:.35rem .6rem .35rem 0; border-bottom:1px solid var(--line); vertical-align:top; }
-  .note { background:var(--card); border-left:3px solid var(--accent); border-radius:6px; padding:.6rem 1rem; }
-  .note p { margin:.2rem 0; }
-  a { color:var(--accent); }
-  footer { max-width:44rem; margin:3rem auto 0; color:var(--muted); font-size:.9rem; }
-  footer a { color:var(--muted); }
-</style>
 </head>
 <body>
-<nav class="top" aria-label="Site">
-  <a class="brand" href="/">Bellion Share</a>
-  <a href="/">Download</a>
-  <a href="/docs"{{if hasPrefix .Path "/docs"}} aria-current="page"{{end}}>Docs</a>
-  <a href="https://github.com/martinsaul/blite">GitHub</a>
-</nav>
-<main>
-<ul class="docnav" aria-label="Documentation">
+{{template "header" .Path}}
+<div class="wrap docs">
+  <aside class="docs-side">
+    <nav aria-label="Documentation">
+      <p class="side-title">Documentation</p>
+      <ul class="docnav">
 {{- range .Pages}}
-  <li><a href="{{.Path}}"{{if eq .Path $.Path}} aria-current="page"{{end}}>{{.Label}}</a></li>
+        <li><a href="{{.Path}}"{{if eq .Path $.Path}} aria-current="page"{{end}}>{{.Label}}</a></li>
 {{- end}}
-</ul>
-{{template "body" .}}
-</main>
-<footer>
-  <a href="/">Download</a> &middot; <a href="/docs">Docs</a> &middot; <a href="/terms">Terms of Service</a> &middot; <a href="/privacy">Privacy Policy</a> &middot; <a href="https://github.com/martinsaul/blite">Source code on GitHub</a> (AGPL-3.0)
-</footer>
+      </ul>
+    </nav>
+  </aside>
+  <main id="content" class="docs-main prose">
+{{.Body}}
+  </main>
+{{- with .TOC}}
+  <aside class="docs-toc">
+    <nav aria-label="On this page">
+      <p class="side-title">On this page</p>
+      <ul>
+{{- range .}}
+        <li><a href="#{{.ID}}">{{.Label}}</a></li>
+{{- end}}
+      </ul>
+    </nav>
+  </aside>
+{{- end}}
+</div>
+{{template "footer"}}
 </body>
 </html>
 {{end}}

@@ -6,10 +6,7 @@
 <title>Privacy Policy - Bellion Share</title>
 <meta name="description" content="What Bellion Share collects and what it does not: screens and audio are end-to-end encrypted, go peer to peer, and are never recorded.">
 <link rel="canonical" href="https://bellion.app/privacy">
-<link rel="icon" href="/favicon.ico" sizes="48x48">
-<link rel="icon" href="/static/icon-512.png" type="image/png" sizes="512x512">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<meta name="theme-color" content="#3a6df0">
+{{template "assets"}}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Bellion Share">
 <meta property="og:title" content="Privacy Policy - Bellion Share">
@@ -20,32 +17,15 @@
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Bellion Share: share your screen with friends">
 <meta name="twitter:card" content="summary_large_image">
-<style>
-  :root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --accent:#3a6df0; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --accent:#7c9cff; } }
-  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui, sans-serif; padding:2rem 16px; }
-  main { max-width:44rem; margin:0 auto; }
-  h1 { font-size:1.6rem; margin:0 0 1rem; }
-  h2 { font-size:1.15rem; margin:1.6rem 0 .4rem; }
-  a { color:var(--accent); }
-  footer { margin-top:2.5rem; color:var(--muted); font-size:.9rem; }
-  .top { max-width:44rem; margin:0 auto 2rem; display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.2rem; }
-  .top .brand { font-weight:700; color:var(--fg); text-decoration:none; margin-right:auto; }
-  .top a { color:var(--muted); text-decoration:none; }
-  .top a:hover, .top a[aria-current] { color:var(--fg); }
-  footer a { color:var(--muted); }
-</style>
 </head>
 <body>
-<nav class="top" aria-label="Site">
-  <a class="brand" href="/">Bellion Share</a>
-  <a href="/">Download</a>
-  <a href="/docs">Docs</a>
-  <a href="https://github.com/martinsaul/blite">GitHub</a>
-</nav>
-<main>
+{{template "header" "/privacy"}}
+<main id="content" class="legal">
+<div class="page-head"><div class="wrap reading">
 <h1>Privacy Policy</h1>
 <p>Bellion Share is a screen-sharing app for small groups of friends. This policy explains what data it handles. Last updated: November 11, 2026.</p>
+</div></div>
+<article class="wrap prose reading">
 <h2>What we collect and why</h2>
 <ul>
 <li><strong>Display name and tag.</strong> You choose a name; the app adds a random tag (like #1234). Others in your session see it.</li>
@@ -67,7 +47,8 @@
 <p>Bellion Share is not meant for children under 13.</p>
 <h2>Changes</h2>
 <p>If this policy changes, we update this page and the date above.</p>
-<footer><a href="/">Download</a> &middot; <a href="/docs">Docs</a> &middot; <a href="/terms">Terms of Service</a> &middot; <a href="/privacy">Privacy Policy</a> &middot; <a href="https://github.com/martinsaul/blite">Source code on GitHub</a> (AGPL-3.0)</footer>
+</article>
 </main>
+{{template "footer"}}
 </body>
 </html>

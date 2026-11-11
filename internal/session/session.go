@@ -97,6 +97,7 @@ type Member struct {
 	// WindowClosed: the user closed their video window.
 	WindowClosed bool    `json:"windowClosed,omitempty"`
 	asked        int     // the qualityLayer we last asked them for
+	top          int     // their HIGH height as last heard; 0 = not sharing
 	Volume       float64 `json:"volume"` // playback gain, 0..2
 	Muted        bool    `json:"muted,omitempty"`
 	// Owner: they own the room.
@@ -162,6 +163,8 @@ type State struct {
 	Layout Layout `json:"layout"`
 	// GridClosed: the user closed the grid window.
 	GridClosed bool `json:"gridClosed,omitempty"`
+	// PreviewClosed: the user closed our floating self-preview.
+	PreviewClosed bool `json:"previewClosed,omitempty"`
 }
 
 func orRes(r media.Resolution) media.Resolution {
@@ -241,7 +244,8 @@ type Session struct {
 	gridKeys map[string]string
 	// wins are our native video windows by the same key: they
 	// stay open across rebuilds and layout switches. closedWins are keys
-	// whose window the user closed, until ShowWindow or a layout change.
+	// whose window the user closed, until ShowWindow, a layout change or
+	// a new share of theirs.
 	// openWindow opens one (tests replace it); nil: no own windows.
 	wins       map[string]media.Window
 	closedWins map[string]bool
@@ -257,7 +261,29 @@ type Session struct {
 	smallTiles, hiddenWins atomic.Bool
 	pv                     *media.Preview
 	pvClosed               bool
+	pvWant                 bool // the layout wants the floating preview (gridMu)
+	// stopped are the peers who stopped sharing (mu): their tile says so
+	// for stoppedShow, fades out and goes. stopGen tells a stop's timers
+	// from a later one's.
+	stopped map[string]stopInfo
+	stopGen int
 }
+
+// stopInfo is a peer's share that ended: when, and which stop.
+type stopInfo struct {
+	at  time.Time
+	gen int
+}
+
+// A stopped share's tile shows for stoppedShow, then fades out over
+// stoppedFade. Video from a stopped peer is dropped for stoppedGrace (in
+// flight when they stopped); after that it means they share again and we
+// missed the message saying so.
+const (
+	stoppedShow  = 5 * time.Second
+	stoppedFade  = time.Second
+	stoppedGrace = 1500 * time.Millisecond
+)
 
 // Layout is how we show the streams we receive.
 type Layout struct {
@@ -315,7 +341,7 @@ func newSession(cfg Config, pw string) *Session {
 		cfg.Identity = identity.Ephemeral()
 	}
 	return &Session{cfg: cfg, pw: pw, members: map[string]*Member{}, players: map[string]*media.Player{},
-		aplayers: map[string]*media.AudioPlayer{}, asel: audio.Selection{Mode: "none"},
+		aplayers: map[string]*media.AudioPlayer{}, asel: audio.Selection{Mode: "none"}, stopped: map[string]stopInfo{},
 		done: make(chan struct{}), started: time.Now(), selfCh: media.NewPreviewChannel()}
 }
 
@@ -479,7 +505,9 @@ func (s *Session) newTranscoder(heights []int, out func(layer int, au []byte, d 
 }
 
 // gotSending records what a provider sends us of a member, and whether we
-// can't see them at all.
+// can't see them at all. A top of 0 says they stopped sharing: their tile
+// says so instead of freezing on the last frame. A new share reopens the
+// window the user closed on them.
 func (s *Session) gotSending(origin string, height, top int, congested bool) {
 	s.mu.Lock()
 	m := s.members[origin]
@@ -491,8 +519,85 @@ func (s *Session) gotSending(origin string, height, top int, congested bool) {
 	if height == 0 && top > 0 && congested {
 		m.Notice = fmt.Sprintf("You can't see %s's stream: its quality is too high for your connection or computer right now.", m.Name)
 	}
+	started := m.top == 0 && top > 0
+	m.top = top
+	regrid := false
+	if pl := s.players[origin]; top == 0 && pl != nil && !s.closed {
+		go pl.Stop()
+		delete(s.players, origin)
+		s.stopGen++
+		gen := s.stopGen
+		s.stopped[origin] = stopInfo{time.Now(), gen}
+		time.AfterFunc(stoppedShow, func() { s.fadeStopped(origin, gen) })
+		time.AfterFunc(stoppedShow+stoppedFade+100*time.Millisecond, func() { s.dropStopped(origin, gen) })
+		s.cfg.Log.Info("peer stopped sharing", "peer", origin)
+		regrid = true
+	}
+	if _, ok := s.stopped[origin]; ok && top > 0 {
+		delete(s.stopped, origin)
+		regrid = true
+		if s.players[origin] == nil && !s.closed && s.cfg.View != "none" && !s.cfg.NoPlayback {
+			// Their tile goes live (waiting for the first frame) at once.
+			if pl, err := media.StartPlayer(s.viewLocked()); err == nil {
+				s.players[origin] = pl
+			} else {
+				s.cfg.Log.Error("player", "err", err)
+			}
+		}
+	}
+	grid := s.layout.Mode == LayoutGrid
 	s.mu.Unlock()
+	reopen := false
+	if started {
+		s.gridMu.Lock()
+		reopen = s.closedWins[origin] || grid && s.closedWins[""]
+		delete(s.closedWins, origin)
+		if grid {
+			delete(s.closedWins, "")
+		}
+		s.gridMu.Unlock()
+		if reopen {
+			s.cfg.Log.Info("peer shares again: reopening their window", "peer", origin)
+		}
+	}
+	if regrid || reopen { // not on the mesh's goroutine: a window may take seconds
+		go func() {
+			s.regrid(false)
+			if reopen {
+				s.applyAutoQuality()
+			}
+		}()
+	}
 	s.changed()
+}
+
+// fadeStopped fades out the tile of peer id's ended share, unless they
+// shared again since.
+func (s *Session) fadeStopped(id string, gen int) {
+	s.mu.Lock()
+	cur := s.stopped[id].gen == gen && !s.closed
+	s.mu.Unlock()
+	if !cur {
+		return
+	}
+	s.gridMu.Lock()
+	for _, g := range s.grids {
+		g.Fade(id, stoppedFade)
+	}
+	s.gridMu.Unlock()
+}
+
+// dropStopped removes the faded tile of peer id's ended share.
+func (s *Session) dropStopped(id string, gen int) {
+	s.mu.Lock()
+	cur := s.stopped[id].gen == gen
+	if cur {
+		delete(s.stopped, id)
+	}
+	s.mu.Unlock()
+	if cur {
+		s.regrid(false)
+	}
 }
 
 // Decode lag: a decoder that turns less than this share of the access units
@@ -592,6 +697,7 @@ func (s *Session) peerEvent(id, name, state string) {
 		m.State = "untrusted"
 	case "gone":
 		delete(s.members, id)
+		delete(s.stopped, id) // their tile goes at once
 		if pl := s.players[id]; pl != nil {
 			go pl.Stop()
 			delete(s.players, id)
@@ -623,6 +729,14 @@ func (s *Session) pushVideo(peer string, au []byte) {
 	}
 	pl := s.players[peer]
 	added := false
+	if st, ok := s.stopped[peer]; ok && pl == nil {
+		if time.Since(st.at) < stoppedGrace {
+			s.mu.Unlock()
+			return // in flight when they stopped
+		}
+		delete(s.stopped, peer) // they share again: we missed them saying so
+		added = true
+	}
 	if pl == nil {
 		var err error
 		if pl, err = media.StartPlayer(s.viewLocked()); err != nil {
@@ -631,7 +745,7 @@ func (s *Session) pushVideo(peer string, au []byte) {
 			return
 		}
 		s.players[peer] = pl
-		added = pl.Channel != ""
+		added = added || pl.Channel != ""
 	}
 	s.mu.Unlock()
 	if added {
@@ -689,6 +803,17 @@ func (s *Session) regrid(force bool) {
 			if m := s.members[id]; m != nil {
 				t.Label, t.Muted, t.Paused, t.Volume = m.Name, m.Muted, m.Quality == "off", m.Volume
 			}
+			if tag := identity.Tag(s.mesh.IDKey(id)); tag != "" {
+				t.Label += "#" + tag
+			}
+			tiles = append(tiles, t)
+		}
+		for id := range s.stopped {
+			m := s.members[id]
+			if m == nil || s.players[id] != nil {
+				continue
+			}
+			t := media.Tile{Label: m.Name, ID: id, Stopped: true}
 			if tag := identity.Tag(s.mesh.IDKey(id)); tag != "" {
 				t.Label += "#" + tag
 			}
@@ -793,7 +918,8 @@ func windowTitle(cfg media.GridConfig) string {
 }
 
 // watchWindow notes when the user closes w: its stream stops showing
-// until ShowWindow (or a layout change), and we ask for no video meanwhile.
+// until ShowWindow (or a layout change, or their next share), and we ask
+// for no video meanwhile.
 func (s *Session) watchWindow(w media.Window) {
 	select {
 	case <-w.Closed():
@@ -820,11 +946,19 @@ func (s *Session) watchWindow(w media.Window) {
 	s.changed()
 }
 
-// ShowWindow reopens the video window the user closed: peer id's, or ""
-// the grid window.
+// ShowWindow reopens the video window the user closed: peer id's, "" the
+// grid window, "self" our preview, or "*" all of them.
 func (s *Session) ShowWindow(id string) error {
 	s.gridMu.Lock()
-	delete(s.closedWins, id)
+	switch id {
+	case "*":
+		clear(s.closedWins)
+		s.pvClosed = false
+	case "self":
+		s.pvClosed = false
+	default:
+		delete(s.closedWins, id)
+	}
 	s.gridMu.Unlock()
 	s.regrid(false)
 	s.applyAutoQuality()
@@ -850,10 +984,13 @@ func (s *Session) unwatched() map[string]bool {
 
 // regridLocked (re)starts video window k (gridMu held).
 func (s *Session) regridLocked(force bool, k string, cfg media.GridConfig) {
-	type shown struct{ channel, label, id string } // not the state: SetState updates that
+	type shown struct { // not the state: SetState updates that
+		channel, label, id string
+		stopped            bool
+	}
 	var what []shown
 	for _, t := range cfg.Tiles {
-		what = append(what, shown{t.Channel, t.Label, t.ID})
+		what = append(what, shown{t.Channel, t.Label, t.ID, t.Stopped})
 	}
 	key := fmt.Sprint(cfg.Rows, cfg.Cols, what, cfg.Pip, fmt.Sprintf("%p", cfg.Window)) // a window handed over: rebuild into it
 	if g := s.grids[k]; g != nil {
@@ -937,11 +1074,12 @@ func (s *Session) control(id string, c media.Control, v float64) {
 }
 
 // repreview opens or closes the floating self-preview window (gridMu
-// held). A window the user closed stays closed until force.
+// held). A window the user closed stays closed until force or ShowWindow.
 func (s *Session) repreview(force, want bool) {
 	if force {
 		s.pvClosed = false
 	}
+	s.pvWant = want
 	if s.pv != nil && (!want || s.pvClosed) {
 		s.pv.Stop()
 		s.pv = nil
@@ -950,7 +1088,7 @@ func (s *Session) repreview(force, want bool) {
 		return
 	}
 	view := media.ViewWindow
-	if s.cfg.View == media.ViewCount {
+	if s.cfg.View == media.ViewCount || s.gridView == media.ViewCount {
 		view = media.ViewCount
 	}
 	pv, err := media.StartPreview(s.selfCh, view)
@@ -1371,7 +1509,8 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 	}
 	s.mu.Unlock()
 	if newKind {
-		s.mesh.SetTop(0)
+		// Not SetTop(0): viewers would show we stopped sharing.
+		s.mesh.ResetRenditions()
 	}
 	if err := s.startSource(kind); err != nil {
 		s.mesh.SetTop(0)
@@ -1660,7 +1799,7 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 	s.resNote = fmt.Sprintf("Your computer can't encode %s fast enough (%.0f fps); sharing at %s.", media.ResolutionLabel(res), fps, media.ResolutionLabel(lower))
 	s.mu.Unlock()
 	s.cfg.Log.Warn("encoder too slow, stepping down", "from", res, "to", lower, "fps", fps, "offeredFPS", offeredFPS, "encoder", s.encoderName())
-	s.mesh.SetTop(0)
+	s.mesh.ResetRenditions()
 	if err := s.SetSource(kind); err != nil {
 		s.cfg.Log.Error("restart at lower resolution", "err", err)
 	}
@@ -1719,7 +1858,7 @@ func (s *Session) SetResolution(res media.Resolution) error {
 		return nil
 	}
 	if kind != "" {
-		s.mesh.SetTop(0)
+		s.mesh.ResetRenditions()
 		return s.SetSource(kind)
 	}
 	s.changed()
@@ -1816,6 +1955,7 @@ func (s *Session) Volunteer(on bool) error {
 func (s *Session) State() State {
 	s.gridMu.Lock()
 	closedWins := maps.Clone(s.closedWins)
+	pvClosed := s.pvClosed && s.pvWant
 	s.gridMu.Unlock()
 	stats := s.mesh.Stats()
 	owner := s.mesh.Owner()
@@ -1881,6 +2021,7 @@ func (s *Session) State() State {
 		SourceNote:        s.srcNote,
 		Layout:            s.layout,
 		GridClosed:        closedWins[""] && s.layout.Mode == LayoutGrid,
+		PreviewClosed:     pvClosed,
 	}
 	if st.Layout.Mode == "" {
 		st.Layout.Mode = LayoutWindows
@@ -2027,6 +2168,7 @@ func (s *Session) Done() <-chan struct{} { return s.done }
 // Rejoin is what an in-call update needs to come back to the same room
 // sharing the same things.
 type Rejoin struct {
+	Server     string            `json:"server,omitempty"` // "" = the built-in default (older files)
 	Room       string            `json:"room"`
 	Password   string            `json:"password"`
 	Source     media.SourceKind  `json:"source,omitempty"`
@@ -2040,7 +2182,7 @@ type Rejoin struct {
 func (s *Session) Rejoin() Rejoin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Rejoin{Room: s.sig.Welcome.Room, Password: s.pw, Source: s.srcKind, Resolution: s.res, Mode: s.mode, Audio: s.asel, Output: s.output}
+	return Rejoin{Server: s.cfg.Server, Room: s.sig.Welcome.Room, Password: s.pw, Source: s.srcKind, Resolution: s.res, Mode: s.mode, Audio: s.asel, Output: s.output}
 }
 
 // CloseForUpdate is Close telling the server we restart into a new build

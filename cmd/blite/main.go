@@ -62,6 +62,9 @@ var (
 	buildDate      = ""
 	defaultChannel = "stable"
 	defaultServer  = "ws://localhost:8080/ws"
+	// defaultServerAliases: other host names of defaultServer, comma-separated
+	// (BLITE_DEFAULT_SERVER_ALIASES at build time).
+	defaultServerAliases = ""
 )
 
 func clientMeta() *proto.ClientMeta {
@@ -75,7 +78,7 @@ func main() {
 		headless   = flag.Bool("headless", false, "no tray or UI; run one session from flags")
 		create     = flag.Bool("create", false, "headless: create a new room")
 		join       = flag.String("join", "", "headless: room code to join")
-		link       = flag.String("link", "", "share link (https://.../j/CODE#password or bshare://join/CODE#password)")
+		link       = flag.String("link", "", "share link (https://HOST/j/CODE#password or bshare://join/CODE?server=HOST#password); joins on the link's server")
 		password   = flag.String("password", "", "room password (create: generated if empty)")
 		name       = flag.String("name", hostname(), "display name")
 		source     = flag.String("source", "", "video source: screen | test | none | a monitor:/window: source from -sources (default: screen with -headless; none in the app, where the user starts sharing)")
@@ -103,6 +106,11 @@ func main() {
 		udpPort    = flag.Int("udp-port", portmap.DefaultPort, "UDP port for all peer connections, opened on the router by UPnP, NAT-PMP or PCP (0 = a random port per connection, no router mapping)")
 	)
 	flag.Parse()
+	for _, h := range strings.Split(defaultServerAliases, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			app.BuiltInAliases = append(app.BuiltInAliases, h)
+		}
+	}
 	ch, pin := updateChannel(*channel, *pinned, flagSet("channel"), molt.UpdateResult() != "")
 
 	var h slog.Handler = slog.NewTextHandler(stderr{}, nil)
@@ -314,6 +322,7 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	}
 	a.Exit = nui.Quit
 	a.Show = nui.Show
+	a.ConfirmServer = nui.ConfirmServer
 	rep := &reporter{server: cfg.Server, log: log, name: a.DisplayName,
 		base: proto.Report{Platform: runtime.GOOS, Version: cfg.Client.Label(), Build: cfg.Client.Build, OSVersion: cfg.Client.OSVersion}}
 	rep.system = func() string { return systemText(a) }
@@ -415,11 +424,14 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 
 func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, password string, src media.SourceKind, audioArg string, dur time.Duration, volunteer bool, res media.Resolution, mode media.ContentMode, layout session.Layout) {
 	if link != "" {
-		code, pw, err := session.ParseLink(link)
+		server, code, pw, err := session.ParseLinkServer(link)
 		if err != nil {
 			fatal(log, "bad link", err)
 		}
 		join, password = code, pw
+		if server != "" && !session.SameServer(server, cfg.Server) { // the link's server (headless: no questions)
+			cfg.Server = server
+		}
 	}
 	if !create && join == "" {
 		fmt.Fprintln(os.Stderr, "headless needs -create, -join CODE or -link URL")

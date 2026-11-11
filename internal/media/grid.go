@@ -32,6 +32,9 @@ type Tile struct {
 	ID            string
 	Muted, Paused bool
 	Volume        float64
+	// Stopped: they stopped sharing. The tile says so on black instead of
+	// their last frame (Channel unused) and has no controls.
+	Stopped bool
 }
 
 // Control is a button on a tile.
@@ -118,6 +121,7 @@ type Grid struct {
 		moves  uint    // the nav move counter last seen
 		drag   int     // tile whose slider is being dragged (-1 none)
 		phase  float64 // spinner
+		fades  []fade  // per tile: fading out (Fade)
 		done   bool    // Stop began: the elements may go
 	}
 }
@@ -137,6 +141,13 @@ type tileOverlay struct {
 }
 
 type rect struct{ x, y, w, h int }
+
+// fade is a tile fading out: from at, over d; alpha is its opacity now.
+type fade struct {
+	at    time.Time
+	d     time.Duration
+	alpha float64
+}
 
 func (r rect) has(x, y float64) bool {
 	return x >= float64(r.x) && x < float64(r.x+r.w) && y >= float64(r.y) && y < float64(r.y+r.h)
@@ -230,7 +241,7 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	var layers []layer
 	next := pipPad + 1
 	for i, t := range tiles {
-		if !controls || t.ID == "" {
+		if !controls || t.ID == "" || t.Stopped {
 			continue
 		}
 		o := &ovs[i]
@@ -259,6 +270,13 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	}
 	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", tw*cols, th*rows, gridFPS, sink)
 	for i, t := range tiles {
+		if t.Stopped { // black, the text in the middle (showStateLocked sets it)
+			fmt.Fprintf(&b, " videotestsrc is-live=true pattern=black ! "+
+				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! "+
+				"textoverlay name=label%d valignment=center halignment=center font-desc=\"Sans 28\" ! mix.sink_%d",
+				tw, th, gridFPS, i, i)
+			continue
+		}
 		wait := ""
 		if ovs[i].barPad != "" {
 			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=\"Waiting for video\" valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i)
@@ -326,6 +344,7 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	g.Sink = strings.Fields(sink)[0]
 	g.ctl.tiles, g.ctl.rects, g.ctl.on, g.ctl.shown, g.ctl.drag = slices.Clone(tiles), rects, cfg.OnControl, -1, -1
 	g.ctl.labels, g.ctl.ov = make([]*gst.Element, len(tiles)), ovs
+	g.ctl.fades = make([]fade, len(tiles))
 	if g.ctl.mix, err = p.element("mix"); err != nil {
 		return fail(err)
 	}
@@ -355,9 +374,10 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	if err == nil {
 		g.out, _ = out.CountBuffers()
 	}
-	if controls {
+	stopped := slices.ContainsFunc(tiles, func(t Tile) bool { return t.Stopped })
+	if controls || stopped { // stopped tiles fade out in tick
 		var nav *gst.Nav
-		if out != nil {
+		if out != nil && controls {
 			nav = out.WatchNav()
 		}
 		p.goLoop(func() bool {
@@ -397,7 +417,7 @@ const (
 )
 
 // tick handles the pointer events since the last call, fades the controls
-// and turns the spinners.
+// and the tiles going away, and turns the spinners.
 func (g *Grid) tick(nav *gst.Nav, now time.Time) {
 	var st gst.NavState
 	if nav != nil {
@@ -424,6 +444,21 @@ func (g *Grid) tick(nav *gst.Nav, now time.Time) {
 	if i := g.ctl.shown; i >= 0 && g.ctl.ov[i].barPad != "" && math.Abs(a-g.ctl.alpha) > 0.01 {
 		g.ctl.alpha = a
 		g.ctl.mix.SetPadDouble(g.ctl.ov[i].barPad, "alpha", a)
+	}
+	// tiles going away
+	for i := range g.ctl.fades {
+		f := &g.ctl.fades[i]
+		if f.at.IsZero() || f.alpha <= 0 {
+			continue
+		}
+		a := 0.0
+		if f.d > 0 {
+			a = max(0, 1-float64(now.Sub(f.at))/float64(f.d))
+		}
+		if math.Abs(a-f.alpha) > 0.01 || a == 0 {
+			f.alpha = a
+			g.ctl.mix.SetPadDouble(fmt.Sprintf("sink_%d", i), "alpha", a)
+		}
 	}
 	// spinners
 	g.ctl.phase = math.Mod(g.ctl.phase+float64(controlTick)/float64(spinTurn), 1)
@@ -602,11 +637,28 @@ func (g *Grid) SetWaiting(id string, waiting bool) {
 	}
 }
 
+// Fade fades tile id out over d (it is about to go). The tile must be
+// Stopped: only those keep the tick running without controls.
+func (g *Grid) Fade(id string, d time.Duration) {
+	g.ctl.Lock()
+	defer g.ctl.Unlock()
+	if g.ctl.done {
+		return
+	}
+	for i, t := range g.ctl.tiles {
+		if t.ID == id && g.ctl.fades[i].at.IsZero() {
+			g.ctl.fades[i] = fade{at: time.Now(), d: d, alpha: 1}
+		}
+	}
+}
+
 // showStateLocked writes tile i's state into its label and controls.
 func (g *Grid) showStateLocked(i int) {
 	t := g.ctl.tiles[i]
 	label := t.Label
 	switch {
+	case t.Stopped:
+		label += " stopped sharing"
 	case t.Muted && t.Paused:
 		label += "  (muted, video paused)"
 	case t.Muted:
@@ -616,6 +668,13 @@ func (g *Grid) showStateLocked(i int) {
 	}
 	g.ctl.labels[i].SetString("text", label) // a property, so no escaping in the launch line
 	g.pushBarLocked(i)
+}
+
+// Tiles is what the grid shows.
+func (g *Grid) Tiles() []Tile {
+	g.ctl.Lock()
+	defer g.ctl.Unlock()
+	return slices.Clone(g.ctl.tiles)
 }
 
 // InWindow reports whether the grid draws into the GridConfig.Window (no

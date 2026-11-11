@@ -359,6 +359,26 @@ func TestSiteSEO(t *testing.T) {
 			}
 		}
 	}
+	// Every page links the shared stylesheet, versioned so it can be cached long.
+	css := get("bellion.app", siteCSSURL)
+	if css.Code != 200 || !strings.HasPrefix(css.Header().Get("Content-Type"), "text/css") ||
+		!strings.Contains(css.Header().Get("Cache-Control"), "immutable") || css.Body.Len() == 0 {
+		t.Fatalf("site.css: %d %q %q", css.Code, css.Header().Get("Content-Type"), css.Header().Get("Cache-Control"))
+	}
+	for _, p := range pages {
+		if !strings.Contains(get("bellion.app", p).Body.String(), `href="`+siteCSSURL+`"`) {
+			t.Fatalf("%s doesn't link %s", p, siteCSSURL)
+		}
+	}
+	// Docs pages get section ids and an on-page table of contents.
+	relays := get("bellion.app", "/docs/relays").Body.String()
+	if !strings.Contains(relays, `<h2 id="relay-mode">Relay mode</h2>`) || !strings.Contains(relays, `<a href="#relay-mode">Relay mode</a>`) ||
+		!strings.Contains(relays, `href="/docs/relays" aria-current="page"`) {
+		t.Fatal("docs: missing section ids, table of contents or current page")
+	}
+	if !strings.Contains(get("bellion.app", "/docs").Body.String(), vibecoded) {
+		t.Fatal("docs overview: missing the vibecoded statement")
+	}
 	if w := get("bellion.app", "/docs/"); w.Code != 301 || w.Header().Get("Location") != "/docs" {
 		t.Fatalf("/docs/: %d %q", w.Code, w.Header().Get("Location"))
 	}
@@ -366,6 +386,10 @@ func TestSiteSEO(t *testing.T) {
 		t.Fatalf("/docs/nope: %d", w.Code)
 	}
 }
+
+// vibecoded is the start of the statement the home page and the docs
+// overview carry about how Bellion Share is built.
+const vibecoded = "Bellion Share is a vibecoded application: it was built with AI coding agents."
 
 // TestDownloadPageSite checks the download page's nav, screenshots and
 // source link.
@@ -380,6 +404,9 @@ func TestDownloadPageSite(t *testing.T) {
 	body := w.Body.String()
 	if w.Code != 200 || !strings.Contains(body, `href="/docs"`) || !strings.Contains(body, "https://github.com/martinsaul/blite") {
 		t.Fatalf("download page: %d", w.Code)
+	}
+	if !strings.Contains(body, vibecoded) || !strings.Contains(body, `href="`+siteCSSURL+`"`) {
+		t.Fatal("download page: missing the vibecoded statement or stylesheet")
 	}
 	for _, m := range regexp.MustCompile(`src="(/static/[^"]+)"`).FindAllStringSubmatch(body, -1) {
 		r := httptest.NewRequest("GET", m[1], nil)

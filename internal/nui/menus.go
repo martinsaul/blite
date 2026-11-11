@@ -29,7 +29,7 @@ func (u *UI) menuSignature() string {
 	}
 	fmt.Fprintf(&b, "%d|", len(u.devices))
 	if s := st.Session; s != nil {
-		fmt.Fprintf(&b, "%s|%s|%s|%s|%s|%v|%s|%v|%v|", s.Room, s.Source, s.Resolution, s.Mode, s.Output, s.Audio, s.Audio.Mode, s.IsOwner, s.GridClosed)
+		fmt.Fprintf(&b, "%s|%s|%s|%s|%s|%v|%s|%v|%v|%v|", s.Room, s.Source, s.Resolution, s.Mode, s.Output, s.Audio, s.Audio.Mode, s.IsOwner, s.GridClosed, s.PreviewClosed)
 		for _, r := range append(s.Relay, s.RelayWaiting...) {
 			fmt.Fprintf(&b, "r%s%v", r.ID, r.Me)
 		}
@@ -70,6 +70,7 @@ func (u *UI) roomMenu() *fyne.Menu {
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Your name...", u.nameDialog),
 		fyne.NewMenuItem("Your identity key...", u.idKeyDialog),
+		fyne.NewMenuItem("Servers...", u.serversDialog),
 	)
 }
 
@@ -123,14 +124,12 @@ func (u *UI) viewMenu() *fyne.Menu {
 	set := func(mode string) func() {
 		return func() { u.do(func() error { return u.a.SetLayout(mode, l.Rows, l.Cols, l.Preview) }) }
 	}
-	s := u.st.Session
 	return fyne.NewMenu("View",
 		check("A separate window for each person", l.Mode != "grid", set("windows")),
 		check("All in one window", l.Mode == "grid", set("grid")),
 		disabled(fyne.NewMenuItem("Arrange the window...", u.arrangeDialog), l.Mode != "grid"),
 		fyne.NewMenuItemSeparator(),
-		disabled(fyne.NewMenuItem("Show the video window", func() { u.do(func() error { return u.a.ShowWindow("") }) }),
-			s == nil || !s.GridClosed || l.Mode != "grid"),
+		disabled(fyne.NewMenuItem("Show video", u.showVideo), !anyClosed(u.st.Session)),
 	)
 }
 

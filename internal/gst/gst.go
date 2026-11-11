@@ -98,6 +98,7 @@ static void blite_set_double(GstElement *e, const char *name, double v) { g_obje
 static void blite_set_uint(GstElement *e, const char *name, unsigned int v) { g_object_set(e, name, v, NULL); }
 
 static void blite_set_string(GstElement *e, const char *name, const char *v) { g_object_set(e, name, v, NULL); }
+static char *blite_get_string(GstElement *e, const char *name) { char *v = NULL; g_object_get(e, name, &v, NULL); return v; }
 
 static void blite_set_bool(GstElement *e, const char *name, int v) { g_object_set(e, name, (gboolean)v, NULL); }
 
@@ -405,6 +406,18 @@ func (e *Element) SetString(name, v string) {
 	defer C.free(unsafe.Pointer(cs))
 	defer C.free(unsafe.Pointer(cv))
 	C.blite_set_string(e.p, cs, cv)
+}
+
+// GetString reads a string property ("" if unset).
+func (e *Element) GetString(name string) string {
+	cs := C.CString(name)
+	defer C.free(unsafe.Pointer(cs))
+	v := C.blite_get_string(e.p, cs)
+	if v == nil {
+		return ""
+	}
+	defer C.g_free(C.gpointer(v))
+	return C.GoString(v)
 }
 
 // BusError waits up to timeout for an error or EOS. It returns nil if neither came.

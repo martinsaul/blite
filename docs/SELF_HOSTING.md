@@ -1,6 +1,6 @@
-# Self-hosting Blite
+# Self-hosting Bellion Share
 
-A Blite deployment is one small signaling server. Media flows peer to peer
+A Bellion Share deployment is one small signaling server. Media flows peer to peer
 (or through a member acting as relay); the server only introduces peers.
 Optionally add a TURN server for peers behind strict NAT, and a hosted relay
 that keeps fixed rooms open.
@@ -19,7 +19,9 @@ docker run -p 127.0.0.1:8080:8080 blite-signal
 
 Routes: `GET /ws` (WebSocket signaling), `GET /j/{code}` (share-link landing
 page), `POST /v1/report` (client log reports, only with `BLITE_REPORT_DIR`),
-`GET /healthz`.
+`GET /v1/channel/{id}` and `POST /v1/discord/token` (Discord, only with the
+Discord settings), the website (`/`, `/download`, `/docs`, `/terms`,
+`/privacy`; the download page only with `BLITE_UPDATE_URL`) and `GET /healthz`.
 
 Put it behind any reverse proxy that terminates TLS and passes WebSocket
 upgrades (nginx, Caddy, HAProxy, ...), e.g. with Caddy:
@@ -45,6 +47,10 @@ server pings every 30 s.
 | `BLITE_MAX_PEERS` | `0` | Cap room size (0 = no cap) |
 | `BLITE_MIN_COMPATIBLE_BUILD` | `0` | Refuse clients below this build |
 | `BLITE_MIN_RECOMMENDED_BUILD` | `0` | Ask clients below this build to update |
+| `BLITE_SITE_ALIASES` | unset | Other host names of this server (comma-separated); their web pages redirect to the main site |
+| `BLITE_UPDATE_URL` | unset | Update server the download page reads releases from (no download page when unset) |
+| `BLITE_DOWNLOAD_CHANNEL` | `beta` | Release channel the download page offers |
+| `BLITE_DISCORD_CLIENT_ID` + `BLITE_DISCORD_SECRET` | unset | Discord app credentials for the token exchange (the app only uses Discord with its built-in server for now) |
 
 With no ICE settings peers get public STUN only, so peers behind symmetric
 NAT can't connect; add TURN for those.
@@ -75,8 +81,8 @@ alongside it when a room outgrows it.
 
 ```json
 [
-  {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Blite relay",
-   "owners": ["<identity key shown in a member's Blite window>"]}
+  {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Bellion Share relay",
+   "owners": ["<identity key shown in a member's Bellion Share window>"]}
 ]
 ```
 
@@ -85,8 +91,19 @@ alongside it when a room outgrows it.
 
 ## 4. Clients
 
-Clients connect to `ws://localhost:8080/ws` unless told otherwise. Point them
-at your server with `-server wss://blite.example.com/ws` or
+Official builds can use your server as they are: under *Room > Servers...*,
+add `blite.example.com` (or `wss://blite.example.com/ws`) and, if you like,
+make it the default. Once a server is added, a picker at the bottom right of
+the window chooses where new sessions start. Share links name their server
+(`https://blite.example.com/j/CODE#password`, which opens
+`bshare://join/CODE?server=blite.example.com#password`), so anyone can join
+from a link without adding the server; the first time, the app asks whether
+to join a session on a server not run by Bellion Share.
+
+Discord integration isn't available on self-hosted servers yet.
+
+Dev builds connect to `ws://localhost:8080/ws` unless told otherwise. Point
+them at your server with `-server wss://blite.example.com/ws` or
 `BLITE_SERVER`, or bake it into your builds:
 
 ```bash
@@ -94,9 +111,7 @@ export BLITE_DEFAULT_SERVER=wss://blite.example.com/ws
 scripts/build-windows.sh dist/windows   # or scripts/build-deb.sh dist/linux
 ```
 
-Share links look like `https://blite.example.com/j/CODE#password`; the
-joining client still uses its own configured server, so everyone in a room
-must point at the same one.
+That server then replaces the built-in default.
 
 Self-update is off unless the build is given an update server and release
 signing keys (`BLITE_UPDATE_URL`, `BLITE_UPDATE_KEYS`; see
