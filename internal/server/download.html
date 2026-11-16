@@ -38,7 +38,7 @@
         <div class="get-item">
           {{with .windows}}
           <a class="btn btn-lg" href="/download/windows"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Download for Windows</a>
-          <p>Windows 10 or 11, 64-bit &middot; {{.Size}}</p>
+          <p>Windows 10 or 11, 64-bit &middot; installer</p>
           {{else}}
           <p class="unavail"><strong>Windows:</strong> not available right now. Try again in a few minutes.</p>
           {{end}}
@@ -202,9 +202,11 @@
         <p class="meta">Not available right now. Try again in a few minutes.</p>
         {{end}}
         <ol>
-          <li>Unzip the download anywhere, for example in your Documents.</li>
-          <li>Run <code>blite-guard.exe</code> in the unzipped <code>blite</code> folder.</li>
+          <li>Run <code>BellionShare-Setup.exe</code>. It downloads and installs the latest version for you; no admin rights needed.</li>
+          <li>If Windows shows "Windows protected your PC", choose <strong>More info</strong>, then <strong>Run anyway</strong>. The installer is code-signed (publisher: Martin Saul), but the signature is new, so Windows may warn for a while.</li>
+          <li>Start Bellion Share from the desktop or the Start menu.</li>
         </ol>
+        {{if .windows}}<p class="meta">Prefer no installer? <a href="/download/windows-zip">Portable zip</a> ({{.windows.Size}}): unzip it anywhere and run <code>blite-guard.exe</code>.</p>{{end}}
       </section>
       <section class="platform">
         <h3>Linux</h3>

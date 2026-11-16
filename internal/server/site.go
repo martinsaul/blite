@@ -248,7 +248,14 @@ type releases struct {
 	byPlatform    map[string]*release
 }
 
-var downloadPlatforms = []string{"windows-amd64", "linux-amd64"}
+// downloads are the update server's packages the page offers, by key:
+// the app per platform, and the Windows installer (a small bootstrapper that
+// installs the latest build; it rarely changes, so it lives on stable).
+var downloads = []struct{ key, pkg, channel, platform string }{
+	{"windows-amd64", "blite", "", "windows-amd64"},
+	{"linux-amd64", "blite", "", "linux-amd64"},
+	{"windows-setup", "blite-setup", "stable", "windows-amd64"},
+}
 
 // get returns the latest releases, refetched at most every 5 minutes. The
 // manifests are signed for the app; this is only a link, so the page doesn't
@@ -261,8 +268,12 @@ func (r *releases) get(ctx context.Context) map[string]*release {
 	}
 	m := map[string]*release{}
 	c := http.Client{Timeout: 10 * time.Second}
-	for _, p := range downloadPlatforms {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/manifest/blite/%s/%s", strings.TrimRight(r.base, "/"), r.channel, p), nil)
+	for _, d := range downloads {
+		ch := d.channel
+		if ch == "" {
+			ch = r.channel
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/manifest/%s/%s/%s", strings.TrimRight(r.base, "/"), d.pkg, ch, d.platform), nil)
 		res, err := c.Do(req)
 		if err != nil {
 			continue
@@ -278,7 +289,7 @@ func (r *releases) get(ctx context.Context) map[string]*release {
 		if err != nil || json.Unmarshal(b, &rel) != nil || !strings.HasPrefix(rel.URL, "https://") {
 			continue
 		}
-		m[p] = &rel
+		m[d.key] = &rel
 	}
 	if len(m) > 0 || r.byPlatform == nil {
 		r.byPlatform, r.at = m, time.Now()
@@ -295,16 +306,29 @@ func (s *Server) handleDownloadPage(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]*dl{}
 	for p, x := range rel {
-		data[strings.TrimSuffix(p, "-amd64")] = &dl{x.Build, fmt.Sprintf("%.0f MB", float64(x.Size)/1e6), x.Released.Format("January 2, 2006")}
+		data[strings.ReplaceAll(strings.TrimSuffix(p, "-amd64"), "-", "_")] = &dl{x.Build, fmt.Sprintf("%.0f MB", float64(x.Size)/1e6), x.Released.Format("January 2, 2006")}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	downloadTmpl.Execute(w, data)
 }
 
-// handleDownload sends the latest build for a platform (windows or linux).
+// handleDownload sends the latest download: windows (the installer, or the
+// zip while no installer is published), windows-zip (the portable zip) or
+// linux.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	x := s.releases.get(r.Context())[r.PathValue("platform")+"-amd64"]
+	rel := s.releases.get(r.Context())
+	var x *release
+	switch p := r.PathValue("platform"); p {
+	case "windows":
+		if x = rel["windows-setup"]; x == nil {
+			x = rel["windows-amd64"]
+		}
+	case "windows-zip":
+		x = rel["windows-amd64"]
+	default:
+		x = rel[p+"-amd64"]
+	}
 	if x == nil {
 		http.Error(w, "no release available right now; try again later", http.StatusServiceUnavailable)
 		return

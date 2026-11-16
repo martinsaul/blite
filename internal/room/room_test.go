@@ -27,14 +27,15 @@ func TestCodeRoundTrip(t *testing.T) {
 		}
 	}
 	cases := map[string]string{
-		"7k3q-x9md": "7K3QX9MD",
-		"7K3Q X9MD": "7K3QX9MD",
-		"OOOOIIII":  "00001111",
-		"LLLL0000":  "11110000",
-		"7K3QX9MU":  "", // U is not Crockford
-		"7K3QX9M":   "", // too short
-		"7K3QX9MDD": "", // too long
-		"7K3QX9Mé":  "",
+		"7k3q-x9md":     "7K3QX9MD",
+		"7K3Q X9MD":     "7K3QX9MD",
+		"OOOOIIII":      "00001111",
+		"LLLL0000":      "11110000",
+		"7K3QX9MU":      "",       // U is not Crockford
+		"mamaco":        "MAMAC0", // a hosted room's own word
+		"7K3":           "",       // too short
+		"7K3QX9MDDDDDD": "",       // too long
+		"7K3QX9Mé":      "",
 	}
 	for in, want := range cases {
 		if got := NormalizeCode(in); got != want {

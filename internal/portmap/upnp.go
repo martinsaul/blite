@@ -252,8 +252,8 @@ func (u *upnp) mapPort(ctx context.Context, internal uint16, life time.Duration)
 		return err
 	}
 	// Another machine on the LAN may hold the external port (718
-	// ConflictInMappingEntry): try the next ones. A renewal asks for the
-	// one we got.
+	// ConflictInMappingEntry; some routers say 606 Action not authorized
+	// instead): try the next ones. A renewal asks for the one we got.
 	ext := internal
 	if u.ext != 0 {
 		ext = u.ext
@@ -265,7 +265,7 @@ func (u *upnp) mapPort(ctx context.Context, internal uint16, life time.Duration)
 			life = 0
 			err = add(ext, 0)
 		}
-		if !errors.As(err, &se) || se.Code != 718 || try == upnpPortTries-1 {
+		if !errors.As(err, &se) || (se.Code != 718 && se.Code != 606) || try == upnpPortTries-1 {
 			break
 		}
 		ext++

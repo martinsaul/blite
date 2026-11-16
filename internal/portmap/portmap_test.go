@@ -21,6 +21,9 @@ type fakeIGD struct {
 	mappings map[string]string // external port -> internal client
 	actions  []string
 	permOnly bool
+	// conflict606: answer a taken port with 606 Action not authorized, as
+	// some routers do, instead of 718.
+	conflict606 bool
 }
 
 const igdDesc = `<?xml version="1.0"?>
@@ -69,7 +72,11 @@ func (f *fakeIGD) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if c, ok := f.mappings[args["NewExternalPort"]]; ok && c != args["NewInternalClient"] {
-			fault("718", "ConflictInMappingEntry")
+			if f.conflict606 {
+				fault("606", "Action not authorized")
+			} else {
+				fault("718", "ConflictInMappingEntry")
+			}
 			return
 		}
 		if f.permOnly && args["NewLeaseDuration"] != "0" {
@@ -91,7 +98,13 @@ func (f *fakeIGD) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestUPnPConflict(t *testing.T) {
-	igd := &fakeIGD{mappings: map[string]string{"30471": "192.168.1.99"}} // another machine holds 30471
+	for _, c606 := range []bool{false, true} {
+		testUPnPConflict(t, c606)
+	}
+}
+
+func testUPnPConflict(t *testing.T, conflict606 bool) {
+	igd := &fakeIGD{mappings: map[string]string{"30471": "192.168.1.99"}, conflict606: conflict606} // another machine holds 30471
 	srv := httptest.NewServer(igd)
 	defer srv.Close()
 	ctx := context.Background()

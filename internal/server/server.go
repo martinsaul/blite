@@ -4,8 +4,10 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -59,6 +61,10 @@ type Config struct {
 	// ships in the app. Empty = the endpoint is off.
 	DiscordClientID string
 	DiscordSecret   string
+	// DiscordPublicKey is the Ed25519 public key (64 hex chars) from the
+	// Discord Developer Portal used to verify POST /v1/discord/interactions.
+	// Empty = the interactions endpoint is off.
+	DiscordPublicKey string
 	// ReportDir stores client log reports (POST /v1/report). Empty = the
 	// endpoint is off.
 	ReportDir string
@@ -71,15 +77,17 @@ type Config struct {
 
 // Server serves Blite signaling.
 type Server struct {
-	cfg      Config
-	rooms    *room.Manager
-	failIP   *ratelimit.Window
-	failRoom *ratelimit.Window
-	createIP *ratelimit.Window
-	reportIP *ratelimit.Window
-	lookIP   *ratelimit.Window
-	mux      *http.ServeMux
-	releases *releases // the download page (nil = off)
+	cfg           Config
+	rooms         *room.Manager
+	failIP        *ratelimit.Window
+	failRoom      *ratelimit.Window
+	createIP      *ratelimit.Window
+	reportIP      *ratelimit.Window
+	lookIP        *ratelimit.Window
+	mux           *http.ServeMux
+	releases      *releases // the download page (nil = off)
+	discordPubKey ed25519.PublicKey
+	started       time.Time
 }
 
 // New returns a Server. Call Run to start background sweeps.
@@ -102,6 +110,7 @@ func New(cfg Config) *Server {
 		reportIP: ratelimit.New(20, time.Hour),
 		lookIP:   ratelimit.New(120, time.Minute),
 		mux:      http.NewServeMux(),
+		started:  time.Now(),
 	}
 	s.rooms.MaxPeers = cfg.MaxPeers
 	s.mux.HandleFunc("GET /ws", s.handleWS)
@@ -117,6 +126,15 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /v1/channel/{id}", s.handleChannel)
 	if cfg.DiscordClientID != "" && cfg.DiscordSecret != "" {
 		s.mux.HandleFunc("POST /v1/discord/token", s.handleDiscordToken)
+	}
+	if cfg.DiscordPublicKey != "" {
+		pk, err := hex.DecodeString(strings.TrimSpace(cfg.DiscordPublicKey))
+		if err != nil || len(pk) != ed25519.PublicKeySize {
+			cfg.Log.Error("bad DiscordPublicKey; interactions endpoint disabled", "err", err, "len", len(pk))
+		} else {
+			s.discordPubKey = pk
+			s.mux.HandleFunc("POST /v1/discord/interactions", s.handleDiscordInteraction)
+		}
 	}
 	s.mux.HandleFunc("GET /terms", s.canonicalHost(staticPage(termsHTML)))
 	s.mux.HandleFunc("GET /privacy", s.canonicalHost(staticPage(privacyHTML)))

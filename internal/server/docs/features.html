@@ -45,7 +45,8 @@
   <li><strong>End-to-end encryption</strong> is on by default: each sender encrypts its media with keys only room members get.</li>
   <li><strong>Identity keys and tags.</strong> Each person has an identity key; names show with a 4-digit tag derived from it (like <em>Alice#4417</em>). If someone shows up with a familiar name but a new key, Bellion Share points it out. Bellion Share refuses to connect to someone whose encryption keys don't match their identity.</li>
   <li><strong>Safety code.</strong> Everyone in a call sees a safety code. Read it aloud once: if everyone sees the same numbers, nobody is intercepting the connection.</li>
-  <li>The password stays in the part of the link after <code>#</code>, which browsers never send to the server.</li>
+  <li>The password stays in the part of the link after <code>#</code>, which browsers never send to the server, so it stays out of the join page and its logs. The app does send it to our server, over an encrypted connection, to check it when you join. The server keeps only a hash of it, in memory, while the session lasts.</li>
+  <li><strong>What a password does and doesn't protect.</strong> The password decides who the server lets in. It isn't part of the encryption keys, so a compromised server could add someone to your session without it. That person shows up in the People list and changes the safety code, so check both if it matters. Relays in your session also get the room's keys, like any member.</li>
 </ul>
 <p>See the <a href="/privacy">Privacy Policy</a> for what the app and our server handle.</p>
 
@@ -53,9 +54,11 @@
 <ul>
   <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in.</li>
   <li>Updates itself: new versions are signed, offered in the app, and rolled back automatically if something goes wrong.</li>
-  <li>Opens a UDP port on your router (UPnP, NAT-PMP or PCP) when the router allows it, so others can reach you directly.</li>
+  <li>Opens a UDP port (30471) on your router with UPnP, NAT-PMP or PCP by default, when the router allows it, so others can reach you directly. To turn this off, start the app with <code>-udp-port 0</code>.</li>
+  <li>Like any peer-to-peer app, people in your session learn your IP address, and you learn theirs. Clicking a share link joins that session right away, so only click links from people you trust.</li>
   <li><em>Help &gt; Send feedback...</em> sends an idea or a problem report, optionally with diagnostics (your setup and call stats, no names, keys or links). <em>Help &gt; Logs and problem reports</em> sends your logs, opens the log folder or copies diagnostics.</li>
-  <li>On Windows, a crash guard runs Bellion Share and keeps crash dumps.</li>
+  <li>On Windows, a crash guard runs Bellion Share and keeps crash dumps on your computer. They are never uploaded, but today they hold the app's full memory, which can include session keys. An upcoming version makes them much smaller and keeps fewer. You can delete them any time from <code>%LOCALAPPDATA%\Blite\crash</code>.</li>
+  <li><strong>Builds.</strong> The downloads on bellion.app are built by us, not by a public build service, so nothing proves they match a commit. If you want that certainty, build Bellion Share yourself from the <a href="https://github.com/martinsaul/blite">source code</a>.</li>
 </ul>
 
 <h2>Platforms</h2>

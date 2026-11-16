@@ -63,6 +63,7 @@ func main() {
 		ReportDir:           os.Getenv("BLITE_REPORT_DIR"),
 		DiscordClientID:     os.Getenv("BLITE_DISCORD_CLIENT_ID"),
 		DiscordSecret:       os.Getenv("BLITE_DISCORD_SECRET"),
+		DiscordPublicKey:    os.Getenv("BLITE_DISCORD_PUBLIC_KEY"),
 		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
 		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
 		Log:                 log,

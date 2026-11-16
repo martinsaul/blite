@@ -25,6 +25,8 @@ export PKG_CONFIG_LIBDIR=$gst/lib/pkgconfig PKG_CONFIG_PATH=$gst/lib/pkgconfig
 
 rm -rf "$out" && mkdir -p "$out/blite/bin" "$out/blite/lib/gstreamer-1.0"
 eval "$(scripts/version.sh)"
+scripts/winres.sh "$APP_VERSION" "$BUILD"
+trap 'scripts/winres.sh clean' EXIT
 go build -trimpath -ldflags "$LDFLAGS" -o "$out/blite/bin/blite.exe" ./cmd/blite
 # The crash guard is pure Go and has no console window.
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -H windowsgui" -o "$out/blite/blite-guard.exe" ./cmd/blite-guard

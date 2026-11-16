@@ -80,6 +80,9 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   in: **Go live in #channel** starts a session tied to it, and people in the
   channel see a **Watch** button. It only reads which voice channel you're in.
   See [Discord integration](https://bellion.app/docs/discord).
+- **Not open to everyone yet:** Discord is still reviewing the Bellion app.
+  Until then, Connect Discord only works for people added as testers, and
+  there are only a few tester slots for now.
 
 **Rooms and security**
 - Sessions are a room code plus an optional password, shared as one link;
@@ -93,6 +96,12 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   aloud confirms nobody is intercepting the call.
 - The room owner can hand ownership to someone else, disconnect people or
   ban them.
+- The password stays out of the join page and HTTP logs (it's in the link's
+  `#` part), but the app sends it to the server over WSS to check it; the
+  server keeps only an Argon2id hash, in memory. The password isn't part of
+  the encryption keys, so a compromised server could add someone to your
+  session: they would show in the People list and change the safety code.
+  Relays get the room's keys, like any member.
 
 **Relays**
 - Full mesh by default: everyone sends directly to everyone. Above about 5
@@ -110,10 +119,18 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
 - A native window plus a tray icon; optional start at sign-in.
 - Signed self-update with automatic rollback; updating during a call
   restarts the app and rejoins the call.
-- Opens its UDP port on your router (UPnP, NAT-PMP or PCP) when allowed; STUN
-  by default, TURN for peers behind strict NAT.
+- Opens UDP port 30471 on your router (UPnP, NAT-PMP or PCP) by default, when
+  allowed (`-udp-port 0` turns that off); STUN by default, TURN for peers
+  behind strict NAT. As in any peer-to-peer app, people in a session learn
+  each other's IP addresses.
 - Send feedback and logs from the Help menu. On Windows, a crash guard runs
-  Bellion Share and keeps crash dumps.
+  Bellion Share and keeps crash dumps locally (never uploaded). Today they
+  hold the app's full memory, and opening a share link writes the link,
+  password included, to the local log, which crash reports and Send logs
+  can upload. Both are fixed in an upcoming version (smaller dumps, redacted
+  logs).
+- Release binaries on bellion.app are built privately, without public CI
+  attestations; for full certainty, build from this repository.
 
 **Platforms:** Windows 10 and 11 (64-bit), and Linux on X11 (Ubuntu 24.04,
 Mint 22 or newer for the .deb; Wayland sessions aren't supported yet). The
@@ -129,8 +146,11 @@ corrections are welcome.
 
 ## Quick start
 
-1. Install from [bellion.app](https://bellion.app). Windows: unzip and run
-   `blite-guard.exe` in the `blite` folder. Linux: `sudo apt install ./blite_*.deb`.
+1. Install from [bellion.app](https://bellion.app). Windows: run
+   `BellionShare-Setup.exe` (code-signed; while the signature is new, Windows
+   may still warn: More info > Run anyway), or
+   use the portable zip and run `blite-guard.exe`. Linux:
+   `sudo apt install ./blite_*.deb`.
 2. Press **Go live: main monitor**. The share link is copied to your
    clipboard; paste it to your friends.
 3. They click the link (or paste it into **Watch someone**) and see your

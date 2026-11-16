@@ -11,6 +11,13 @@ const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 // CodeLen is the number of significant characters in a room code (~40 bits).
 const CodeLen = 8
 
+// Fixed codes of hosted rooms (rooms.json) may be shorter or longer, e.g.
+// a group's own word; random codes are always CodeLen.
+const (
+	MinCodeLen = 4
+	MaxCodeLen = 12
+)
+
 // NewCode returns a random room code without separators, e.g. "7K3QX9MD".
 func NewCode() string {
 	b := make([]byte, CodeLen)
@@ -50,7 +57,7 @@ func NormalizeCode(in string) string {
 		}
 		sb.WriteRune(r)
 	}
-	if sb.Len() != CodeLen {
+	if sb.Len() < MinCodeLen || sb.Len() > MaxCodeLen {
 		return ""
 	}
 	return sb.String()

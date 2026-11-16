@@ -6,7 +6,7 @@
 
 <h2>1. Install</h2>
 <ul>
-  <li><strong>Windows 10 or 11 (64-bit):</strong> <a href="/">download the zip</a>, unzip it anywhere (for example in your Documents), and run <code>blite-guard.exe</code> in the unzipped <code>blite</code> folder. It starts Bellion Share and keeps crash reports if something goes wrong.</li>
+  <li><strong>Windows 10 or 11 (64-bit):</strong> <a href="/download/windows">download the installer</a> and run <code>BellionShare-Setup.exe</code>. It installs the latest version for your user account (no admin rights needed) and adds Start menu and desktop shortcuts. The installer is code-signed (publisher: Martin Saul). The signature is new, so for a while Windows may still say "Windows protected your PC": choose <strong>More info</strong>, then <strong>Run anyway</strong>. Prefer no installer? Use the <a href="/download/windows-zip">portable zip</a>: unzip it anywhere and run <code>blite-guard.exe</code>.</li>
   <li><strong>Linux (Ubuntu 24.04, Mint 22 or newer, 64-bit):</strong> <a href="/">download the .deb</a>, open a terminal in its folder and run <code>sudo apt install ./blite_*.deb</code>, then start Bellion Share from your app menu. Bellion Share needs an X11 session; Wayland sessions aren't supported yet.</li>
 </ul>
 <p>Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
@@ -31,7 +31,7 @@
   <li><strong>Require a password</strong>: the session gets a password you choose. Without one, the session is open to anyone who has the link. Either way the link carries everything needed to join, so only send it to people you want in.</li>
   <li><strong>Encrypt end to end</strong> (on by default): each sender encrypts its video and audio with keys that only people in the room get, so a TURN server passing them on can't read them. Everyone in the room needs build 72 or newer.</li>
 </ul>
-<p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>.</p>
+<p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>. Until Discord approves the Bellion app, this works only for a few people added as testers.</p>
 
 <h2>4. Watch someone</h2>
 <p>Click the share link someone sent you. Your browser opens a page that hands the link to Bellion Share (on its first use it may ask whether to open the app). If nothing opens, make sure Bellion Share is installed and running, then click the link again.</p>

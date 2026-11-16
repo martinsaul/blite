@@ -19,7 +19,7 @@ docker run -p 127.0.0.1:8080:8080 blite-signal
 
 Routes: `GET /ws` (WebSocket signaling), `GET /j/{code}` (share-link landing
 page), `POST /v1/report` (client log reports, only with `BLITE_REPORT_DIR`),
-`GET /v1/channel/{id}` and `POST /v1/discord/token` (Discord, only with the
+`GET /v1/channel/{id}`, `POST /v1/discord/token` and `POST /v1/discord/interactions` (Discord, only with the
 Discord settings), the website (`/`, `/download`, `/docs`, `/terms`,
 `/privacy`; the download page only with `BLITE_UPDATE_URL`) and `GET /healthz`.
 
@@ -51,6 +51,7 @@ server pings every 30 s.
 | `BLITE_UPDATE_URL` | unset | Update server the download page reads releases from (no download page when unset) |
 | `BLITE_DOWNLOAD_CHANNEL` | `beta` | Release channel the download page offers |
 | `BLITE_DISCORD_CLIENT_ID` + `BLITE_DISCORD_SECRET` | unset | Discord app credentials for the token exchange (the app only uses Discord with its built-in server for now) |
+| `BLITE_DISCORD_PUBLIC_KEY` | unset | Discord app Ed25519 public key (hex) for verifying `POST /v1/discord/interactions` |
 
 With no ICE settings peers get public STUN only, so peers behind symmetric
 NAT can't connect; add TURN for those.

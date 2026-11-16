@@ -153,6 +153,14 @@ func (c *Client) Download(ctx context.Context, p Payload, dir string) (string, e
 	return download(ctx, p, dir, c.UserAgent())
 }
 
+// downloadAttempts bounds how often a dropped transfer is resumed. Proxies and
+// CDNs in front of the server can cut long transfers on slow links; each retry
+// continues from the bytes already on disk with a Range request.
+const downloadAttempts = 6
+
+// retryDelay is the backoff unit between resume attempts (a var for tests).
+var retryDelay = 2 * time.Second
+
 func download(ctx context.Context, p Payload, dir, ua string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -161,42 +169,117 @@ func download(ctx context.Context, p Payload, dir, ua string) (string, error) {
 	if ok, _ := fileMatches(final, p); ok {
 		return final, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
-	if err != nil {
-		return "", err
+	// The partial file is named after the hash, so a later call (even from a
+	// new process) resumes it instead of starting over.
+	part := filepath.Join(dir, ".molt-dl-"+p.SHA256+".part")
+	var lastErr error
+	for attempt := 0; attempt < downloadAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("%w: %v", ErrCouldNotCheck, ctx.Err())
+			case <-time.After(time.Duration(attempt) * retryDelay):
+			}
+		}
+		done, err := fetchRange(ctx, p, part, ua)
+		if err != nil {
+			lastErr = err
+			if errors.Is(err, ErrBadPayload) || ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if done {
+			lastErr = nil
+			break
+		}
 	}
-	req.Header.Set("X-Client", ua)
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrCouldNotCheck, err)
+	if lastErr != nil {
+		if errors.Is(lastErr, ErrBadPayload) {
+			os.Remove(part)
+			return "", lastErr
+		}
+		return "", fmt.Errorf("%w: %v", ErrCouldNotCheck, lastErr)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: download HTTP %d", ErrCouldNotCheck, resp.StatusCode)
+	if ok, err := fileMatches(part, p); !ok {
+		os.Remove(part)
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: size or sha256 mismatch, want %d bytes %s", ErrBadPayload, p.Size, p.SHA256)
 	}
-	tmp, err := os.CreateTemp(dir, ".molt-dl-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, p.Size+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrCouldNotCheck, err)
-	}
-	if n != p.Size {
-		return "", fmt.Errorf("%w: size %d, want %d", ErrBadPayload, n, p.Size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != p.SHA256 {
-		return "", fmt.Errorf("%w: sha256 %s, want %s", ErrBadPayload, got, p.SHA256)
-	}
-	if err := os.Rename(tmp.Name(), final); err != nil {
+	if err := os.Rename(part, final); err != nil {
 		return "", err
 	}
 	return final, nil
+}
+
+// fetchRange appends the rest of the payload to part. It reports done once
+// part holds p.Size bytes; a transfer cut short returns the read error and
+// keeps what arrived for the next attempt.
+func fetchRange(ctx context.Context, p Payload, part, ua string) (bool, error) {
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	have, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return false, err
+	}
+	if have > p.Size {
+		if err := f.Truncate(0); err != nil {
+			return false, err
+		}
+		have = 0
+	}
+	if have == p.Size {
+		return true, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("X-Client", ua)
+	if have > 0 {
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(have, 10)+"-")
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusPartialContent && have > 0:
+		if !strings.HasPrefix(resp.Header.Get("Content-Range"), "bytes "+strconv.FormatInt(have, 10)+"-") {
+			return false, fmt.Errorf("download: unexpected Content-Range %q", resp.Header.Get("Content-Range"))
+		}
+	case resp.StatusCode == http.StatusOK:
+		// Server ignored the range: start over.
+		if err := f.Truncate(0); err != nil {
+			return false, err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return false, err
+		}
+		have = 0
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		f.Truncate(0)
+		return false, fmt.Errorf("download HTTP %d", resp.StatusCode)
+	default:
+		return false, fmt.Errorf("download HTTP %d", resp.StatusCode)
+	}
+	n, err := io.Copy(f, io.LimitReader(resp.Body, p.Size-have+1))
+	if err != nil {
+		return false, err
+	}
+	switch got := have + n; {
+	case got > p.Size:
+		return false, fmt.Errorf("%w: more than %d bytes", ErrBadPayload, p.Size)
+	case got < p.Size:
+		return false, fmt.Errorf("download ended at %d of %d bytes", got, p.Size)
+	}
+	return true, nil
 }
 
 func fileMatches(path string, p Payload) (bool, error) {

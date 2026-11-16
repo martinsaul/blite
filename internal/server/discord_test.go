@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,5 +43,70 @@ func TestDiscordToken(t *testing.T) {
 	s.ServeHTTP(w, httptest.NewRequest("GET", "/v1/channel/123456789", nil))
 	if w.Code != 404 {
 		t.Fatalf("no room: %d", w.Code)
+	}
+}
+
+func TestDiscordInteraction(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled when DiscordPublicKey is unset.
+	off := New(Config{})
+	w := httptest.NewRecorder()
+	off.ServeHTTP(w, httptest.NewRequest("POST", "/v1/discord/interactions", strings.NewReader(`{"type":1}`)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when disabled, got %d", w.Code)
+	}
+
+	s := New(Config{DiscordPublicKey: hex.EncodeToString(pub)})
+	signedReq := func(ts, body string, sigHex string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/discord/interactions", strings.NewReader(body))
+		if sigHex == "" {
+			sig := ed25519.Sign(priv, []byte(ts+body))
+			sigHex = hex.EncodeToString(sig)
+		}
+		req.Header.Set("X-Signature-Timestamp", ts)
+		req.Header.Set("X-Signature-Ed25519", sigHex)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Bad signature -> 401.
+	if rec := signedReq("1700000000", `{"type":1}`, strings.Repeat("00", ed25519.SignatureSize)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad sig: expected 401, got %d", rec.Code)
+	}
+
+	// PING -> PONG.
+	rec := signedReq("1700000000", `{"type":1}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ping: %d %s", rec.Code, rec.Body.String())
+	}
+	var pong struct {
+		Type int `json:"type"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pong); err != nil || pong.Type != 1 {
+		t.Fatalf("ping body: %s", rec.Body.String())
+	}
+
+	// /status slash command -> ephemeral status message.
+	rec = signedReq("1700000001", `{"type":2,"data":{"name":"status"}}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Type int `json:"type"`
+		Data struct {
+			Content string `json:"content"`
+			Flags   int    `json:"flags"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("status json: %v", err)
+	}
+	if resp.Type != 4 || resp.Data.Flags != 64 || !strings.Contains(resp.Data.Content, "Bellion Share signaling is online") {
+		t.Fatalf("unexpected status response: %+v", resp)
 	}
 }

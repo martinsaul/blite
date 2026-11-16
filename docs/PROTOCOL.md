@@ -148,5 +148,9 @@ forward encrypted media unchanged. Encrypted rooms refuse builds below 72
 `https://<host>/j/<CODE>#<password>` (no `#` part for an open room). The landing
 page hands the link to the app as `blite://join/<CODE>#<password>`; the app
 also handles `bshare://join/<CODE>#<password>`. The password stays in the URL
-fragment, so the server never sees it; the page doesn't check whether the room
-exists.
+fragment, so the join page and HTTP logs never see it; the page doesn't check
+whether the room exists. The app itself does send the password to the server
+in `create`/`join` (over WSS), where it's checked against an in-memory Argon2id
+hash. The password isn't part of E2EE key derivation, so a compromised server
+could admit a member without it; members detect that through the People list
+and the safety code.

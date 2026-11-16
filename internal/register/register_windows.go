@@ -1,6 +1,8 @@
 package register
 
 import (
+	"errors"
+
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -34,4 +36,20 @@ func registerScheme(scheme, exe string) error {
 	}
 	defer cmd.Close()
 	return cmd.SetStringValue("", `"`+exe+`" "%1"`)
+}
+
+// Unregister removes our schemes and the sign-in start entry (uninstall).
+func Unregister() error {
+	var first error
+	for _, s := range Schemes {
+		for _, k := range []string{`\shell\open\command`, `\shell\open`, `\shell`, ``} {
+			if err := registry.DeleteKey(registry.CURRENT_USER, `Software\Classes\`+s+k); err != nil && !errors.Is(err, registry.ErrNotExist) && first == nil {
+				first = err
+			}
+		}
+	}
+	if err := SetAutostart(false, ""); err != nil && first == nil {
+		first = err
+	}
+	return first
 }

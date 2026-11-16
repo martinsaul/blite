@@ -23,7 +23,6 @@ import (
 	"blite/internal/audio"
 	"blite/internal/i18n"
 	"blite/internal/session"
-	"blite/internal/tray"
 	"blite/internal/ui"
 )
 
@@ -37,9 +36,10 @@ type Options struct {
 
 // UI is the running native interface.
 type UI struct {
-	a   ui.Backend
-	fa  fyne.App
-	win fyne.Window
+	a     ui.Backend
+	fa    fyne.App
+	win   fyne.Window
+	shown bool // the window showed once (Fyne thread)
 
 	closed  atomic.Bool // Run returned: the driver is gone
 	mu      sync.Mutex
@@ -64,7 +64,7 @@ var (
 // (the main one) until Quit.
 func Run(a ui.Backend, o Options) {
 	fa := fapp.NewWithID("com.bellion.share")
-	icon := fyne.NewStaticResource("icon.png", tray.PNG())
+	icon := fyne.NewStaticResource("icon.png", iconPNG)
 	fa.SetIcon(icon)
 	u := &UI{a: a, fa: fa, icon: icon}
 	setFyneLanguage()
@@ -157,6 +157,10 @@ func (u *UI) setTrayMenu() {
 func (u *UI) Show() {
 	u.win.Show()
 	u.win.RequestFocus()
+	if !u.shown {
+		u.shown = true
+		u.askAutostart() // the first time the window shows
+	}
 }
 
 func (u *UI) loadDevices() {

@@ -51,3 +51,22 @@ func mimeTypes() string {
 	}
 	return b.String()
 }
+
+// Unregister removes the .desktop entry Register wrote and the sign-in start
+// entry (uninstall).
+func Unregister() error {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	dir := filepath.Join(dataHome, "applications")
+	if err := os.Remove(filepath.Join(dir, "blite.desktop")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	exec.Command("update-desktop-database", dir).Run() // best effort
+	return SetAutostart(false, "")
+}

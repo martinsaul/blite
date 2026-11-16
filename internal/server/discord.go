@@ -1,7 +1,10 @@
 package server
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -78,4 +81,63 @@ func (s *Server) handleDiscordToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	io.Copy(w, io.LimitReader(res.Body, 16384))
+}
+
+const (
+	discordInteractionPing       = 1
+	discordInteractionAppCommand = 2
+	discordResponsePong          = 1
+	discordResponseChannelMsg    = 4
+	discordFlagEphemeral         = 1 << 6
+)
+
+// handleDiscordInteraction serves Discord HTTP Interactions (slash commands)
+// without a Gateway bot, verifying Ed25519 signatures against s.discordPubKey.
+func (s *Server) handleDiscordInteraction(w http.ResponseWriter, r *http.Request) {
+	if len(s.discordPubKey) != ed25519.PublicKeySize {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sig, err := hex.DecodeString(r.Header.Get("X-Signature-Ed25519"))
+	ts := r.Header.Get("X-Signature-Timestamp")
+	if ts == "" || err != nil || len(sig) != ed25519.SignatureSize || !ed25519.Verify(s.discordPubKey, append([]byte(ts), body...), sig) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	var ix struct {
+		Type int `json:"type"`
+		Data struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &ix); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	switch ix.Type {
+	case discordInteractionPing:
+		json.NewEncoder(w).Encode(map[string]int{"type": discordResponsePong})
+	case discordInteractionAppCommand:
+		msg := "Unknown command."
+		if ix.Data.Name == "status" {
+			msg = fmt.Sprintf("Bellion Share signaling is online (uptime: %s).", time.Since(s.started).Truncate(time.Second))
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"type": discordResponseChannelMsg,
+			"data": map[string]any{
+				"content": msg,
+				"flags":   discordFlagEphemeral,
+			},
+		})
+	default:
+		http.Error(w, "unsupported interaction type", http.StatusBadRequest)
+	}
 }

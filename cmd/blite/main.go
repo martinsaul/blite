@@ -99,6 +99,7 @@ func main() {
 		hostFile   = flag.String("host", "", "hosted relay: keep the rooms in this JSON file open and relay them (needs BLITE_HOST_KEY)")
 		uiPort     = flag.Int("ui-port", 0, "local UI port (0 = random)")
 		reg        = flag.Bool("register", false, "register this binary as the bshare:// (and blite://) link handler and exit")
+		unreg      = flag.Bool("unregister", false, "remove the link handler and the sign-in start entry and exit (uninstall)")
 		bg         = flag.Bool("background", false, "start in the tray without opening the window (used at sign-in)")
 		jsonLog    = flag.Bool("json", false, "JSON logs")
 		upKbps     = flag.Int("relay-upload-kbps", 0, "relay: our upload capacity; transcoded renditions must fit in 80% of it (0 = no cap)")
@@ -132,6 +133,13 @@ func main() {
 			fatal(log, "register", err)
 		}
 		fmt.Println("registered bshare:// and blite:// links to", exe)
+		return
+	}
+	if *unreg {
+		if err := register.Unregister(); err != nil {
+			fatal(log, "unregister", err)
+		}
+		fmt.Println("removed the bshare:// and blite:// link handler and the sign-in start entry")
 		return
 	}
 	if *showVer {
@@ -288,6 +296,11 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	if in, err := app.ForwardLink(link); err == nil {
 		if app.ShowInstance(in) != nil && link == "" {
 			app.OpenBrowser(fmt.Sprintf("http://127.0.0.1:%d/", in.Port)) // an older instance
+		}
+		// An installer that started us to check the install works: a copy
+		// already runs (e.g. from an earlier unzip), so this one is fine.
+		if err := molt.ReportHealthy(); err != nil {
+			log.Warn("health report", "err", err)
 		}
 		return
 	} else if err != app.ErrNoInstance {

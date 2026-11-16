@@ -170,7 +170,7 @@ out. On bellion.app, use a dedicated relay machine instead.
 
 1. Set up your server ([SELF_HOSTING.md](SELF_HOSTING.md)) with
    `BLITE_HOST_KEY` set to a long random secret.
-2. Write `rooms.json` (codes: 8 letters and digits, no I, L, O or U;
+2. Write `rooms.json` (codes: 4 to 12 letters and digits, no U (O counts as 0, I and L as 1);
    passwords: at least 4 characters; `owners`: identity keys from *Room > Your
    identity key...* of the people who own the room while they're in it):
 

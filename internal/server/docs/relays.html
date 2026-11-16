@@ -114,7 +114,7 @@ WantedBy=multi-user.target</code></pre>
 </div>
 <ol>
   <li>Set up your server as in <a href="/docs/self-hosting">Self-hosting</a>, with <code>BLITE_HOST_KEY</code> set to a long random secret.</li>
-  <li>Write <code>rooms.json</code>. Codes are 8 letters and digits (no I, L, O or U); passwords need at least 4 characters. <code>owners</code> lists the identity keys of the people who own the room while they're in it (from <em>Room &gt; Your identity key...</em> in their app); otherwise the relay owns it.
+  <li>Write <code>rooms.json</code>. Codes are 4 to 12 letters and digits (no U; O counts as 0, I and L as 1); passwords need at least 4 characters. <code>owners</code> lists the identity keys of the people who own the room while they're in it (from <em>Room &gt; Your identity key...</em> in their app); otherwise the relay owns it.
 <pre><code>[
   {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Our relay",
    "owners": ["&lt;identity key from Room &gt; Your identity key...&gt;"]}
