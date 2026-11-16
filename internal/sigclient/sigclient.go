@@ -3,6 +3,8 @@
 // If the WebSocket drops (Wi-Fi blip, proxy restart) the client resumes its
 // slot with the server's resume token for up to ResumeWindow, so peer
 // connections and media keep running; only a failed resume ends the session.
+// The same resume also renews the socket every Options.Renew, for proxies
+// and load balancers that cap how long a WebSocket may live.
 package sigclient
 
 import (
@@ -10,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -21,6 +24,19 @@ import (
 
 // ResumeWindow matches the server's slot grace period.
 const ResumeWindow = 55 * time.Second
+
+// DefaultRenew is Options.Renew when it is 0: well inside the 2 h some
+// load balancers allow a WebSocket.
+const DefaultRenew = time.Hour
+
+// pingEvery keeps the socket from looking idle to servers and proxies that
+// don't ping themselves and only count client traffic (some drop a
+// WebSocket after 10 min).
+const pingEvery = 5 * time.Minute
+
+// oldSocketGrace is how long a renewal waits for the server to close the
+// old socket before closing it itself.
+const oldSocketGrace = 5 * time.Second
 
 // Event is one message from the server after the welcome.
 type Event struct {
@@ -51,14 +67,28 @@ type Client struct {
 	Welcome proto.Welcome
 	Events  chan Event
 
-	url    string
-	opt    Options
-	wmu    sync.Mutex // serialises writes and guards ws swaps
-	ws     *websocket.Conn
-	early  [][]byte // messages that came before the welcome, handled first by run
-	left   chan struct{}
-	kicked chan struct{} // closed on TKicked: don't resume
-	once   sync.Once
+	url   string
+	opt   Options
+	wmu   sync.Mutex // serialises writes and guards ws swaps
+	ws    *websocket.Conn
+	early [][]byte // messages that came before the welcome, handled first by run
+	left  chan struct{}
+	// leaveReason is LeaveFor's reason, set before left is closed.
+	leaveReason string
+	kicked      chan struct{} // closed on TKicked: don't resume
+	once        sync.Once
+	// rmu: one reconnect at a time, a renewal or a resume.
+	rmu sync.Mutex
+	// renewed carries a renewal's welcome to run, which handles it as a
+	// resume once the old socket is closed.
+	renewed chan seated
+	done    chan struct{} // closed when run ends
+}
+
+type seated struct {
+	ws    *websocket.Conn
+	w     proto.Welcome
+	early [][]byte
 }
 
 // Options for Dial. HTTPClient may be nil.
@@ -66,6 +96,9 @@ type Options struct {
 	HTTPClient *http.Client
 	// OnState is told "reconnecting" / "connected" while resuming.
 	OnState func(string)
+	// Renew moves the session to a fresh socket this often, give or take
+	// 10% (0 = DefaultRenew, < 0 = never). Members see nothing.
+	Renew time.Duration
 }
 
 // Create dials url and creates a room.
@@ -90,6 +123,10 @@ func (e ServerError) Error() string { return "server: " + string(e) }
 // end-to-end exchange key).
 const maxEarly = 64
 
+// errSent wraps dialSeat's errors after first went out: the server may have
+// acted on it (moved our slot to this socket) even though we got no welcome.
+var errSent = errors.New("sent")
+
 // dialSeat opens a socket, sends first, and reads the welcome. Messages
 // that arrive before it are returned in early, in order.
 func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket.Conn, proto.Welcome, [][]byte, error) {
@@ -111,7 +148,7 @@ func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket
 		_, b, err = ws.Read(dctx)
 		if err != nil {
 			ws.CloseNow()
-			return nil, w, nil, err
+			return nil, w, nil, fmt.Errorf("%w: %w", errSent, err)
 		}
 		var env proto.Envelope
 		json.Unmarshal(b, &env)
@@ -119,18 +156,18 @@ func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket
 		case proto.TWelcome:
 			if err := json.Unmarshal(b, &w); err != nil {
 				ws.CloseNow()
-				return nil, w, nil, err
+				return nil, w, nil, fmt.Errorf("%w: %w", errSent, err)
 			}
 			return ws, w, early, nil
 		case proto.TError:
 			var e proto.Error
 			json.Unmarshal(b, &e)
 			ws.CloseNow()
-			return nil, w, nil, ServerError(e.Code)
+			return nil, w, nil, fmt.Errorf("%w: %w", errSent, ServerError(e.Code))
 		}
 		if len(early) == maxEarly {
 			ws.CloseNow()
-			return nil, w, nil, fmt.Errorf("no welcome after %d messages (last %q)", maxEarly, env.T)
+			return nil, w, nil, fmt.Errorf("%w: no welcome after %d messages (last %q)", errSent, maxEarly, env.T)
 		}
 		early = append(early, b)
 	}
@@ -141,8 +178,9 @@ func enter(ctx context.Context, url string, first any, o Options) (*Client, erro
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{Welcome: w, Events: make(chan Event, 64), url: url, opt: o, ws: ws, early: early, left: make(chan struct{}), kicked: make(chan struct{})}
+	c := &Client{Welcome: w, Events: make(chan Event, 64), url: url, opt: o, ws: ws, early: early, left: make(chan struct{}), kicked: make(chan struct{}), renewed: make(chan seated, 1), done: make(chan struct{})}
 	go c.run()
+	go c.keepalive()
 	return c, nil
 }
 
@@ -170,12 +208,16 @@ func (c *Client) hasLeft() bool {
 // run reads until the socket drops, then resumes; it closes Events at the end.
 func (c *Client) run() {
 	defer close(c.Events)
+	defer close(c.done)
+	ws := c.conn()
 	for {
 		for _, b := range c.early {
 			c.handle(b)
 		}
 		c.early = nil
-		err := c.readLoop(c.conn())
+		// ws, not c.conn(): if a second renewal swaps sockets between our
+		// taking this one and reading it, this one must still be read.
+		err := c.readLoop(ws)
 		if c.hasLeft() {
 			c.Events <- Event{Err: errors.New("left")}
 			return
@@ -186,13 +228,22 @@ func (c *Client) run() {
 			return
 		default:
 		}
-		c.state("reconnecting")
-		w, rerr := c.resume()
-		if rerr != nil {
-			c.Events <- Event{Err: fmt.Errorf("signaling lost (%v); resume failed: %w", err, rerr)}
-			return
+		c.rmu.Lock()
+		var w proto.Welcome
+		select {
+		case r := <-c.renewed: // a renewal replaced the socket
+			ws, w, c.early = r.ws, r.w, r.early
+		default:
+			c.state("reconnecting")
+			var rerr error
+			if ws, w, rerr = c.resume(); rerr != nil {
+				c.rmu.Unlock()
+				c.Events <- Event{Err: fmt.Errorf("signaling lost (%v); resume failed: %w", err, rerr)}
+				return
+			}
+			c.state("connected")
 		}
-		c.state("connected")
+		c.rmu.Unlock()
 		c.Events <- Event{Resumed: w.Peers}
 		if w.Plan != nil {
 			c.Events <- Event{Plan: w.Plan}
@@ -205,13 +256,13 @@ func (c *Client) run() {
 }
 
 // resume retries with backoff until ResumeWindow runs out or the server says no.
-func (c *Client) resume() (proto.Welcome, error) {
+func (c *Client) resume() (*websocket.Conn, proto.Welcome, error) {
 	deadline := time.Now().Add(ResumeWindow)
 	wait := 500 * time.Millisecond
-	msg := proto.Resume{T: proto.TResume, Room: c.Welcome.Room, PeerID: c.Welcome.PeerID, Token: c.Welcome.Resume}
+	msg := c.resumeMsg()
 	for {
 		if c.hasLeft() {
-			return proto.Welcome{}, errors.New("left")
+			return nil, proto.Welcome{}, errors.New("left")
 		}
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		ws, w, early, err := dialSeat(ctx, c.url, msg, c.opt)
@@ -221,20 +272,120 @@ func (c *Client) resume() (proto.Welcome, error) {
 			c.ws = ws
 			c.wmu.Unlock()
 			c.early = early // handled by run after the resume events
-			return w, nil
+			return ws, w, nil
 		}
 		var se ServerError
 		if errors.As(err, &se) {
-			return w, err // resume_failed: slot gone, retrying won't help
+			return nil, w, err // resume_failed: slot gone, retrying won't help
 		}
 		if time.Now().Add(wait).After(deadline) {
-			return w, err
+			return nil, w, err
 		}
 		time.Sleep(wait)
 		if wait < 5*time.Second {
 			wait *= 2
 		}
 	}
+}
+
+func (c *Client) resumeMsg() proto.Resume {
+	return proto.Resume{T: proto.TResume, Room: c.Welcome.Room, PeerID: c.Welcome.PeerID, Token: c.Welcome.Resume}
+}
+
+// keepalive pings every pingEvery and renews the socket every Options.Renew
+// until the session ends.
+func (c *Client) keepalive() {
+	every := c.opt.Renew
+	if every == 0 {
+		every = DefaultRenew
+	}
+	tick := time.Minute
+	if every > 0 && every < tick {
+		tick = every
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	next, ping := time.Now().Add(jitter(every)), time.Now().Add(pingEvery)
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+		}
+		now := time.Now()
+		if every > 0 && !now.Before(next) {
+			if c.renew() {
+				next = now.Add(jitter(every))
+			} else {
+				next = now.Add(min(every, time.Minute)) // try again soon
+			}
+			ping = now.Add(pingEvery)
+			continue
+		}
+		if !now.Before(ping) {
+			ping = now.Add(pingEvery)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			c.conn().Ping(ctx) // a dead socket is run's business
+			cancel()
+		}
+	}
+}
+
+// jitter is d give or take 10%, so clients that joined together don't all
+// renew together.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d - d/10 + rand.N(d/5+1)
+}
+
+// renew resumes on a new socket and switches to it. The server moves our
+// slot to the new socket, then closes the old one once what was queued on
+// it is out; run reads the old one to its end first, so nothing is lost or
+// reordered. It reports false if it couldn't (the old socket carries on).
+func (c *Client) renew() bool {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	select {
+	case <-c.done: // the session ended while we waited for rmu
+		return false
+	default:
+	}
+	if c.hasLeft() || len(c.renewed) > 0 { // run hasn't taken the last one yet
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ws, w, early, err := dialSeat(ctx, c.url, c.resumeMsg(), c.opt)
+	cancel()
+	if errors.Is(err, errSent) {
+		// The server may have moved our slot to the socket that just
+		// failed: drop the old one too, so run resumes properly.
+		c.conn().CloseNow()
+		return false
+	}
+	if err != nil {
+		return false
+	}
+	c.wmu.Lock()
+	if c.hasLeft() {
+		// Our Leave may have gone out on the old socket after the server
+		// moved us: say it again here.
+		b, _ := json.Marshal(proto.Leave{T: proto.TLeave, Reason: c.leaveReason})
+		wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ws.Write(wctx, websocket.MessageText, b)
+		cancel()
+		c.wmu.Unlock()
+		ws.Close(websocket.StatusNormalClosure, "")
+		return false
+	}
+	old := c.ws
+	c.ws = ws
+	c.wmu.Unlock()
+	c.renewed <- seated{ws: ws, w: w, early: early}
+	// Servers that don't close a replaced socket: close it ourselves.
+	time.AfterFunc(oldSocketGrace, func() { old.Close(websocket.StatusNormalClosure, "renewed") })
+	return true
 }
 
 func (c *Client) readLoop(ws *websocket.Conn) error {
@@ -363,6 +514,7 @@ func (c *Client) Leave() { c.LeaveFor("") }
 // LeaveFor is Leave with a reason (proto.LeaveUpdate).
 func (c *Client) LeaveFor(reason string) {
 	c.once.Do(func() {
+		c.leaveReason = reason
 		close(c.left)
 		c.send(proto.Leave{T: proto.TLeave, Reason: reason})
 		c.conn().Close(websocket.StatusNormalClosure, "")

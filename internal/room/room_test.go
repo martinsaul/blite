@@ -365,3 +365,24 @@ func TestChannelTie(t *testing.T) {
 		t.Fatalf("bad id: %v", err)
 	}
 }
+
+type replBox struct {
+	box
+	closed int
+}
+
+func (b *replBox) CloseWhenSent() { b.closed++ }
+
+// A resume onto a new connection closes the old one once it has sent what
+// was queued; resuming on the same connection doesn't.
+func TestResumeClosesReplaced(t *testing.T) {
+	m := NewManager(time.Minute)
+	old := &replBox{}
+	a, _ := m.Create("", "alice", "", "", 0, false, old)
+	if _, err := m.Resume(a.Room, a.PeerID, a.Resume, old); err != nil || old.closed != 0 {
+		t.Fatalf("same connection: err %v, closed %d", err, old.closed)
+	}
+	if _, err := m.Resume(a.Room, a.PeerID, a.Resume, &box{}); err != nil || old.closed != 1 {
+		t.Fatalf("new connection: err %v, old closed %d times, want 1", err, old.closed)
+	}
+}

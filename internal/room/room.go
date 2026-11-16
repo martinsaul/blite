@@ -5,6 +5,7 @@ package room
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -43,6 +44,12 @@ type closer interface {
 	CloseSoon()
 }
 
+// replaceable is an Outbox that can close once the messages already queued
+// on it are out (a resume moved its peer to another connection).
+type replaceable interface {
+	CloseWhenSent()
+}
+
 // Peer is one member's slot in a room.
 type Peer struct {
 	ID    string
@@ -52,7 +59,7 @@ type Peer struct {
 	Build int    // client build number (0 = unknown)
 	caps  proto.Caps
 
-	resume string
+	resume tokenHash // of the resume token; the token itself is only sent
 	out    Outbox    // nil while disconnected
 	lostAt time.Time // when out became nil
 }
@@ -88,6 +95,8 @@ type Room struct {
 	hold *ownerHold
 
 	emptyAt time.Time // when the last peer left; zero while occupied
+	// restored: loaded by Restore, and nobody has joined or resumed since.
+	restored bool
 }
 
 func (r *Room) online(id string) bool {
@@ -221,6 +230,11 @@ func randToken(n int) string {
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
+
+// tokenHash is how a resume token is kept: a snapshot never holds a usable one.
+type tokenHash [sha256.Size]byte
+
+func hashToken(t string) tokenHash { return sha256.Sum256([]byte(t)) }
 
 // validName: '#' is reserved for the identity tag clients append (name#1234).
 func validName(s string) bool  { return len(s) > 0 && len(s) <= 64 && !strings.Contains(s, "#") }
@@ -367,12 +381,14 @@ func (m *Manager) Join(code, password, name, idKey, ver string, build int, out O
 }
 
 func (m *Manager) seatLocked(r *Room, name, idKey, ver string, build int, out Outbox) Seat {
-	p := &Peer{ID: randToken(9), Name: name, IDKey: idKey, Ver: ver, Build: build, resume: randToken(24), out: out}
+	token := randToken(24)
+	p := &Peer{ID: randToken(9), Name: name, IDKey: idKey, Ver: ver, Build: build, resume: hashToken(token), out: out}
 	others := m.othersLocked(r, "")
+	r.restored = false
 	r.peers[p.ID] = p
 	r.order = append(r.order, p.ID)
 	q, paused, waiting := r.topology()
-	return Seat{Room: r.Code, PeerID: p.ID, Resume: p.resume, Others: others, RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, E2EE: r.e2ee}
+	return Seat{Room: r.Code, PeerID: p.ID, Resume: token, Others: others, RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, E2EE: r.e2ee}
 }
 
 // topology is the relay queue members are told: the queue itself, or, while
@@ -412,13 +428,17 @@ func (m *Manager) Resume(code, peerID, token string, out Outbox) (Seat, error) {
 		return Seat{}, ErrResumeFailed
 	}
 	p := r.peers[peerID]
-	if p == nil || subtle.ConstantTimeCompare([]byte(token), []byte(p.resume)) != 1 {
+	if h := hashToken(token); p == nil || subtle.ConstantTimeCompare(h[:], p.resume[:]) != 1 {
 		return Seat{}, ErrResumeFailed
 	}
+	if old, ok := p.out.(replaceable); ok && p.out != out {
+		old.CloseWhenSent() // what was queued before now still goes out
+	}
 	p.out, p.lostAt = out, time.Time{}
+	r.restored = false
 	m.electLocked(r, p.ID) // it may be the only one online
 	q, paused, waiting := r.topology()
-	return Seat{Room: code, PeerID: p.ID, Resume: p.resume, Others: m.othersLocked(r, p.ID), RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, Owner: r.owner, Plan: r.planFor(p), E2EE: r.e2ee}, nil
+	return Seat{Room: code, PeerID: p.ID, Resume: token, Others: m.othersLocked(r, p.ID), RelayQueue: q, RelayPaused: paused, RelayWaiting: waiting, Owner: r.owner, Plan: r.planFor(p), E2EE: r.e2ee}, nil
 }
 
 // Volunteer adds peerID to the end of its room's relay queue (on) or removes
@@ -593,13 +613,10 @@ func (m *Manager) Sweep() {
 	defer m.mu.Unlock()
 	cutoff := m.now().Add(-m.ResumeGrace)
 	emptyCutoff := m.now().Add(-m.EmptyGrace)
-	for code, r := range m.rooms {
+	for _, r := range m.rooms {
 		if len(r.peers) == 0 {
 			if !r.emptyAt.After(emptyCutoff) {
-				delete(m.rooms, code)
-				if r.channel != "" && m.channels[r.channel] == code {
-					delete(m.channels, r.channel)
-				}
+				m.dropRoomLocked(r)
 			}
 			continue
 		}

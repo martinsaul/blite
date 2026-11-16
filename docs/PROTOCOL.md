@@ -43,7 +43,9 @@ Reply: `welcome` or `error {code}`. `welcome` carries:
 A dropped connection keeps its slot for 60 s; `resume` reattaches it. After that
 the peer is removed and others get `peer-left`. A room that has become empty
 survives 5 minutes, so people who all dropped out can come back on the same
-link; then it is deleted. There is no way to list rooms.
+link; then it is deleted. There is no way to list rooms. A server run with
+`BLITE_STATE_FILE` keeps its rooms across a restart: members who were
+connected then have 60 s from the restart to `resume`.
 
 ## In a room
 

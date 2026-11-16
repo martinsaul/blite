@@ -66,16 +66,41 @@ func main() {
 		DiscordPublicKey:    os.Getenv("BLITE_DISCORD_PUBLIC_KEY"),
 		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
 		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
-		Log:                 log,
+		// BLITE_STATE_FILE keeps rooms across restarts: members resume
+		// instead of rejoining. It holds password and token hashes; keep
+		// it on a private volume.
+		StateFile: os.Getenv("BLITE_STATE_FILE"),
+		Log:       log,
 	})
+	if err := s.LoadState(); err != nil {
+		log.Error("load state; starting empty", "err", err)
+	}
+	// SIGHUP reloads the state file (rooms this server has served since
+	// are kept).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			if err := s.LoadState(); err != nil {
+				log.Error("reload state", "err", err)
+			}
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go s.Run(ctx)
 
 	hs := &http.Server{Addr: addr, Handler: s, ReadHeaderTimeout: 10 * time.Second}
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
+		// Save before the connections close, so everyone restores as
+		// connected and gets a full resume window from the restart.
+		if err := s.SaveState(); err != nil {
+			log.Error("save state", "err", err)
+		}
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		hs.Shutdown(sctx)
@@ -85,6 +110,7 @@ func main() {
 		log.Error("serve", "err", err)
 		os.Exit(1)
 	}
+	<-stopped
 }
 
 func env(k, def string) string {

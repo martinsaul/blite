@@ -72,7 +72,12 @@ type Config struct {
 	// builds (molt). Empty UpdateURL = no download page.
 	UpdateURL     string
 	UpdateChannel string
-	Log           *slog.Logger
+	// StateFile keeps the rooms across restarts (LoadState, SaveState).
+	// Run saves it every StateEvery (default 30 s). Empty = rooms live in
+	// memory only.
+	StateFile  string
+	StateEvery time.Duration
+	Log        *slog.Logger
 }
 
 // Server serves Blite signaling.
@@ -88,6 +93,7 @@ type Server struct {
 	releases      *releases // the download page (nil = off)
 	discordPubKey ed25519.PublicKey
 	started       time.Time
+	saveMu        sync.Mutex // one SaveState at a time
 }
 
 // New returns a Server. Call Run to start background sweeps.
@@ -97,6 +103,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.ICE == nil {
 		cfg.ICE = turn.DefaultSTUN
+	}
+	if cfg.StateEvery == 0 {
+		cfg.StateEvery = 30 * time.Second
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
@@ -170,10 +179,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// Run sweeps expired resume slots and rate-limit state until ctx ends.
+// Run sweeps expired resume slots and rate-limit state, and saves the
+// StateFile, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	if s.cfg.StateFile != "" {
+		go func() {
+			st := time.NewTicker(s.cfg.StateEvery)
+			defer st.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-st.C:
+					if err := s.SaveState(); err != nil {
+						s.cfg.Log.Error("save state", "err", err)
+					}
+				}
+			}
+		}()
+	}
 	if s.cfg.ReportDir != "" {
 		go func() {
 			for {
@@ -250,6 +276,18 @@ func (c *conn) CloseSoon() {
 	time.AfterFunc(500*time.Millisecond, func() { c.close(websocket.StatusPolicyViolation, "kicked") })
 }
 
+// CloseWhenSent closes the connection once the messages already queued are
+// written: a resume moved the peer to another connection, and the client
+// reads this one to its end before switching. A full queue is a slow
+// consumer, closed at once as in Send.
+func (c *conn) CloseWhenSent() {
+	select {
+	case c.out <- nil: // writeLoop closes when it gets here
+	default:
+		c.close(websocket.StatusGoingAway, "replaced")
+	}
+}
+
 func (c *conn) close(code websocket.StatusCode, reason string) {
 	c.once.Do(func() {
 		close(c.closed)
@@ -265,6 +303,10 @@ func (c *conn) writeLoop(ctx context.Context) {
 		case <-c.closed:
 			return
 		case b := <-c.out:
+			if b == nil {
+				c.close(websocket.StatusNormalClosure, "replaced")
+				return
+			}
 			wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 			err := c.ws.Write(wctx, websocket.MessageText, b)
 			cancel()
