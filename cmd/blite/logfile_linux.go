@@ -21,5 +21,8 @@ func keepStderr() bool {
 	return err == nil
 }
 
-// redirectStderr makes f fd 2, which C code (GStreamer) writes to as well.
+// redirectStderr makes f fd 2 directly (without a pipe goroutine, which would
+// lose fatal Go panic tracebacks when the process dies). slog writes go
+// through redact.Writer first, C/GStreamer stderr has no room secrets, and our
+// own code never panics with links or passwords.
 func redirectStderr(f *os.File) error { return unix.Dup3(int(f.Fd()), 2, 0) }

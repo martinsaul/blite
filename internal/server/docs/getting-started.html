@@ -1,8 +1,8 @@
 {{define "title"}}Getting started{{end}}
-{{define "description"}}Install Bellion Share on Windows or Linux, go live with one click, send the share link to friends, and watch someone else's screen.{{end}}
+{{define "description"}}Install Bellion Share on Windows or Linux, pick a screen or window and go live, send the share link to friends, and watch someone else's screen.{{end}}
 {{define "body"}}
 <h1>Getting started</h1>
-<p class="lead">No account needed: install the app, press Go live, and send the link.</p>
+<p class="lead">No account needed: install the app, pick what to share, press Go live, and send the link.</p>
 
 <h2>1. Install</h2>
 <ul>
@@ -10,10 +10,10 @@
   <li><strong>Linux (Ubuntu 24.04, Mint 22 or newer, 64-bit):</strong> <a href="/">download the .deb</a>, open a terminal in its folder and run <code>sudo apt install ./blite_*.deb</code>, then start Bellion Share from your app menu. Bellion Share needs an X11 session; Wayland sessions aren't supported yet.</li>
 </ul>
 <p>Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
-<p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Help &gt; Start Bellion Share when I sign in</em> starts it in the tray at sign-in.</p>
+<p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Start Bellion Share when I sign in</em>, in the gear (Settings) menu at the top right, starts it in the tray at sign-in.</p>
 
 <h2>2. Pick your name</h2>
-<p>The top of the window shows who you are, for example <strong>Alice#4417</strong>. Press <em>Change name...</em> to set the name others see. The 4-digit tag after it comes from your identity key, a key the app creates on your computer, so two people can't pass as each other by picking the same name.</p>
+<p>The top of the window shows who you are, for example <strong>You are Alice#4417</strong>. Press <em>Change name...</em> to set the name others see. The 4-digit tag after it comes from your identity key, a key the app creates on your computer, so two people can't pass as each other by picking the same name.</p>
 
 <figure>
   <a href="/static/shots/lobby.webp"><img src="/static/shots/lobby.webp" width="1000" height="360" alt="The Bellion Share window before a call: Share your screen with a Go live button and Options (Require a password, Encrypt end to end), and Watch someone with a box to paste a share link" loading="lazy"></a>
@@ -21,33 +21,39 @@
 </figure>
 
 <h2>3. Share your screen</h2>
+<p>The <em>Share your screen</em> card on the home screen sets up what you share:</p>
 <ol>
-  <li>Press <strong>Go live</strong>. Bellion Share starts a session, shares your main monitor (the one with the taskbar or panel) and copies the share link to your clipboard.</li>
+  <li>Pick <strong>Entire screen</strong> (your main monitor, the one with the taskbar or panel) or <strong>A window</strong>, which lists your monitors and windows, with each app's icon.</li>
+  <li>Pick a quality, for example <em>1080p, 60 fps</em> (see <a href="/docs/features#quality">Quality presets</a>).</li>
+  <li>Press <strong>Go live and copy link</strong>. Bellion Share starts a session, shares what you picked and copies the share link to your clipboard.</li>
   <li>Paste the link to your friends, for example in a Discord chat.</li>
 </ol>
-<p>To share something else, press <em>Share a window instead...</em> and pick a monitor or a window. During the call the <em>Share</em> menu also offers a single monitor, a window, or all your screens combined, plus the resolution, frame rate and audio (see <a href="/docs/features">Features</a>).</p>
-<p>Under <em>Options</em>:</p>
+<p><strong>Sound.</strong> Picking a window shares that app's sound too, and the card shows <em>With sound</em>. Picking the entire screen doesn't turn sound on: the card shows <em>No audio</em>. Click it to open <em>Share options</em> and pick the sound you share (see <a href="/docs/features#sound">Sound</a>). If Bellion Share can't tell which app a window belongs to, it shares the window without sound and says so.</p>
+<p><em>Share options</em> also has an <em>Advanced...</em> section with more sources (all screens combined, a test pattern, or nothing, to only watch), a custom frame rate, and the session's security:</p>
 <ul>
   <li><strong>Require a password</strong>: the session gets a password you choose. Without one, the session is open to anyone who has the link. Either way the link carries everything needed to join, so only send it to people you want in.</li>
   <li><strong>Encrypt end to end</strong> (on by default): each sender encrypts its video and audio with keys that only people in the room get, so a TURN server passing them on can't read them. Everyone in the room needs build 72 or newer.</li>
 </ul>
+<p>A password or turned-off encryption shows as a small tag on the card, so you see it before you go live. Both apply when you start a new session.</p>
 <p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>. Until Discord approves the Bellion app, this works only for a few people added as testers.</p>
 
 <h2>4. Watch someone</h2>
 <p>Click the share link someone sent you. Your browser opens a page that hands the link to Bellion Share (on its first use it may ask whether to open the app). If nothing opens, make sure Bellion Share is installed and running, then click the link again.</p>
-<p>You can also paste the link into <em>Watch someone</em> and press <strong>Watch</strong>. When you switch to Bellion Share with a share link on your clipboard, it offers a one-click button to watch that session.</p>
-<p>You join watching only. To share your own screen too, press <strong>Go live</strong> in the call: everyone in a room can share at the same time.</p>
+<p>You can also paste the link, or just the room code (like <code>K7PQ-2M4X</code>), into <em>Watch someone</em> and press <strong>Watch</strong>. If the session has a password, the app asks for it. When you switch to Bellion Share with a share link on your clipboard, it offers a one-click button to watch that session.</p>
+<p><strong>Recent rooms</strong> on the home screen lists the last 5 sessions you started or joined: click one to rejoin it. Sessions that have ended show <em>Ended</em> and fade away; the x removes one from the list.</p>
+<p>You join watching only. To share your own screen too, press <strong>Go live: main monitor</strong> in the call: everyone in a room can share at the same time.</p>
 
 <h2>5. In the call</h2>
 <figure>
   <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1280" height="600" alt="A call with three other people: Bob and Carol connected with Fair connections, Dave unable to connect, with a hint that his network may block UDP" loading="lazy"></a>
-  <figcaption>The call window. Each person's row shows their status, what you send them, the connection quality, and their video and volume settings.</figcaption>
+  <figcaption>The call window: the room, your share controls, and everyone in the call.</figcaption>
 </figure>
 <ul>
-  <li><strong>Go live / Stop sharing</strong> starts or stops your share; <em>Share a window...</em> (or <em>Share something else...</em>) picks what you share.</li>
-  <li><strong>Copy share link</strong> copies the link again to invite more people.</li>
-  <li>The <strong>safety code</strong> is the same for everyone when nobody is intercepting the connection. Read it aloud once to check (<em>Room &gt; Safety code...</em>).</li>
-  <li>Other people's screens open in their own windows, or all together in one window: see <a href="/docs/features#watching">Watching</a>.</li>
-  <li><strong>Leave</strong> ends your part in the call. You can rejoin with the link while the session is open; a session ends shortly after the last person leaves.</li>
+  <li>The top shows the room code and whether the call is <strong>end-to-end encrypted</strong>. <strong>Copy link</strong> copies the link again to invite more people; <strong>Leave</strong> ends your part in the call.</li>
+  <li><strong>Go live: main monitor / Stop sharing</strong> starts or stops your share; <em>Share a window...</em> (or <em>Share something else...</em>) picks what you share, and <em>Share options...</em> changes the quality and sound.</li>
+  <li><strong>People</strong> lists you and everyone else, with their connection and the quality you get from them. Click someone to open their panel: their volume (up to 200%), mute, their video quality and connection details. The eye next to each person who shares starts or stops watching them.</li>
+  <li>The <strong>safety code</strong> is the same for everyone when nobody is intercepting the connection. Click the <em>End-to-end encrypted</em> badge to see it, and read it aloud once to check.</li>
+  <li>The screens you watch open in a video window: see <a href="/docs/features#watching">Watching</a>.</li>
 </ul>
+<p>You can rejoin with the link while the session is open; a session ends shortly after the last person leaves.</p>
 {{end}}

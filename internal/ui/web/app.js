@@ -98,7 +98,10 @@ function render(st) {
   renderRelay(s);
   if (document.activeElement !== $("resolution")) $("resolution").value = s.resolution || "720p";
   if (document.activeElement !== $("mode")) $("mode").value = s.mode || "desktop";
-  renderLayout(st.layout || s.layout, s);
+  $("autoWatch").checked = s.autoWatch !== false;
+  const sharingSelf = !!s.source && s.source !== "none";
+  $("preview").checked = s.selfEye === "open";
+  $("preview").disabled = !sharingSelf;
   const tb = $("members").querySelector("tbody");
   tb.replaceChildren();
   const ms = s.members || [];
@@ -146,16 +149,6 @@ function render(st) {
         r.className = "muted small";
         r.textContent = "you get " + (m.recv === 2160 ? "4K" : m.recv + "p");
         td.append(r);
-      }
-      if (i === 0 && m.windowClosed) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "small";
-        b.textContent = "Show their window";
-        b.onclick = async () => {
-          try { render((await post("/api/window", { id: m.id })).state); } catch (e) { showError(e.message); }
-        };
-        td.append(document.createElement("br"), b);
       }
       if (i === 0 && m.notice) {
         const n = document.createElement("div");
@@ -280,17 +273,40 @@ function renderRelay(s) {
   $("relayRefused").hidden = !s.relayRefused;
 }
 
-// peerControls returns the cells for our viewer settings of one peer: the best
-// video quality we ask them for, and their playback volume.
+// peerControls returns the cells for our viewer settings of one peer: watching
+// eye toggle + best video quality (Best / Low), and playback volume / mute.
 function peerControls(m) {
   const frag = document.createDocumentFragment();
+  const curQuality = m.quality === "low" ? "low" : "auto";
   const set = (patch) =>
-    post("/api/peer", { id: m.id, quality: m.quality, volume: m.volume, muted: !!m.muted, ...patch }).catch(showError);
+    post("/api/peer", { id: m.id, quality: curQuality, volume: m.volume, muted: !!m.muted, ...patch })
+      .then((r) => render(r.state))
+      .catch(showError);
+
+  const eyeBtn = document.createElement("button");
+  eyeBtn.type = "button";
+  eyeBtn.className = "small";
+  eyeBtn.disabled = !m.sharing;
+  eyeBtn.setAttribute("aria-pressed", m.watching ? "true" : "false");
+  eyeBtn.textContent = !m.sharing ? "Not sharing" : m.watching ? "Stop watching" : "Watch";
+  eyeBtn.title = !m.sharing ? "Not sharing video" : m.watching ? "Stop watching their video" : "Watch their video";
+  eyeBtn.onclick = async () => {
+    busy(eyeBtn, true);
+    try { render((await post("/api/watch", { id: m.id })).state); }
+    catch (e) { showError(e.message); }
+    finally { busy(eyeBtn, false); }
+  };
+
   const q = document.createElement("select");
-  for (const [v, label] of [["auto", "Best"], ["low", "Low"], ["off", "Off (audio only)"]]) {
-    q.append(new Option(label, v, false, v === m.quality));
+  for (const [v, label] of [["auto", "Best"], ["low", "Low"]]) {
+    q.append(new Option(label, v, false, v === curQuality));
   }
   q.onchange = () => set({ quality: q.value });
+
+  const videoBox = document.createElement("div");
+  videoBox.className = "btns";
+  videoBox.append(eyeBtn, q);
+
   const vol = document.createElement("input");
   vol.type = "range";
   vol.min = "0";
@@ -307,7 +323,7 @@ function peerControls(m) {
   const volBox = document.createElement("div");
   volBox.className = "volume";
   volBox.append(vol, mute);
-  for (const el of [q, volBox]) {
+  for (const el of [videoBox, volBox]) {
     const td = document.createElement("td");
     td.append(el);
     frag.append(td);
@@ -459,31 +475,6 @@ function renderLogs(l) {
   $("logsReport").textContent = l.report || "";
 }
 
-function renderLayout(l, s) {
-  $("gridClosed").hidden = !(s && (s.gridClosed || s.previewClosed || (s.members || []).some((m) => m.windowClosed)));
-  l = l || { mode: "windows" };
-  if (document.activeElement !== $("preview")) $("preview").value = l.preview || "";
-  for (const el of document.querySelectorAll("input[name=layout]")) el.checked = el.value === l.mode;
-  const custom = l.rows > 0 || l.cols > 0;
-  $("gridOpts").hidden = l.mode !== "grid";
-  const editing = ["gridSize", "gridRows", "gridCols"].some((id) => document.activeElement === $(id));
-  if (editing) return;
-  $("gridSize").value = custom ? "custom" : "auto";
-  $("gridCustom").hidden = !custom;
-  $("gridRows").value = l.rows || "";
-  $("gridCols").value = l.cols || "";
-}
-
-async function setLayout() {
-  const mode = document.querySelector("input[name=layout]:checked")?.value || "windows";
-  const custom = $("gridSize").value === "custom";
-  $("gridCustom").hidden = !custom;
-  const n = (id) => (custom ? Math.max(0, Math.min(8, parseInt($(id).value, 10) || 0)) : 0);
-  const preview = $("preview").value;
-  try { render((await post("/api/layout", { mode, rows: n("gridRows"), cols: n("gridCols"), preview })).state); }
-  catch (e) { showError(e.message); }
-}
-
 function wire() {
   $("createBtn").onclick = async () => {
     showError("");
@@ -519,17 +510,14 @@ function wire() {
   };
   for (const el of document.querySelectorAll("input[name=src]")) el.onchange = () => setSource(el.value);
   $("refreshSources").onclick = loadSources;
-  for (const el of document.querySelectorAll("input[name=layout]")) el.onchange = setLayout;
-  $("gridSize").onchange = () => {
-    if ($("gridSize").value === "custom") {
-      if (!$("gridRows").value) $("gridRows").value = 2;
-      if (!$("gridCols").value) $("gridCols").value = 2;
-    }
-    setLayout();
+  $("autoWatch").onchange = async () => {
+    try { render((await post("/api/autowatch", { on: $("autoWatch").checked })).state); }
+    catch (e) { showError(e.message); refresh(); }
   };
-  $("preview").onchange = setLayout;
-  $("gridRows").onchange = setLayout;
-  $("gridCols").onchange = setLayout;
+  $("preview").onchange = async () => {
+    try { render((await post("/api/watch", { id: "self" })).state); }
+    catch (e) { showError(e.message); refresh(); }
+  };
   $("resolution").onchange = async () => {
     try { render((await post("/api/resolution", { res: $("resolution").value })).state); } catch (e) { showError(e.message); }
   };
@@ -572,9 +560,6 @@ function wire() {
     } finally {
       $("fbSend").disabled = false;
     }
-  };
-  $("showGrid").onclick = async () => {
-    try { render((await post("/api/window", { id: "*" })).state); } catch (e) { showError(e.message); }
   };
   $("logsOpen").onclick = async () => {
     try { await post("/api/logs/open"); } catch (e) { showError(e.message); }

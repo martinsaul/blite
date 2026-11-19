@@ -1,12 +1,18 @@
 package media
 
 // Window is a native window a grid draws into. The session
-// owns it, so it outlives grid restarts: a layout switch rebuilds the
-// pipelines and keeps the windows.
+// owns it, so it outlives grid restarts: tile changes rebuild the
+// pipelines and keep the windows.
 type Window interface {
 	Handle() uintptr
-	// Closed is closed when the user closes the window (it hides at once).
+	// Closed is closed when the user closes a non-intercepted window (it hides at once).
 	Closed() <-chan struct{}
+	// SetInterceptClose asks the window not to hide or close when the user
+	// clicks its close button, signaling CloseRequested instead.
+	SetInterceptClose(on bool)
+	// CloseRequested receives a value when the user tries to close an
+	// intercepted window.
+	CloseRequested() <-chan struct{}
 	SetTitle(title string)
 	// PointerInside reports whether the pointer is over the window.
 	PointerInside() bool
@@ -21,4 +27,4 @@ type Window interface {
 func OpenVideoWindow(title string, w, h int) (Window, error) { return openVideoWindow(title, w, h) }
 
 // VideoWindowSinks are the sinks that can draw into a Window, best first.
-func VideoWindowSinks() []string { return previewSinks }
+func VideoWindowSinks() []string { return videoWindowSinks }

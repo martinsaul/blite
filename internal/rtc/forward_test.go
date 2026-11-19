@@ -185,11 +185,24 @@ func TestLayerPolicyMid(t *testing.T) {
 
 func TestRendFor(t *testing.T) {
 	for _, c := range []struct{ top, max, want int }{
-		{2160, 2159, 1080}, {2160, 1080, 1080}, {2160, 1079, 720}, {2160, 700, 0},
-		{1080, 1079, 720}, {1080, 2000, 720}, {720, 719, 0},
+		{2160, 2159, 1080}, {2160, 1080, 1080}, {2160, 1079, 720},
+		{2160, 700, 540}, {2160, 539, 0},
+		{1080, 1079, 720}, {1080, 2000, 720},
+		{720, 719, 540}, {720, 539, 0},
 	} {
 		if got := rendFor(c.top, c.max); got != c.want {
 			t.Errorf("rendFor(%d, %d) = %d, want %d", c.top, c.max, got, c.want)
+		}
+	}
+	for _, c := range []struct{ top, max, floor, want int }{
+		{2160, 700, 540, 0},
+		{2160, 1000, 540, 720},
+		{2160, 2000, 720, 1080},
+		{1080, 1000, 720, 0},
+		{720, 719, 540, 0},
+	} {
+		if got := rendForFloor(c.top, c.max, c.floor); got != c.want {
+			t.Errorf("rendForFloor(%d, %d, %d) = %d, want %d", c.top, c.max, c.floor, got, c.want)
 		}
 	}
 	if w, ok := wireLevel(wireOff); !ok || w != levelOff {

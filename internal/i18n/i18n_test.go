@@ -135,7 +135,7 @@ func used(t *testing.T) map[string]bool {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && (d.Name() == "third_party" || strings.HasPrefix(d.Name(), ".")) {
+		if p != root && d.IsDir() && (d.Name() == "third_party" || strings.HasPrefix(d.Name(), ".")) {
 			return filepath.SkipDir
 		}
 		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
@@ -159,6 +159,9 @@ func used(t *testing.T) map[string]bool {
 			}
 			lit, ok := call.Args[0].(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
+				if base := filepath.Base(p); base == "font.go" || base == "lang.go" {
+					return true // dynamic lookups over Keys() and fyneWords
+				}
 				t.Errorf("%s: i18n.%s needs a string literal", p, sel.Sel.Name)
 				return true
 			}
@@ -266,6 +269,10 @@ func TestMsg(t *testing.T) {
 		"Bob removed you from the room.":                                       L("{{.Name}} removed you from the room.", D{"Name": "Bob"}),
 		"Bob removed you from the room and banned you from rejoining.":         L("{{.Name}} removed you from the room and banned you from rejoining.", D{"Name": "Bob"}),
 		"Your computer can't encode 4K at 60 fps (41 fps); sharing at 30 fps.": L("Your computer can't encode {{.Resolution}} at 60 fps ({{.FPS}} fps); sharing at 30 fps.", D{"Resolution": "4K", "FPS": "41"}),
+		"Your computer can't encode 4K at 45 fps (31 fps); sharing at 30 fps.": L("Your computer can't encode {{.Resolution}} at {{.Target}} fps ({{.FPS}} fps); sharing at {{.Next}} fps.", D{"Resolution": "4K", "Target": "45", "FPS": "31", "Next": "30"}),
+		"enter an upload limit between 0.5 and 1000 Mbit/s":                    L("enter an upload limit between 0.5 and 1000 Mbit/s"),
+		"enter a share link or room code":                                      L("enter a share link or room code"),
+		"Bob started sharing":                                                  L("{{.Name}} started sharing", D{"Name": "Bob"}),
 		"dial wss://x: connection refused":                                     "dial wss://x: connection refused",
 		"":                                                                     "",
 	} {
@@ -315,5 +322,33 @@ func TestPreference(t *testing.T) {
 	}
 	if err := SetPreference(""); err != nil || Preference() != "" || Current() != System() {
 		t.Errorf("automatic: %v, preference %q, current %s", err, Preference(), Current())
+	}
+}
+
+// TestDisplayLanguagePriority covers Windows's display language
+// (e.g. pt-BR) beats an earlier keyboard/IME entry in the preferred list
+// (e.g. ja-JP), while an unsupported display language falls back to the list.
+func TestDisplayLanguagePriority(t *testing.T) {
+	got := mergeLocales("pt-BR", []string{"ja-JP", "pt-BR"})
+	if !slices.Equal(got, []string{"pt-BR", "ja-JP"}) {
+		t.Fatalf("mergeLocales = %v, want [pt-BR ja-JP]", got)
+	}
+	if lang := match(got, false); lang != "pt-BR" {
+		t.Fatalf("match(%v) = %q, want pt-BR", got, lang)
+	}
+
+	// Unsupported display language falls back to preferred list.
+	fallback := mergeLocales("sv-SE", []string{"sv-SE", "pt-BR"})
+	if lang := match(fallback, false); lang != "pt-BR" {
+		t.Fatalf("match(%v) = %q, want pt-BR", fallback, lang)
+	}
+
+	// Missing display language uses preferred list as-is, deduplicated case-insensitively.
+	empty := mergeLocales("", []string{"ja-JP", "ja-jp", "pt-BR"})
+	if !slices.Equal(empty, []string{"ja-JP", "pt-BR"}) {
+		t.Fatalf("mergeLocales empty primary = %v, want [ja-JP pt-BR]", empty)
+	}
+	if lang := match(empty, false); lang != "ja" {
+		t.Fatalf("match(%v) = %q, want ja", empty, lang)
 	}
 }

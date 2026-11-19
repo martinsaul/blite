@@ -53,7 +53,7 @@ func StartTranscoder(heights []int, encoderForce string, onAU func(layer int, au
 }
 
 func startTranscoder(ids []int, enc encoder, onAU func(layer int, au AccessUnit)) (*Transcoder, error) {
-	all := LayersFor(Res2160, ModeDesktop, []int{1080, 720})
+	all := LayersFor(Res2160, ModeDesktop, []int{1080, 720, 540})
 	branches := []string{"appsrc name=in is-live=true format=time do-timestamp=true " +
 		"caps=video/x-h264,stream-format=byte-stream,alignment=au ! " +
 		"h264parse ! decodebin ! videoconvert ! videorate ! video/x-raw,format=" + enc.format() + ",framerate=30/1 ! tee name=t"}

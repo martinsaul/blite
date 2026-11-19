@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,12 +43,19 @@ type signalMsg struct {
 	// Origin, with MaxLayer, sent to the relay: the cap is for this
 	// member's relayed video, not the relay's own.
 	Origin string `json:"origin,omitempty"`
+	// Watchers, with MaxLayer from a relay: sorted peer IDs of members
+	// currently watching the stream through that relay (nil = not a relay
+	// demand, or an older relay).
+	Watchers *[]string `json:"watchers,omitempty"`
 	// Slots, from a relay: the slot key (origin peer ID, or with "/low"
 	// its screen-low) in each slot ("" = free).
 	Slots []string `json:"slots,omitempty"`
 	// Bye: the sender closes our connection, which the plan no longer
 	// wants (older clients ignore it and notice the close).
 	Bye bool `json:"bye,omitempty"`
+	// Resumed: the sender's signaling connection just resumed, so anything
+	// sent to it while offline may have been dropped by the server.
+	Resumed bool `json:"resumed,omitempty"`
 	// Renditions (resize.go); older clients ignore them.
 	Resize      *resizeMsg      `json:"resize,omitempty"`
 	ResizeReply *resizeReplyMsg `json:"resizeReply,omitempty"`
@@ -65,6 +74,15 @@ type Options struct {
 	// reconnects ("reconnecting"), can't be reached for now ("unreachable",
 	// we try again) or goes away ("gone").
 	OnPeer func(peerID, name, state string)
+	// OnJoined is told when a new member joins the room after us (never for
+	// members already in Welcome.Peers).
+	OnJoined func(peerID, name string)
+	// OnViewerWatching is told when a member explicitly starts watching our
+	// shared stream (directly or via a relay that reports watchers).
+	OnViewerWatching func(peerID string)
+	// DefaultOff starts our quality wish toward new peers at "none" until
+	// SetMaxLayer says otherwise (e.g. AutoWatch is off).
+	DefaultOff bool
 	// OnAudio receives each remote peer's Opus frames.
 	OnAudio func(peerID string, frame []byte)
 	// OnKeyframe asks the local encoder of a layer for a keyframe (a peer
@@ -76,6 +94,8 @@ type Options struct {
 	OnLayer func(peerID string, layer int)
 	// OnLowBitrate asks the LOW encoder for a new bitrate (kbit/s).
 	OnLowBitrate func(kbps int)
+	// OnBitrate asks an encoded layer's encoder for a new bitrate (kbit/s).
+	OnBitrate func(layer, kbps int)
 	// Identity signs our DTLS fingerprints; peers' signatures are checked
 	// against the idKey the server announced for them. Required.
 	Identity identity.Key
@@ -143,27 +163,35 @@ type Mesh struct {
 	vers   map[string]string // client build labels
 	done   chan struct{}
 
-	members  map[string]bool // other members now in the room
-	redials  map[string]int  // connection attempts given up per peer, until one connects
-	builds   map[string]int  // their client builds
-	joinedAt map[string]time.Time
-	plan     proto.Plan      // the relay plan (relay.go)
-	topoAt   time.Time       // when the plan last changed relays or homes
-	caps     map[string]int  // our quality wish per member (SetMaxLayer)
-	relaying bool            // we have relay state: as relay, or since
-	served   map[string]bool // former children we still serve (relay.go)
-	origins  map[string]*origin
-	provider map[string]string // origin -> peer we take its media from (cache)
-	demand   map[demandKey]int // what we asked upstream as relay (wire values)
-	owner    string            // the room's owner
+	members       map[string]bool // other members now in the room
+	redials       map[string]int  // connection attempts given up per peer, until one connects
+	builds        map[string]int  // their client builds
+	joinedAt      map[string]time.Time
+	plan          proto.Plan           // the relay plan (relay.go)
+	topoAt        time.Time            // when the plan last changed relays or homes
+	caps          map[string]int       // our quality wish per member (SetMaxLayer)
+	watchingPeer  map[string]bool      // peers currently watching our shared stream
+	rehomingWatch map[string]time.Time // watching peers mid plan re-home (grace against double chime)
+	rehomeGrace   time.Duration        // 0 = pruneAfter (overridden in unit tests)
+	defaultOff    atomic.Bool          // default ownWish to levelOff when caps unset
+	relaying      bool                 // we have relay state: as relay, or since
+	served        map[string]bool      // former children we still serve (relay.go)
+	origins       map[string]*origin
+	provider      map[string]string       // origin -> peer we take its media from (cache)
+	demand        map[demandKey]demandVal // what we asked upstream as relay (wire + watchers)
+	owner         string                  // the room's owner
 
-	pacer   *pacer // nil = forward unpaced (pacer.go)
-	started time.Time
-	lowKbps atomic.Int32
-	// HIGH's frame rate steps: allowed (desktop), current cap.
-	fpsSteps atomic.Bool
-	highFPS  atomic.Int32
-	rend     renditions
+	pacer           atomic.Pointer[pacer] // relay forward pacer when upload limit > 0 (pacer.go)
+	uploadKbps      atomic.Int32          // manual upload limit in kbit/s (0 = Automatic)
+	rebalMu         sync.Mutex            // serializes rebalanceUpload and SetShareConfig
+	rebalPending    atomic.Bool           // coalesces async triggerRebalance goroutines
+	lowBudgetCap    atomic.Int32          // manual upload cap on LOW encoder bitrate (0 = none)
+	layerTargetKbps [numLayers]atomic.Int32
+	started         time.Time
+	lowKbps         atomic.Int32
+	// HIGH's current frame rate cap for congested single viewer (0 = full).
+	highFPS atomic.Int32
+	rend    renditions
 	// statsMu keeps GetStats and Close of a PeerConnection apart: Pion
 	// races between the two.
 	statsMu sync.RWMutex
@@ -172,11 +200,62 @@ type Mesh struct {
 	crypt   *crypt    // nil = the room's media isn't encrypted end to end
 }
 
-// closePC closes a PeerConnection, never during Stats.
-func (m *Mesh) closePC(pc *webrtc.PeerConnection) {
+// closePC marks r closing and closes its PeerConnection, never during Stats.
+func (m *Mesh) closePC(r *remote) {
+	if r == nil || !r.closing.CompareAndSwap(false, true) {
+		return
+	}
+	r.connected.Store(false)
 	m.statsMu.Lock()
 	defer m.statsMu.Unlock()
-	pc.Close()
+	r.pc.Close()
+}
+
+// iceStats reads transport byte counts, the selected candidate pair, and RTT
+// directly from r.ice without calling PeerConnection.GetStats(), avoiding
+// Pion's data race between PeerConnection.GetStats() and async DTLS teardown
+// (startTransports -> PeerConnection.Close).
+func (m *Mesh) iceStats(r *remote) (*webrtc.ICECandidatePair, webrtc.ICECandidatePairStats, bool, webrtc.TransportStats, bool) {
+	if r == nil || r.ice == nil || r.closing.Load() || !r.connected.Load() {
+		return nil, webrtc.ICECandidatePairStats{}, false, webrtc.TransportStats{}, false
+	}
+	m.statsMu.RLock()
+	defer m.statsMu.RUnlock()
+	if r.closing.Load() || !r.connected.Load() {
+		return nil, webrtc.ICECandidatePairStats{}, false, webrtc.TransportStats{}, false
+	}
+	switch r.ice.State() {
+	case webrtc.ICETransportStateConnected, webrtc.ICETransportStateCompleted:
+	default:
+		return nil, webrtc.ICECandidatePairStats{}, false, webrtc.TransportStats{}, false
+	}
+	pair, err := r.ice.GetSelectedCandidatePair()
+	if err != nil {
+		pair = nil
+	}
+	cps, hasCPS := r.ice.GetSelectedCandidatePairStats()
+	ts := r.ice.Stats()
+	return pair, cps, hasCPS, ts, true
+}
+
+// getStats snapshots r.pc.GetStats() for diagnostic logging on an unreachable
+// connection (including state Failed) before closePC runs.
+func (m *Mesh) getStats(r *remote) (webrtc.StatsReport, bool) {
+	if r == nil || r.closing.Load() {
+		return nil, false
+	}
+	m.statsMu.RLock()
+	defer m.statsMu.RUnlock()
+	if r.closing.Load() || r.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		return nil, false
+	}
+	return r.pc.GetStats(), true
+}
+
+type pairDiag struct {
+	state                                string
+	local, remote                        string
+	reqSent, reqRecv, respSent, respRecv uint64
 }
 
 type remote struct {
@@ -184,16 +263,21 @@ type remote struct {
 	offerer    bool // we sent the first offer; we also drive ICE restarts
 	restarts   int
 	pc         *webrtc.PeerConnection
+	ice        *webrtc.ICETransport
 	fwd        *forwarder
 	policy     layerPolicy
 	pending    []webrtc.ICECandidateInit
 	haveRemote bool
 	polMu      sync.Mutex    // policy: readRTCP, watchReports and preferences
+	pairsMu    sync.Mutex    // guards lastPairs
+	lastPairs  []pairDiag    // last candidate-pair snapshot before ICE Failed wiped stats
 	level      atomic.Int32  // send level (levelHigh..levelOff); written under polMu
 	loss       atomic.Uint64 // float64 bits of the last reported fraction lost
 	fpsCap     atomic.Int32  // HIGH frame rate this peer can take (0: no cap); written under polMu
 	offHigh    atomic.Bool   // its level maps to a layer other than HIGH (setLevel)
 	lastRR     atomic.Int64  // unix nanos of the last receiver report for our video
+	connected  atomic.Bool   // PeerConnection is currently Connected
+	closing    atomic.Bool   // closePC has started; GetStats must not run
 	relayTracks
 	rendState
 }
@@ -249,8 +333,10 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 		cap: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: clockRate,
 			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
 		peers: map[string]*remote{}, names: map[string]string{}, idKeys: map[string]string{}, vers: map[string]string{}, done: make(chan struct{}),
-		members: map[string]bool{}, builds: map[string]int{}, joinedAt: map[string]time.Time{}, caps: map[string]int{}, origins: map[string]*origin{},
-		provider: map[string]string{}, served: map[string]bool{}, demand: map[demandKey]int{}, owner: sig.Welcome.Owner}
+		members: map[string]bool{}, builds: map[string]int{}, joinedAt: map[string]time.Time{}, caps: map[string]int{},
+		watchingPeer: map[string]bool{}, rehomingWatch: map[string]time.Time{}, origins: map[string]*origin{},
+		provider: map[string]string{}, served: map[string]bool{}, demand: map[demandKey]demandVal{}, owner: sig.Welcome.Owner}
+	m.defaultOff.Store(opt.DefaultOff)
 	if w := sig.Welcome; w.Plan != nil {
 		m.plan = *w.Plan
 	} else {
@@ -263,7 +349,7 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 	m.rend.init()
 	m.started = time.Now()
 	if opt.UploadKbps > 0 {
-		m.pacer = newPacer(opt.UploadKbps, m.done)
+		m.SetUploadLimit(opt.UploadKbps)
 	}
 	if opt.Identity.Private == nil {
 		m.releasePort()
@@ -335,6 +421,11 @@ func (m *Mesh) WriteVideo(layer int, au []byte, d time.Duration) {
 		return
 	}
 	pkts := m.pkz[layer].packetize(m.encVideo(au), d)
+	var wireBytes uint64
+	for _, p := range pkts {
+		wireBytes += uint64(p.MarshalSize())
+	}
+	m.rend.layerBytes[layer].Add(wireBytes)
 	m.mu.Lock()
 	fwds := make([]*forwarder, 0, 2*len(m.peers))
 	for _, r := range m.peers {
@@ -381,11 +472,15 @@ func (m *Mesh) Done() <-chan struct{} { return m.done }
 func (m *Mesh) Close() {
 	m.sig.Leave()
 	m.mu.Lock()
+	peers := make([]*remote, 0, len(m.peers))
 	for id, r := range m.peers {
-		m.closePC(r.pc)
+		peers = append(peers, r)
 		delete(m.peers, id)
 	}
 	m.mu.Unlock()
+	for _, r := range peers {
+		m.closePC(r)
+	}
 	m.releasePort()
 }
 
@@ -405,12 +500,19 @@ func (m *Mesh) loop() {
 			return
 		case ev.Joined != nil:
 			m.mu.Lock()
+			wasMember := m.members[ev.Joined.PeerID]
 			m.names[ev.Joined.PeerID] = ev.Joined.Name
 			m.idKeys[ev.Joined.PeerID] = ev.Joined.IDKey
 			m.vers[ev.Joined.PeerID] = ev.Joined.Client
 			m.builds[ev.Joined.PeerID] = ev.Joined.Build
 			m.joinedAt[ev.Joined.PeerID] = time.Now()
 			m.members[ev.Joined.PeerID] = true
+			relayedWish := -1
+			if !m.amRelayLocked() && m.homeLocked(m.me()) != "" && !m.directLocked(ev.Joined.PeerID) {
+				if w := levelWire(m.ownWishLocked(ev.Joined.PeerID)); w != wireHigh {
+					relayedWish = w
+				}
+			}
 			m.mu.Unlock()
 			if m.crypt != nil {
 				m.sendKX(ev.Joined.PeerID)
@@ -418,10 +520,22 @@ func (m *Mesh) loop() {
 			// The newcomer will offer; nothing to do until it does. As relay,
 			// give it a slot.
 			m.assignAllSlots()
+			if relayedWish >= 0 {
+				_ = m.sendCap(ev.Joined.PeerID, relayedWish, true)
+			}
+			if !wasMember && m.opt.OnJoined != nil {
+				m.opt.OnJoined(ev.Joined.PeerID, ev.Joined.Name)
+			}
 		case ev.Left != "":
 			m.mu.Lock()
+			wasRelay := m.isRelayLocked(ev.Left)
 			delete(m.members, ev.Left)
 			delete(m.caps, ev.Left)
+			delete(m.watchingPeer, ev.Left)
+			delete(m.rehomingWatch, ev.Left)
+			if wasRelay {
+				clear(m.rehomingWatch)
+			}
 			delete(m.origins, ev.Left)
 			delete(m.joinedAt, ev.Left)
 			m.mu.Unlock()
@@ -431,6 +545,8 @@ func (m *Mesh) loop() {
 			}
 			m.assignAllSlots()
 			m.pushDemand()
+			m.checkAllWatching()
+			m.triggerRebalance()
 		case ev.Topology != nil:
 			m.setPlan(planFromTopology(*ev.Topology))
 		case ev.Plan != nil:
@@ -461,25 +577,62 @@ func (m *Mesh) loop() {
 		case ev.Resumed != nil:
 			// Back on signaling: forget peers that left while we were away.
 			present := map[string]bool{}
+			var joined []proto.Peer
 			for _, p := range ev.Resumed {
 				present[p.PeerID] = true
 				m.mu.Lock()
+				if !m.members[p.PeerID] {
+					joined = append(joined, p)
+					m.joinedAt[p.PeerID] = time.Now()
+				}
 				m.names[p.PeerID], m.idKeys[p.PeerID], m.vers[p.PeerID] = p.Name, p.IDKey, p.Client
+				m.builds[p.PeerID] = p.Build
 				m.mu.Unlock()
 			}
 			m.mu.Lock()
-			m.members = present
-			var gone []string
-			for id := range m.peers {
+			for id := range m.members {
 				if !present[id] {
-					gone = append(gone, id)
+					delete(m.watchingPeer, id)
+					delete(m.rehomingWatch, id)
 				}
 			}
+			m.members = present
+			var gone []string
+			var kept []*remote
+			for id, r := range m.peers {
+				if !present[id] {
+					gone = append(gone, id)
+				} else {
+					kept = append(kept, r)
+				}
+			}
+			clear(m.demand)
 			m.mu.Unlock()
 			for _, id := range gone {
 				m.drop(id)
 			}
+			for _, r := range kept {
+				r.polMu.Lock()
+				clear(r.sentCap)
+				clear(r.sentWatchers)
+				r.polMu.Unlock()
+			}
 			m.assignAllSlots()
+			m.resendCaps()
+			m.pushDemand()
+			m.checkAllWatching()
+			for _, r := range kept {
+				m.sig.Signal(r.id, signalMsg{Resumed: true})
+				if r.connected.Load() {
+					m.resendSending(r)
+					m.resendRelaySending(r)
+				}
+			}
+			if m.opt.OnJoined != nil {
+				for _, p := range joined {
+					m.opt.OnJoined(p.PeerID, p.Name)
+				}
+			}
 		case ev.Signal != nil:
 			if err := m.handleSignal(ev.Signal); err != nil {
 				m.opt.Log.Warn("signal", "from", ev.Signal.From, "err", err)
@@ -502,7 +655,8 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 		return nil, err
 	}
 	r := &remote{id: id, pc: pc, fwd: newForwarder(track, layerHigh)}
-	r.mid = -1
+	r.mid, r.uploadMid = -1, -1
+	r.sentCap = map[string]int{}
 	m.mu.Lock()
 	r.nslots = m.slotCountLocked(id)
 	m.mu.Unlock()
@@ -510,6 +664,9 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 	if err != nil {
 		pc.Close()
 		return nil, err
+	}
+	if dtls := sender.Transport(); dtls != nil {
+		r.ice = dtls.ICETransport()
 	}
 	go m.readRTCP(r, sender)
 	go m.watchReports(r)
@@ -551,11 +708,13 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 		m.opt.Log.Info("peer state", "peer", id, "state", s.String())
 		switch s {
 		case webrtc.PeerConnectionStateConnected:
+			r.connected.Store(true)
 			m.mu.Lock()
 			r.restarts = 0
 			delete(m.redials, id)
 			m.mu.Unlock()
 			m.resendSending(r)
+			m.triggerRebalance()
 			if m.opt.OnPeer != nil {
 				m.opt.OnPeer(id, m.name(id), "connected")
 			}
@@ -565,16 +724,25 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 			m.mu.Unlock()
 			if fwd {
 				m.updateTargets()
+				m.mu.Lock()
+				m.assignLocked(r, time.Now())
+				m.mu.Unlock()
 				m.sendSlots(r)
-				m.forgetDemand(id)
 				m.pushDemand()
 			}
+			m.checkWatching(id)
 		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed:
+			r.connected.Store(false)
+			if s == webrtc.PeerConnectionStateDisconnected {
+				m.snapshotPairs(r)
+			}
 			m.forgetProviders()
 			if m.opt.OnPeer != nil {
 				m.opt.OnPeer(id, m.name(id), "reconnecting")
 			}
 			go m.watchdog(r)
+		case webrtc.PeerConnectionStateClosed:
+			r.connected.Store(false)
 		}
 	})
 	pc.OnTrack(func(t *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) {
@@ -582,12 +750,14 @@ func (m *Mesh) newPeer(id string) (*remote, error) {
 		go m.receive(r, t)
 	})
 
+	m.forgetDemand(id)
 	m.mu.Lock()
-	if old := m.peers[id]; old != nil {
-		m.closePC(old.pc)
-	}
+	old := m.peers[id]
 	m.peers[id] = r
 	m.mu.Unlock()
+	if old != nil {
+		m.closePC(old)
+	}
 	return r, nil
 }
 
@@ -608,6 +778,7 @@ func (m *Mesh) watchdog(r *remote) {
 	case webrtc.PeerConnectionStateConnected, webrtc.PeerConnectionStateClosed:
 		return
 	}
+	m.snapshotPairs(r)
 	m.mu.Lock()
 	r.restarts++
 	n, offerer := r.restarts, r.offerer
@@ -647,7 +818,7 @@ func (m *Mesh) unreachable(r *remote, offerer bool) {
 	name := m.names[r.id]
 	m.mu.Unlock()
 	m.logPairs(r)
-	m.closePC(r.pc)
+	m.closePC(r)
 	m.recyclePort()
 	wait := min(redialFirst<<n, redialMax)
 	m.opt.Log.Info("can't reach peer, trying again later", "peer", r.id, "offerer", offerer, "in", wait)
@@ -692,24 +863,60 @@ func (m *Mesh) recyclePort() {
 	}
 }
 
-// logPairs logs the ICE candidate pairs of a connection that never
-// connected: which paths were tried and whether any answered.
-func (m *Mesh) logPairs(r *remote) {
-	m.statsMu.RLock()
-	st := r.pc.GetStats()
-	m.statsMu.RUnlock()
-	n := 0
+// snapshotPairs captures up to 12 ICE candidate pairs while the ICE agent is
+// still active (Checking or Disconnected), before Pion wipes them on Failed.
+func (m *Mesh) snapshotPairs(r *remote) []pairDiag {
+	st, ok := m.getStats(r)
+	if !ok {
+		return nil
+	}
+	var pairs []pairDiag
 	for _, v := range st {
 		cp, ok := v.(webrtc.ICECandidatePairStats)
-		if !ok || n >= 12 {
+		if !ok || len(pairs) >= 12 {
 			continue
 		}
-		n++
 		l, _ := st[cp.LocalCandidateID].(webrtc.ICECandidateStats)
 		rc, _ := st[cp.RemoteCandidateID].(webrtc.ICECandidateStats)
-		m.opt.Log.Info("ice pair", "peer", r.id, "state", cp.State,
-			"local", fmt.Sprintf("%s %s:%d", l.CandidateType, l.IP, l.Port), "remote", fmt.Sprintf("%s %s:%d", rc.CandidateType, rc.IP, rc.Port),
-			"reqSent", cp.RequestsSent, "reqRecv", cp.RequestsReceived, "respSent", cp.ResponsesSent, "respRecv", cp.ResponsesReceived)
+		pairs = append(pairs, pairDiag{
+			state:    string(cp.State),
+			local:    fmt.Sprintf("%s %s:%d", l.CandidateType, l.IP, l.Port),
+			remote:   fmt.Sprintf("%s %s:%d", rc.CandidateType, rc.IP, rc.Port),
+			reqSent:  cp.RequestsSent,
+			reqRecv:  cp.RequestsReceived,
+			respSent: cp.ResponsesSent,
+			respRecv: cp.ResponsesReceived,
+		})
+	}
+	if len(pairs) > 0 {
+		r.pairsMu.Lock()
+		r.lastPairs = pairs
+		r.pairsMu.Unlock()
+	}
+	return pairs
+}
+
+// logPairs logs the ICE candidate pairs of an unreachable connection: live
+// pairs if Pion still exposes them, else the last snapshot captured during
+// Checking/Disconnected, else a fallback note that ICE failed with no pairs.
+func (m *Mesh) logPairs(r *remote) {
+	if r == nil || r.closing.Load() {
+		return
+	}
+	pairs := m.snapshotPairs(r)
+	if len(pairs) == 0 {
+		r.pairsMu.Lock()
+		pairs = slices.Clone(r.lastPairs)
+		r.pairsMu.Unlock()
+	}
+	if len(pairs) == 0 {
+		m.opt.Log.Info("no pairs: ICE failed", "peer", r.id)
+		return
+	}
+	for _, p := range pairs {
+		m.opt.Log.Info("ice pair", "peer", r.id, "state", p.state,
+			"local", p.local, "remote", p.remote,
+			"reqSent", p.reqSent, "reqRecv", p.reqRecv, "respSent", p.respSent, "respRecv", p.respRecv)
 	}
 }
 
@@ -813,7 +1020,7 @@ func (m *Mesh) observe(r *remote, rep rr) {
 	r.polMu.Lock()
 	defer r.polMu.Unlock()
 	cur := int(r.level.Load())
-	r.policy.fpsSteps = m.fpsStepsFor(r)
+	r.policy.ladder, r.policy.fpsSteps = m.fpsLadderFor(r)
 	target := r.policy.observe(cur, rep, time.Now())
 	r.fpsCap.Store(int32(r.policy.fpsCap()))
 	defer m.updateHighFPS()
@@ -828,7 +1035,7 @@ func (m *Mesh) observe(r *remote, rep rr) {
 // the shared LOW bitrate.
 func (m *Mesh) setLevel(r *remote, level int) {
 	r.level.Store(int32(level))
-	target := levelLayer(max(level, r.wireCap), r.mid)
+	target := m.targetLayerFor(r, level)
 	r.offHigh.Store(target != layerHigh)
 	m.noteSending(r)
 	if _, want := r.fwd.layers(); want != target {
@@ -839,13 +1046,24 @@ func (m *Mesh) setLevel(r *remote, level int) {
 			m.opt.OnLayer(r.id, target)
 		}
 	}
+	if target == layerHigh && m.HighFPSCap() > 0 {
+		for _, v := range m.peerList() {
+			if v != r && v.onHigh() {
+				for _, p := range m.peerList() {
+					p.fpsCap.Store(0)
+				}
+				m.updateHighFPS()
+				break
+			}
+		}
+	}
 	m.updateLowBitrate()
 }
 
-// SetFPSSteps allows (desktop shares) or forbids (game) lowering HIGH's
-// frame rate for a congested viewer before switching it to a lower layer.
+// SetFPSSteps allows (frame-rate-first) or forbids (resolution-first) lowering
+// HIGH's frame rate for a congested viewer before switching it to a lower layer.
 func (m *Mesh) SetFPSSteps(on bool) {
-	m.fpsSteps.Store(on)
+	m.rend.updateCfg(func(c *shareCfg) { c.fpsSteps = on })
 	if !on {
 		for _, r := range m.peerList() {
 			r.fpsCap.Store(0) // the policy forgets its step on the next report
@@ -854,29 +1072,36 @@ func (m *Mesh) SetFPSSteps(on bool) {
 	}
 }
 
-// fpsStepsFor is how many frame rate steps r's policy may take: all of
-// them when r is the only peer on our HIGH (lowering it for one viewer
-// would slow the others too), else none.
-func (m *Mesh) fpsStepsFor(r *remote) int {
-	if !m.fpsSteps.Load() {
-		return 0
+// fpsLadderFor is HIGH's frame rate ladder and step count for r: all steps
+// below baseFPS when r is the only peer on our HIGH, else none.
+func (m *Mesh) fpsLadderFor(r *remote) ([]int, int) {
+	sc := m.rend.loadCfg()
+	lad := fpsLadder(sc.fps)
+	if !sc.fpsSteps || len(lad) <= 1 {
+		return lad, 0
 	}
 	for _, v := range m.peerList() {
 		if v != r && v.onHigh() {
-			return 0
+			return lad, 0
 		}
 	}
-	return len(highFPS) - 1
+	return lad, len(lad) - 1
 }
 
 // limit is why r gets less than our best (PeerStats.Limit).
 func (r *remote) limit() string {
 	r.polMu.Lock()
 	wire := r.wireCap
+	midCap := r.midCap && r.mid >= 0
+	upCap := r.uploadCap
 	r.polMu.Unlock()
 	switch level := int(r.level.Load()); {
 	case wire > levelHigh && wire >= level:
 		return "viewer"
+	case midCap && level == levelMid && upCap <= levelMid:
+		return "viewer"
+	case upCap > levelHigh && level == upCap:
+		return "upload"
 	case level > levelHigh || r.fpsCap.Load() > 0:
 		return "bandwidth"
 	}
@@ -906,8 +1131,12 @@ func (m *Mesh) updateHighFPS() {
 func (m *Mesh) HighFPSCap() int { return int(m.highFPS.Load()) }
 
 // updateLowBitrate runs the LOW encoder at the bitrate of the worst-off peer
-// that receives LOW.
+// that receives LOW, capped by any manual upload limit.
 func (m *Mesh) updateLowBitrate() {
+	lh := m.lowHeight()
+	if lh == 0 {
+		return
+	}
 	m.mu.Lock()
 	worst := levelLow
 	for _, r := range m.peers {
@@ -916,17 +1145,32 @@ func (m *Mesh) updateLowBitrate() {
 		}
 	}
 	m.mu.Unlock()
-	kbps := lowKbps[worst]
+	kbps := lowBitrateFor(lh, worst)
+	if capKbps := int(m.lowBudgetCap.Load()); capKbps > 0 && capKbps < kbps {
+		kbps = capKbps
+	}
+	m.layerTargetKbps[layerLow].Store(int32(kbps))
 	if int(m.lowKbps.Swap(int32(kbps))) != kbps {
 		m.opt.Log.Info("low bitrate", "kbps", kbps)
 		if m.opt.OnLowBitrate != nil {
 			m.opt.OnLowBitrate(kbps)
+		}
+		if m.opt.OnBitrate != nil {
+			m.opt.OnBitrate(layerLow, kbps)
 		}
 	}
 }
 
 // LowKbps is the bitrate the LOW encoder should run at.
 func (m *Mesh) LowKbps() int { return int(m.lowKbps.Load()) }
+
+// LayerBitrate returns the target encoder bitrate in kbit/s for layer (0 if unset).
+func (m *Mesh) LayerBitrate(layer int) int {
+	if layer < 0 || layer >= numLayers {
+		return 0
+	}
+	return int(m.layerTargetKbps[layer].Load())
+}
 
 // rrRTT is the round trip a receiver report implies (RFC 3550 6.4.1): arrival
 // minus the sender report it refers to minus the receiver's hold time, all in
@@ -1054,6 +1298,165 @@ func (m *Mesh) sendSDP(to string, d webrtc.SessionDescription) error {
 	return m.sig.Signal(to, signalMsg{SDP: &d, Sig: sig})
 }
 
+type initCap struct {
+	origin string
+	wire   int
+}
+
+func (m *Mesh) initialWireCaps(to string) []initCap {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.forwardingLocked() {
+		return nil
+	}
+	var out []initCap
+	if m.directLocked(to) {
+		w := levelWire(m.ownWishLocked(to))
+		if _, explicit := m.caps[to]; explicit || w != wireHigh {
+			out = append(out, initCap{wire: w})
+		}
+	}
+	if m.homeLocked(m.me()) == to {
+		var ids []string
+		for id := range m.members {
+			if id != to && !m.directLocked(id) {
+				ids = append(ids, id)
+			}
+		}
+		slices.Sort(ids)
+		for _, id := range ids {
+			w := levelWire(m.ownWishLocked(id))
+			if _, explicit := m.caps[id]; explicit || w != wireHigh {
+				out = append(out, initCap{origin: id, wire: w})
+			}
+		}
+	}
+	return out
+}
+
+func (m *Mesh) sendInitialCaps(r *remote) {
+	m.mu.Lock()
+	current := m.peers[r.id] == r
+	fwd := m.forwardingLocked()
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	if fwd {
+		m.pushDemand()
+		return
+	}
+	for _, c := range m.initialWireCaps(r.id) {
+		_ = m.signalCap(r, c.origin, c.wire, true)
+	}
+}
+
+// SetDefaultOff sets whether new peers default to wireOff ("none") until
+// SetMaxLayer specifies an explicit wish.
+func (m *Mesh) SetDefaultOff(off bool) {
+	m.defaultOff.Store(off)
+}
+
+func (m *Mesh) checkWatching(_ string) {
+	m.checkAllWatching()
+}
+
+func (m *Mesh) checkAllWatching() {
+	type peerSnap struct {
+		id       string
+		r        *remote
+		wire     int
+		hasCap   bool
+		conn     bool
+		watchers []string
+	}
+	m.mu.Lock()
+	snaps := make([]peerSnap, 0, len(m.peers))
+	for id, r := range m.peers {
+		snaps = append(snaps, peerSnap{id: id, r: r})
+	}
+	m.mu.Unlock()
+
+	for i := range snaps {
+		r := snaps[i].r
+		r.polMu.Lock()
+		snaps[i].wire = r.wireCap
+		snaps[i].hasCap = r.hasWireCap
+		snaps[i].watchers = slices.Clone(r.watchers)
+		r.polMu.Unlock()
+		snaps[i].conn = r.connected.Load()
+	}
+
+	var notify []string
+	m.mu.Lock()
+	top := m.rend.loadCfg().top
+	if top <= 0 {
+		clear(m.watchingPeer)
+		clear(m.rehomingWatch)
+		m.mu.Unlock()
+		return
+	}
+	active := map[string]bool{}
+	explicitOff := map[string]bool{}
+	me := m.me()
+	for _, s := range snaps {
+		if m.peers[s.id] != s.r || !m.members[s.id] {
+			continue
+		}
+		direct := m.directLocked(s.id)
+		isRelay := m.isRelayLocked(s.id)
+		if direct && !isRelay {
+			if s.hasCap && s.wire >= levelOff {
+				explicitOff[s.id] = true
+			} else if s.conn && s.hasCap && s.wire < levelOff {
+				active[s.id] = true
+			}
+		}
+		if direct && isRelay && s.conn {
+			for _, wid := range s.watchers {
+				if wid != "" && wid != me && m.members[wid] {
+					active[wid] = true
+				}
+			}
+		}
+	}
+	now := time.Now()
+	for vid := range m.watchingPeer {
+		if active[vid] {
+			delete(m.rehomingWatch, vid)
+			continue
+		}
+		if !m.members[vid] || explicitOff[vid] {
+			delete(m.watchingPeer, vid)
+			delete(m.rehomingWatch, vid)
+			continue
+		}
+		if t, ok := m.rehomingWatch[vid]; ok && now.Sub(t) < m.rehomeWatchGraceLocked() {
+			continue
+		}
+		delete(m.watchingPeer, vid)
+		delete(m.rehomingWatch, vid)
+	}
+	for vid := range active {
+		if !m.watchingPeer[vid] {
+			m.watchingPeer[vid] = true
+			delete(m.rehomingWatch, vid)
+			notify = append(notify, vid)
+		}
+	}
+	slices.Sort(notify)
+	m.mu.Unlock()
+
+	if len(notify) > 0 && m.rend.loadCfg().top > 0 {
+		for _, vid := range notify {
+			m.opt.Log.Info("viewer watching", "peer", vid)
+			if m.opt.OnViewerWatching != nil {
+				m.opt.OnViewerWatching(vid)
+			}
+		}
+	}
+}
+
 // checkSDP verifies a received description against the sender's identity key.
 func (m *Mesh) checkSDP(from string, msg signalMsg) error {
 	m.mu.Lock()
@@ -1070,7 +1473,7 @@ func (m *Mesh) reject(from string, err error) {
 	name := m.names[from]
 	m.mu.Unlock()
 	if r != nil {
-		m.closePC(r.pc)
+		m.closePC(r)
 	}
 	if m.opt.OnPeer != nil {
 		m.opt.OnPeer(from, name, "untrusted")
@@ -1090,7 +1493,21 @@ func (m *Mesh) offer(id string) error {
 	if err := r.pc.SetLocalDescription(o); err != nil {
 		return err
 	}
-	return m.sendSDP(id, o)
+	if err := m.sendSDP(id, o); err != nil {
+		return err
+	}
+	m.sendInitialCaps(r)
+	return nil
+}
+
+func sdpFingerprint(sdp string) string {
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "a=fingerprint:") {
+			return line
+		}
+	}
+	return ""
 }
 
 func (m *Mesh) handleSignal(s *proto.Signal) error {
@@ -1119,17 +1536,27 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 				delete(m.peers, from)
 			}
 			m.mu.Unlock()
-			m.closePC(r.pc)
+			m.closePC(r)
 			r = nil
 		}
 		if r != nil && r.pc.SignalingState() != webrtc.SignalingStateStable {
 			return errors.New("offer while negotiating")
 		}
+		created := false
 		var err error
 		if r == nil {
 			if r, err = m.newPeer(from); err != nil {
 				return err
 			}
+			created = true
+		} else if prev := r.pc.RemoteDescription(); prev != nil && sdpFingerprint(prev.SDP) != sdpFingerprint(msg.SDP.SDP) {
+			// Remote replaced its PeerConnection (new DTLS cert), not an ICE restart.
+			r.polMu.Lock()
+			clear(r.sentCap)
+			clear(r.sentWatchers)
+			r.polMu.Unlock()
+			m.forgetDemand(from)
+			created = true
 		}
 		if err := r.pc.SetRemoteDescription(*msg.SDP); err != nil {
 			return err
@@ -1142,7 +1569,13 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 		if err := r.pc.SetLocalDescription(a); err != nil {
 			return err
 		}
-		return m.sendSDP(from, a)
+		if err := m.sendSDP(from, a); err != nil {
+			return err
+		}
+		if created {
+			m.sendInitialCaps(r)
+		}
+		return nil
 
 	case msg.SDP != nil && msg.SDP.Type == webrtc.SDPTypeAnswer:
 		if r == nil {
@@ -1174,8 +1607,31 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 		m.gotBye(from)
 		return nil
 
-	case msg.MaxLayer != nil && msg.Origin != "":
-		// A viewer's cap on a member we relay to it.
+	case msg.Resumed:
+		// Peer's signaling resumed: treat everything we previously sent it over
+		// signaling as unconfirmed and re-send our active state.
+		if r != nil {
+			r.polMu.Lock()
+			clear(r.sentCap)
+			clear(r.sentWatchers)
+			r.polMu.Unlock()
+		}
+		m.forgetDemand(from)
+		m.resendCaps()
+		m.pushDemand()
+		if r != nil && r.connected.Load() {
+			m.resendSending(r)
+			m.mu.Lock()
+			fwd := m.forwardingLocked() && m.peers[from] == r
+			m.mu.Unlock()
+			if fwd {
+				m.sendSlots(r)
+			}
+		}
+		return nil
+
+	case msg.MaxLayer != nil && msg.Origin != "" && msg.Origin != m.me():
+		// A viewer's or trunk relay's cap on a member we relay to it.
 		capLevel, ok := wireLevel(*msg.MaxLayer)
 		if r == nil || !ok {
 			return nil
@@ -1185,6 +1641,14 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 			r.originCap = map[string]int{}
 		}
 		r.originCap[msg.Origin] = capLevel
+		if msg.Watchers != nil {
+			if r.originWatchers == nil {
+				r.originWatchers = map[string][]string{}
+			}
+			r.originWatchers[msg.Origin] = slices.Clone(*msg.Watchers)
+		} else {
+			delete(r.originWatchers, msg.Origin)
+		}
 		r.polMu.Unlock()
 		m.pushDemand()
 		return nil
@@ -1195,9 +1659,18 @@ func (m *Mesh) handleSignal(s *proto.Signal) error {
 			return nil
 		}
 		r.polMu.Lock()
-		defer r.polMu.Unlock()
 		r.wireCap = capLevel
+		if msg.Watchers != nil {
+			r.hasWireCap = false
+			r.watchers = slices.Clone(*msg.Watchers)
+		} else {
+			r.hasWireCap = true
+			r.watchers = nil
+		}
 		m.applyCap(r)
+		r.polMu.Unlock()
+		m.checkAllWatching()
+		m.triggerRebalance()
 		return nil
 
 	case msg.Resize != nil:
@@ -1249,7 +1722,7 @@ func (m *Mesh) drop(id string) {
 	m.forgetView(id)
 	m.forgetProviders()
 	if r != nil {
-		m.closePC(r.pc)
+		m.closePC(r)
 		m.updateLowBitrate() // the worst-off peer may have left
 		if m.opt.OnPeer != nil {
 			m.opt.OnPeer(id, name, "gone")
@@ -1312,8 +1785,8 @@ type PeerStats struct {
 	RxBytes uint64  // bytes received from this peer
 	Loss    float64 // last fraction lost they reported for our video (0..1)
 	// Limit is why we send them less than our best: "viewer" (their
-	// choice), "bandwidth" (congestion: a lower layer or frame rate); ""
-	// when not limited.
+	// choice), "upload" (our mesh upload limit), "bandwidth" (congestion:
+	// a lower layer or frame rate); "" when not limited.
 	Limit string
 }
 
@@ -1340,28 +1813,17 @@ func (m *Mesh) Stats() map[string]PeerStats {
 	out := map[string]PeerStats{}
 	for _, r := range peers {
 		ps := PeerStats{Loss: math.Float64frombits(r.loss.Load()), Limit: r.limit()}
-		switch r.pc.ConnectionState() {
-		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
-			// Pion may be closing it itself (DTLS failure), which races
-			// with GetStats.
+		pair, cps, hasCPS, ts, ok := m.iceStats(r)
+		if !ok {
 			out[r.id] = ps
 			continue
 		}
-		m.statsMu.RLock()
-		st := r.pc.GetStats()
-		m.statsMu.RUnlock()
-		for _, v := range st {
-			if ts, ok := v.(webrtc.TransportStats); ok {
-				ps.TxBytes, ps.RxBytes = ts.BytesSent, ts.BytesReceived
-			}
-			cp, ok := v.(webrtc.ICECandidatePairStats)
-			if !ok || !cp.Nominated {
-				continue
-			}
-			l, _ := st[cp.LocalCandidateID].(webrtc.ICECandidateStats)
-			rc, _ := st[cp.RemoteCandidateID].(webrtc.ICECandidateStats)
-			ps.Pair = l.CandidateType.String() + "/" + rc.CandidateType.String()
-			ps.RTT = cp.CurrentRoundTripTime
+		ps.TxBytes, ps.RxBytes = ts.BytesSent, ts.BytesReceived
+		if pair != nil && pair.Local != nil && pair.Remote != nil {
+			ps.Pair = pair.Local.Typ.String() + "/" + pair.Remote.Typ.String()
+		}
+		if hasCPS {
+			ps.RTT = cps.CurrentRoundTripTime
 		}
 		out[r.id] = ps
 	}

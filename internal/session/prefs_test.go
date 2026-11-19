@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"blite/internal/audio"
+	"blite/internal/feeds"
 	"blite/internal/media"
 	"blite/internal/server"
 )
@@ -22,8 +24,9 @@ func member(s *Session, name string) Member {
 	return Member{}
 }
 
-// A viewer's quality choice reaches the sender: "off" stops their video to us
-// (audio keeps going), "low" caps it, "auto" lets it climb back.
+// A viewer's quality choice ("low" / "auto") reaches the sender; "off" is
+// rejected on SetPeer because the eye toggle stops watching video (while
+// remote audio plays independently, controlled by mute and volume).
 func TestViewerQualityReachesSender(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
@@ -38,39 +41,56 @@ func TestViewerQualityReachesSender(t *testing.T) {
 	}
 	defer a.Close()
 	a.SetSource(media.SourceTest)
+	a.SetAudio(audio.Selection{Mode: "test"})
 	b, err := Join(ctx, cfg("bob"), a.sig.Welcome.Room, a.pw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	waitFor(t, "first frames", 15*time.Second, func() bool { return member(b, "alice").Frames > 10 })
+	waitFor(t, "first frames and audio", 15*time.Second, func() bool {
+		m := member(b, "alice")
+		return m.Frames > 10 && m.Audio > 10
+	})
 	alice := member(b, "alice").ID
 
 	layer := func(want string) func() bool { return func() bool { return member(a, "bob").Layer == want } }
-	if err := b.SetPeer(alice, "off", 0.5, false); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, "alice stops sending video to bob", 5*time.Second, layer("off"))
-	time.Sleep(500 * time.Millisecond)
-	f1 := member(b, "alice").Frames
-	time.Sleep(time.Second)
-	if f2 := member(b, "alice").Frames; f2 != f1 {
-		t.Fatalf("frames still arriving with quality off: %d -> %d", f1, f2)
-	}
-	if m := member(b, "alice"); m.Quality != "off" || m.Volume != 0.5 {
-		t.Fatalf("settings not kept: %+v", m)
-	}
-
-	if err := b.SetPeer(alice, "low", 1, true); err != nil {
+	if err := b.SetPeer(alice, "low", 0.5, true); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "alice sends LOW", 5*time.Second, layer("low"))
+	if m := member(b, "alice"); m.Quality != "low" || m.Volume != 0.5 || !m.Muted {
+		t.Fatalf("settings not kept: %+v", m)
+	}
+
 	if err := b.SetPeer(alice, "auto", 1, false); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "alice climbs back to HIGH", 10*time.Second, layer("high"))
 
-	if b.SetPeer(alice, "ultra", 1, false) == nil || b.SetPeer(alice, "auto", 3, false) == nil {
+	if err := b.ToggleWatch(alice); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alice stops sending video to bob", 5*time.Second, layer("off"))
+	time.Sleep(400 * time.Millisecond)
+	m1 := member(b, "alice")
+	if m1.Eye != feeds.EyeClosed || m1.Watching {
+		t.Fatalf("expected closed eye and not watching: %+v", m1)
+	}
+	time.Sleep(800 * time.Millisecond)
+	m2 := member(b, "alice")
+	if m2.Frames != m1.Frames || m2.Audio <= m1.Audio {
+		t.Fatalf("expected video stopped and audio continuing while not watching video: frames %d -> %d, audio %d -> %d", m1.Frames, m2.Frames, m1.Audio, m2.Audio)
+	}
+
+	if err := b.ToggleWatch(alice); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alice resumes video and audio", 10*time.Second, func() bool {
+		m := member(b, "alice")
+		return member(a, "bob").Layer == "high" && m.Eye == feeds.EyeOpen && m.Frames > 5 && m.Audio > 5
+	})
+
+	if b.SetPeer(alice, "off", 1, false) == nil || b.SetPeer(alice, "ultra", 1, false) == nil || b.SetPeer(alice, "auto", 3, false) == nil {
 		t.Fatal("accepted bad settings")
 	}
 }

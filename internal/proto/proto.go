@@ -50,6 +50,10 @@ const (
 	TRename = "rename"
 	// TCaps reports what we could do as a relay (planner input).
 	TCaps = "caps"
+	// TProbe checks whether a room exists, authenticated by its password.
+	TProbe = "probe"
+	// TSharing reports whether we are sharing video right now (Discord banner).
+	TSharing = "sharing"
 )
 
 // Server -> client message types.
@@ -58,6 +62,8 @@ const (
 	TPeerJoined = "peer-joined"
 	TPeerLeft   = "peer-left"
 	TError      = "error"
+	// TProbeResult answers TProbe.
+	TProbeResult = "probe-result"
 	// TTopology announces the relay queue whenever it changes (builds
 	// below MultiRelayBuild).
 	TTopology = "topology"
@@ -349,6 +355,38 @@ type PeerRenamed struct {
 	T      string `json:"t"`
 	PeerID string `json:"peerId"`
 	Name   string `json:"name"`
+}
+
+// Probe asks whether a room exists, authenticated by its password. Wrong
+// passwords and missing rooms both reply Exists: false and count toward the
+// join failure limits.
+type Probe struct {
+	T        string `json:"t"`
+	Room     string `json:"room"`
+	Password string `json:"password"`
+}
+
+// ProbeResult answers Probe.
+type ProbeResult struct {
+	T      string `json:"t"`
+	Exists bool   `json:"exists"`
+}
+
+// Sharing tells the server whether we are sharing video right now, so a
+// Discord voice channel tied to the room can report who is sharing.
+type Sharing struct {
+	T  string `json:"t"`
+	On bool   `json:"on"`
+}
+
+// ChannelRoom is what GET /v1/channel/{id} returns for the room tied to a
+// Discord voice channel.
+type ChannelRoom struct {
+	Room    string   `json:"room"`
+	Open    bool     `json:"open"` // no password needed
+	People  int      `json:"people"`
+	Sharers []string `json:"sharers,omitempty"`
+	Members []string `json:"members,omitempty"`
 }
 
 // Report is a client's log report (POST /v1/report on the signal server):

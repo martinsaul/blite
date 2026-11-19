@@ -6,12 +6,30 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"blite/internal/room"
 )
 
 // A link names the signaling server its room is on: https://HOST/j/CODE is
 // on wss://HOST/ws, and bshare://join/CODE?server=HOST on wss://HOST/ws.
 // bshare:// links without a server (all links before custom servers) are on
 // the built-in default server.
+
+// parseURLRedacted wraps url.Parse so malformed share links never echo their
+// '#' password fragment in *url.Error messages that callers may log.
+func parseURLRedacted(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			if before, _, ok := strings.Cut(ue.URL, "#"); ok {
+				ue.URL = before + "#[cut]"
+			}
+		}
+		return nil, err
+	}
+	return u, nil
+}
 
 // ParseLinkServer is ParseLink plus the link's signaling server, normalized
 // (wss://host/ws); "" = the link doesn't name one (the built-in default).
@@ -20,7 +38,7 @@ func ParseLinkServer(s string) (server, code, pw string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	u, err := url.Parse(strings.TrimSpace(s))
+	u, err := parseURLRedacted(strings.TrimSpace(s))
 	if err != nil {
 		return "", "", "", err
 	}
@@ -40,6 +58,39 @@ func ParseLinkServer(s string) (server, code, pw string, err error) {
 		return "", "", "", errors.New("the link's server isn't valid: " + err.Error())
 	}
 	return server, code, pw, nil
+}
+
+// ParseJoinInput parses either a share link (https://HOST/j/CODE#pw,
+// HOST/j/CODE#pw, bshare://join/CODE, blite://join/CODE) or a bare room code
+// (e.g. K7PQ-2M4X or a 4-12 character hosted room code like MAMACO, optionally
+// followed by #password). When isLink is false, the caller should join on the
+// currently selected server rather than the built-in default.
+func ParseJoinInput(s string) (server, code, pw string, isLink bool, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", "", false, errors.New("enter a share link or room code")
+	}
+	rawCode, frag, hasFrag := strings.Cut(s, "#")
+	if strings.Contains(rawCode, "://") {
+		server, code, pw, err = ParseLinkServer(s)
+		return server, code, pw, true, err
+	}
+	if strings.Contains(rawCode, "/j/") {
+		server, code, pw, err = ParseLinkServer("https://" + s)
+		return server, code, pw, true, err
+	}
+	code = room.NormalizeCode(rawCode)
+	if code == "" {
+		return "", "", "", false, errors.New("enter a share link or room code")
+	}
+	if hasFrag {
+		if unesc, uerr := url.PathUnescape(frag); uerr == nil {
+			pw = unesc
+		} else {
+			pw = frag
+		}
+	}
+	return "", code, pw, false, nil
 }
 
 // AppLink builds the bshare:// link that opens the app on a room. It names

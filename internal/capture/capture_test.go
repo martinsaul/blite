@@ -21,3 +21,19 @@ func TestParse(t *testing.T) {
 		}
 	}
 }
+
+func TestLabel(t *testing.T) {
+	for _, c := range []struct {
+		t    Target
+		want string
+	}{
+		{Target{Kind: "window", Name: "Notes - Editor", App: "editor", Source: "window:0x307a2"}, "Notes - Editor"},
+		{Target{Kind: "window", Name: "  ", App: "Discord", Source: "window:0x307a2"}, "Discord"},
+		{Target{Kind: "window", Source: "window:0x307a2"}, ""}, // never the handle
+		{Target{Kind: "monitor", Name: "Display 1 (1920x1080)", Source: "monitor:0x10001"}, "Display 1 (1920x1080)"},
+	} {
+		if got := c.t.Label(); got != c.want {
+			t.Errorf("%+v: Label() = %q, want %q", c.t, got, c.want)
+		}
+	}
+}

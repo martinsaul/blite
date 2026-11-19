@@ -66,3 +66,73 @@ func TestPortRecycle(t *testing.T) {
 	}
 	p.release()
 }
+
+type fakePortMapper struct {
+	st     portmap.State
+	closed int
+}
+
+func (f *fakePortMapper) State() portmap.State { return f.st }
+func (f *fakePortMapper) Close()               { f.closed++ }
+
+func TestPortMappingToggleKeepsFixedLocalPort(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := NewPortOpts(32471, false, quiet)
+	defer p.Close()
+
+	starts := 0
+	var last *fakePortMapper
+	p.startMapper = func(port int, _ *slog.Logger, _ func(portmap.State)) portMapper {
+		starts++
+		last = &fakePortMapper{
+			st: portmap.State{
+				Port:     port,
+				Method:   "PCP",
+				External: netip.MustParseAddrPort("203.0.113.9:32471"),
+				Local:    netip.MustParseAddr("192.168.1.20"),
+			},
+		}
+		return last
+	}
+
+	if p.Mapping() {
+		t.Fatal("Mapping() should be false when started with mapRouter=false")
+	}
+	// Even with router mapping off, acquire() still binds the single fixed UDP port.
+	mux1, port1, err := p.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux2, port2, err := p.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mux1 != mux2 || port1 != p.pref || port2 != p.pref {
+		t.Fatalf("expected shared fixed local UDP port %d, got %d and %d", p.pref, port1, port2)
+	}
+	if starts != 0 {
+		t.Fatalf("expected 0 router mapping requests when off, got %d", starts)
+	}
+	host := &webrtc.ICECandidate{
+		Typ: webrtc.ICECandidateTypeHost, Protocol: webrtc.ICEProtocolUDP,
+		Address: "192.168.1.20", Port: uint16(port1), Priority: 2130706431, Foundation: "1", Component: 1,
+	}
+	if p.mappedCandidate(host, port1) != nil {
+		t.Fatal("mappedCandidate should be nil when router mapping is off")
+	}
+
+	// Enable router mapping, then disable it again; fixed local UDP port stays bound.
+	p.SetMapping(true)
+	if !p.Mapping() || starts != 1 {
+		t.Fatalf("after SetMapping(true): Mapping=%v starts=%d", p.Mapping(), starts)
+	}
+	p.SetMapping(false)
+	if p.Mapping() || last == nil || last.closed != 1 {
+		t.Fatalf("after SetMapping(false): Mapping=%v closed=%v", p.Mapping(), last)
+	}
+	if p.mappedCandidate(host, port1) != nil {
+		t.Fatal("mappedCandidate should be nil after SetMapping(false)")
+	}
+	p.release()
+	p.release()
+}

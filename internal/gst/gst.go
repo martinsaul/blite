@@ -1,7 +1,7 @@
 // Package gst is a deliberately tiny cgo shim over the stable GStreamer 1.0 C API:
 // launch a pipeline, find an element by name, pull from appsink, push to appsrc,
 // read errors off the bus. It replaces generated bindings, which track a single
-// GStreamer release; this compiles against 1.20 through 1.26 and with MinGW.
+// GStreamer release; this compiles against 1.20 through 1.28 and with MinGW.
 package gst
 
 /*
@@ -60,8 +60,16 @@ static int blite_push(GstElement *src, const void *data, gsize len) {
 	return gst_app_src_push_buffer(GST_APP_SRC(src), b) == GST_FLOW_OK; // takes ownership
 }
 
-// Pops the next error/EOS message. Returns 0 none, 1 error (msg set), 2 EOS.
-static int blite_bus_pop(GstElement *pipe, guint64 timeout_ns, char **msg) {
+static int blite_push_dur(GstElement *src, const void *data, gsize len, guint64 dur_ns) {
+	GstBuffer *b = gst_buffer_new_allocate(NULL, len, NULL);
+	gst_buffer_fill(b, 0, data, len);
+	if (dur_ns > 0) GST_BUFFER_DURATION(b) = (GstClockTime)dur_ns;
+	return gst_app_src_push_buffer(GST_APP_SRC(src), b) == GST_FLOW_OK; // takes ownership
+}
+
+// Pops the next error/EOS message. Returns 0 none, 1 error, 2 EOS. On an
+// error *src, *msg, *dbg and *domain are set (g_free them) and *code.
+static int blite_bus_pop(GstElement *pipe, guint64 timeout_ns, char **src, char **msg, char **dbg, char **domain, int *code) {
 	GstBus *bus = gst_element_get_bus(pipe);
 	GstMessage *m = gst_bus_timed_pop_filtered(bus, timeout_ns, GST_MESSAGE_ERROR | GST_MESSAGE_EOS);
 	gst_object_unref(bus);
@@ -69,11 +77,14 @@ static int blite_bus_pop(GstElement *pipe, guint64 timeout_ns, char **msg) {
 	int r = 2;
 	if (GST_MESSAGE_TYPE(m) == GST_MESSAGE_ERROR) {
 		GError *e = NULL;
-		gchar *dbg = NULL;
-		gst_message_parse_error(m, &e, &dbg);
-		*msg = g_strdup_printf("%s: %s (%s)", GST_OBJECT_NAME(GST_MESSAGE_SRC(m)), e ? e->message : "?", dbg ? dbg : "");
+		gchar *d = NULL;
+		gst_message_parse_error(m, &e, &d);
+		*src = g_strdup(GST_MESSAGE_SRC(m) ? GST_OBJECT_NAME(GST_MESSAGE_SRC(m)) : "?");
+		*msg = g_strdup(e ? e->message : "?");
+		*dbg = d ? d : g_strdup("");
+		*domain = g_strdup(e ? g_quark_to_string(e->domain) : "");
+		*code = e ? e->code : 0;
 		if (e) g_error_free(e);
-		g_free(dbg);
 		r = 1;
 	}
 	gst_message_unref(m);
@@ -368,6 +379,14 @@ func (e *Element) Push(b []byte) bool {
 	return C.blite_push(e.p, unsafe.Pointer(&b[0]), C.gsize(len(b))) == 1
 }
 
+// PushDur hands a buffer with an explicit duration to an appsrc.
+func (e *Element) PushDur(b []byte, d time.Duration) bool {
+	if len(b) == 0 {
+		return true
+	}
+	return C.blite_push_dur(e.p, unsafe.Pointer(&b[0]), C.gsize(len(b)), C.guint64(max(d, 0))) == 1
+}
+
 // ForceKeyframe sends an upstream force-key-unit event from this (sink) element.
 func (e *Element) ForceKeyframe() bool { return C.blite_force_keyframe(e.p) == 1 }
 
@@ -420,14 +439,51 @@ func (e *Element) GetString(name string) string {
 	return C.GoString(v)
 }
 
-// BusError waits up to timeout for an error or EOS. It returns nil if neither came.
+// BusError is an error message from a pipeline's bus, with its GError
+// domain and code so callers can tell a busy or missing device apart.
+type BusError struct {
+	Src    string // the element that posted it
+	Domain string // GError domain, e.g. "gst-resource-error-quark"
+	Code   int    // GError code within Domain, e.g. GST_RESOURCE_ERROR_BUSY
+	Msg    string
+	Debug  string
+}
+
+// GStreamer error domains (g_quark_to_string of the GError domain).
+const (
+	DomainCore     = "gst-core-error-quark"
+	DomainLibrary  = "gst-library-error-quark"
+	DomainResource = "gst-resource-error-quark"
+	DomainStream   = "gst-stream-error-quark"
+)
+
+// GstResourceError codes (DomainResource).
+const (
+	ResourceFailed        = 1
+	ResourceNotFound      = 3
+	ResourceBusy          = 4
+	ResourceOpenRead      = 5
+	ResourceOpenWrite     = 6
+	ResourceOpenReadWrite = 7
+	ResourceRead          = 9
+	ResourceSettings      = 13
+	ResourceNotAuthorized = 15
+)
+
+func (e *BusError) Error() string { return e.Src + ": " + e.Msg + " (" + e.Debug + ")" }
+
+// BusError waits up to timeout for an error or EOS. It returns nil if
+// neither came, ErrEOS, or a *BusError.
 func (p *Pipeline) BusError(timeout time.Duration) error {
-	var msg *C.char
-	switch C.blite_bus_pop(p.p, C.guint64(timeout), &msg) {
+	var src, msg, dbg, dom *C.char
+	var code C.int
+	switch C.blite_bus_pop(p.p, C.guint64(timeout), &src, &msg, &dbg, &dom, &code) {
 	case 1:
-		s := C.GoString(msg)
-		C.g_free(C.gpointer(msg))
-		return errors.New(s)
+		e := &BusError{Src: C.GoString(src), Domain: C.GoString(dom), Code: int(code), Msg: C.GoString(msg), Debug: C.GoString(dbg)}
+		for _, c := range []*C.char{src, msg, dbg, dom} {
+			C.g_free(C.gpointer(c))
+		}
+		return e
 	case 2:
 		return ErrEOS
 	}

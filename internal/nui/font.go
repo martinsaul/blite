@@ -8,7 +8,6 @@ import (
 	"unicode"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/theme"
 	"github.com/go-text/typesetting/font"
 	"github.com/go-text/typesetting/fontscan"
 
@@ -71,7 +70,7 @@ func themeFor() fyne.Theme {
 	tag := i18n.Current()
 	sf, ok := scriptFonts[tag]
 	if !ok {
-		return theme.DefaultTheme()
+		return darkTheme
 	}
 	fontsMu.Lock()
 	defer fontsMu.Unlock()
@@ -81,7 +80,7 @@ func themeFor() fyne.Theme {
 		langFont[tag] = t
 	}
 	if t == nil {
-		return theme.DefaultTheme()
+		return darkTheme
 	}
 	return t
 }
@@ -111,7 +110,7 @@ func findFonts(families []string, need []rune) *textTheme {
 		}
 	}
 	for _, fam := range families {
-		t := &textTheme{Theme: theme.DefaultTheme()}
+		t := &textTheme{Theme: darkTheme}
 		for _, loc := range fontMap.FindSystemFonts(fam) {
 			if loc.Index != 0 || loc.Instance != 0 {
 				continue // in a collection, or a variable font's instance: Fyne loads a file's first

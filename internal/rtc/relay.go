@@ -82,6 +82,15 @@ const (
 	joinGrace   = 5 * time.Second // a newcomer offers itself this long
 )
 
+// rehomeWatchGraceLocked returns how long watchingPeer is held across a plan
+// re-home while a viewer reconnects via its new route (m.mu held).
+func (m *Mesh) rehomeWatchGraceLocked() time.Duration {
+	if m.rehomeGrace > 0 {
+		return m.rehomeGrace
+	}
+	return pruneAfter
+}
+
 // slotIndex parses "slotN" / "aslotN".
 func slotIndex(id, prefix string) (int, bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(id, prefix))
@@ -226,10 +235,11 @@ type relayTracks struct {
 	byeAt   time.Time // it said it closes this connection (zero = no)
 
 	// Relay side, for this peer as a viewer or trunk: its quality cap per
-	// origin (a level, levelHigh..levelOff), and whether we forward to it.
-	// Guarded by remote.polMu.
-	originCap map[string]int
-	fanTarget bool
+	// origin (a level, levelHigh..levelOff), any watcher sets reported over a
+	// trunk, and whether we forward to it. Guarded by remote.polMu.
+	originCap      map[string]int
+	originWatchers map[string][]string
+	fanTarget      bool
 }
 
 // origin (relay side) is one member whose media we forward or play: where
@@ -434,7 +444,12 @@ func (r *remote) sendingVideo() bool {
 	return false
 }
 
-func (m *Mesh) me() string { return m.sig.Welcome.PeerID }
+func (m *Mesh) me() string {
+	if m.sig == nil {
+		return ""
+	}
+	return m.sig.Welcome.PeerID
+}
 
 // isRelayLocked reports whether id relays in the current plan (m.mu held).
 func (m *Mesh) isRelayLocked(id string) bool { return slices.Contains(m.plan.Relays, id) }
@@ -565,6 +580,7 @@ func (m *Mesh) setPlan(p proto.Plan) {
 		return // stale
 	}
 	wasRelay := m.amRelayLocked()
+	oldRelays := slices.Clone(m.plan.Relays)
 	same := slices.Equal(p.Relays, m.plan.Relays) && homesEqual(p.Home, m.plan.Home)
 	var was []string // our children so far
 	for id := range m.members {
@@ -574,6 +590,9 @@ func (m *Mesh) setPlan(p proto.Plan) {
 	}
 	m.plan = p
 	isRelay := m.amRelayLocked()
+	var clearRelays []*remote
+	startedGrace := false
+	grace := m.rehomeWatchGraceLocked()
 	if !same {
 		m.topoAt = time.Now()
 		if isRelay {
@@ -586,6 +605,20 @@ func (m *Mesh) setPlan(p proto.Plan) {
 				m.served[id] = true
 			}
 		}
+		for id, r := range m.peers {
+			if slices.Contains(oldRelays, id) && !m.isRelayLocked(id) {
+				clearRelays = append(clearRelays, r)
+			}
+		}
+		if m.rehomingWatch == nil {
+			m.rehomingWatch = map[string]time.Time{}
+		}
+		for vid := range m.watchingPeer {
+			if m.members[vid] {
+				m.rehomingWatch[vid] = m.topoAt
+				startedGrace = true
+			}
+		}
 		clear(m.provider)
 	}
 	m.mu.Unlock()
@@ -594,6 +627,13 @@ func (m *Mesh) setPlan(p proto.Plan) {
 			m.opt.OnTopology() // only the queue changed
 		}
 		return
+	}
+	for _, r := range clearRelays {
+		r.polMu.Lock()
+		r.watchers = nil
+		r.originWatchers = nil
+		r.hasWireCap = false
+		r.polMu.Unlock()
 	}
 	m.opt.Log.Info("plan", "epoch", p.Epoch, "relays", p.Relays, "home", m.Home(m.me()))
 	if !wasRelay && isRelay {
@@ -605,6 +645,16 @@ func (m *Mesh) setPlan(p proto.Plan) {
 	m.reconcile()
 	m.resendCaps()
 	m.pushDemand()
+	m.checkAllWatching()
+	if startedGrace {
+		time.AfterFunc(grace+5*time.Millisecond, func() {
+			select {
+			case <-m.done:
+			default:
+				m.checkAllWatching()
+			}
+		})
+	}
 	if m.opt.OnTopology != nil {
 		m.opt.OnTopology()
 	}
@@ -724,16 +774,21 @@ func (m *Mesh) prune() {
 		if r.byeAt.IsZero() {
 			m.sig.Signal(r.id, signalMsg{Bye: true})
 		}
-		m.closePC(r.pc)
+		m.closePC(r)
 	}
 	if stop {
 		m.stopRelaying()
+		m.resendCaps()
+		m.pushDemand()
 	}
 	if len(extra) > 0 {
 		m.updateLowBitrate()
 		m.assignAllSlots()
-		m.pushDemand()
+		if !stop {
+			m.pushDemand()
+		}
 	}
+	m.checkAllWatching()
 }
 
 // gotBye: from closes our connection, which our plan no longer wants
@@ -914,6 +969,7 @@ func (m *Mesh) sendSlots(r *remote) {
 	slots := slices.Clone(r.txSlots)
 	m.mu.Unlock()
 	m.sig.Signal(r.id, signalMsg{Slots: slots})
+	m.resendRelaySending(r)
 }
 
 // stopRelaying clears our slot maps and forwarders.
@@ -983,6 +1039,11 @@ func (m *Mesh) findProviderLocked(o string) string {
 	}
 	if m.directLocked(o) && m.peers[o] != nil {
 		return o // connecting
+	}
+	if home != "" && home != m.me() {
+		if r := m.peers[home]; r != nil && (slices.Contains(r.rxSlots, o) || slices.Contains(r.rxSlots, o+lowSuffix)) {
+			return home // connecting to relay
+		}
 	}
 	return ""
 }
@@ -1199,7 +1260,7 @@ func lowWant(r *remote) int {
 // our screen to it carries HIGH (m.mu held).
 func (m *Mesh) lowWantLocked(r *remote) int {
 	fwd := r.id == m.homeLocked(m.me()) || m.amRelayLocked() && m.isRelayLocked(r.id)
-	if !fwd || r.id == m.me() {
+	if !fwd || r.id == m.me() || m.lowHeight() == 0 {
 		return layerOff
 	}
 	if cur, _ := r.fwd.layers(); cur != layerHigh {
@@ -1215,40 +1276,122 @@ func (m *Mesh) SetMaxLayer(peerID string, layer int) error {
 	m.mu.Lock()
 	m.caps[peerID] = layer
 	m.mu.Unlock()
-	return m.sendCap(peerID, layer)
+	return m.sendCap(peerID, layer, false)
 }
 
-func (m *Mesh) sendCap(peerID string, layer int) error {
+func (m *Mesh) sendCap(peerID string, layer int, dedupe bool) error {
 	m.mu.Lock()
-	relaying := m.amRelayLocked()
+	relaying := m.forwardingLocked()
 	direct := m.directLocked(peerID)
 	home := m.homeLocked(m.me())
-	m.mu.Unlock()
+	var r *remote
+	var to, origin string
 	switch {
 	case relaying:
+	case direct:
+		to = peerID
+		r = m.peers[to]
+	case home != "":
+		to, origin = home, peerID
+		r = m.peers[to]
+	}
+	m.mu.Unlock()
+	if relaying {
 		// We pull what anyone we serve wants, our own wish included.
 		m.pushDemand()
 		return nil
-	case direct:
-		return m.sig.Signal(peerID, signalMsg{MaxLayer: &layer})
-	case home != "":
-		return m.sig.Signal(home, signalMsg{MaxLayer: &layer, Origin: peerID})
 	}
+	if to == "" {
+		return nil
+	}
+	if r == nil {
+		if dedupe {
+			return nil
+		}
+		return m.sig.Signal(to, signalMsg{MaxLayer: &layer, Origin: origin})
+	}
+	return m.signalCap(r, origin, layer, dedupe)
+}
+
+func (m *Mesh) sendPeerCap(to, origin string, wire int, dedupe bool) error {
+	return m.sendPeerCapWatchers(to, origin, wire, nil, dedupe)
+}
+
+func (m *Mesh) sendPeerCapWatchers(to, origin string, wire int, watchers *[]string, dedupe bool) error {
+	m.mu.Lock()
+	r := m.peers[to]
+	m.mu.Unlock()
+	if r == nil {
+		if dedupe {
+			return nil
+		}
+		return m.sig.Signal(to, signalMsg{MaxLayer: &wire, Origin: origin, Watchers: watchers})
+	}
+	return m.signalCapWatchers(r, origin, wire, watchers, dedupe)
+}
+
+func (m *Mesh) signalCap(r *remote, origin string, wire int, dedupe bool) error {
+	return m.signalCapWatchers(r, origin, wire, nil, dedupe)
+}
+
+func sentWatchersMatch(mp map[string][]string, origin string, watchers *[]string) bool {
+	prev, had := mp[origin]
+	if watchers == nil {
+		return !had
+	}
+	return had && slices.Equal(prev, *watchers)
+}
+
+func (m *Mesh) signalCapWatchers(r *remote, origin string, wire int, watchers *[]string, dedupe bool) error {
+	r.polMu.Lock()
+	if dedupe && r.sentCap != nil {
+		if prev, ok := r.sentCap[origin]; ok && prev == wire && sentWatchersMatch(r.sentWatchers, origin, watchers) {
+			r.polMu.Unlock()
+			return nil
+		}
+	}
+	r.polMu.Unlock()
+	if err := m.sig.Signal(r.id, signalMsg{MaxLayer: &wire, Origin: origin, Watchers: watchers}); err != nil {
+		return err
+	}
+	r.polMu.Lock()
+	if r.sentCap == nil {
+		r.sentCap = map[string]int{}
+	}
+	r.sentCap[origin] = wire
+	if watchers == nil {
+		delete(r.sentWatchers, origin)
+	} else {
+		if r.sentWatchers == nil {
+			r.sentWatchers = map[string][]string{}
+		}
+		r.sentWatchers[origin] = slices.Clone(*watchers)
+	}
+	r.polMu.Unlock()
 	return nil
 }
 
-// resendCaps re-sends every kept quality wish along the current plan.
+// resendCaps re-sends every active quality wish along the current plan.
 func (m *Mesh) resendCaps() {
+	type wish struct {
+		id   string
+		wire int
+	}
 	m.mu.Lock()
-	caps := make(map[string]int, len(m.caps))
-	for id, l := range m.caps {
-		if m.members[id] {
-			caps[id] = l
+	if m.forwardingLocked() {
+		m.mu.Unlock()
+		return
+	}
+	var wishes []wish
+	for id := range m.members {
+		w := levelWire(m.ownWishLocked(id))
+		if _, explicit := m.caps[id]; explicit || w != wireHigh {
+			wishes = append(wishes, wish{id: id, wire: w})
 		}
 	}
 	m.mu.Unlock()
-	for id, l := range caps {
-		m.sendCap(id, l)
+	for _, x := range wishes {
+		_ = m.sendCap(x.id, x.wire, true)
 	}
 }
 
@@ -1262,12 +1405,24 @@ func (m *Mesh) ownWishLocked(id string) int {
 			return l
 		}
 	}
+	if m.defaultOff.Load() {
+		return levelOff
+	}
 	return levelHigh
 }
 
 // demandKey is one upstream wish of a relay: to's own video (origin "") or
 // an origin to relays to us.
 type demandKey struct{ to, origin string }
+
+type demandVal struct {
+	wire     int
+	watchers []string
+}
+
+func (a demandVal) equal(b demandVal) bool {
+	return a.wire == b.wire && slices.Equal(a.watchers, b.watchers)
+}
 
 // forgetDemand drops what we asked of id (a new connection starts afresh).
 func (m *Mesh) forgetDemand(id string) {
@@ -1298,78 +1453,125 @@ func (m *Mesh) pushDemand() {
 	m.mu.Lock()
 	if !m.forwardingLocked() {
 		// Back to asking for ourselves: undo what we asked as relay.
-		var undo []string
+		var undo []up
 		for k := range m.demand {
-			if k.origin == "" && m.peers[k.to] != nil {
-				undo = append(undo, k.to)
+			if m.peers[k.to] != nil {
+				undo = append(undo, k)
 			}
 		}
 		clear(m.demand)
 		m.mu.Unlock()
-		for _, id := range undo {
+		for _, k := range undo {
+			origin := k.origin
+			id := origin
+			if id == "" {
+				id = k.to
+			}
 			m.mu.Lock()
+			if !m.members[id] {
+				m.mu.Unlock()
+				continue
+			}
 			w := levelWire(m.ownWishLocked(id))
-			direct := m.directLocked(id)
+			ok := (origin == "" && m.directLocked(id)) || (origin != "" && !m.directLocked(id) && m.homeLocked(m.me()) == k.to)
 			m.mu.Unlock()
-			if direct {
-				m.sig.Signal(id, signalMsg{MaxLayer: &w})
+			if ok {
+				_ = m.sendPeerCap(k.to, origin, w, true)
 			}
 		}
 		return
 	}
+	type targetInfo struct {
+		r       *remote
+		isRelay bool
+	}
 	type need struct {
-		from    string
-		own     int
-		targets []*remote
+		from       string
+		own        int
+		localWatch bool
+		targets    []targetInfo
+	}
+	me := m.me()
+	members := make(map[string]bool, len(m.members))
+	for id := range m.members {
+		members[id] = true
 	}
 	needs := map[string]*need{}
 	for id := range m.members {
 		from := id
 		if !m.directLocked(id) {
-			if !m.amRelayLocked() || m.homeLocked(id) == "" || m.homeLocked(id) == m.me() {
+			if !m.amRelayLocked() || m.homeLocked(id) == "" || m.homeLocked(id) == me {
 				continue
 			}
 			from = m.homeLocked(id) // over the trunk
 		}
-		n := &need{from: from, own: m.ownWishLocked(id)}
+		if m.peers[from] == nil {
+			continue
+		}
+		localWatch := false
+		if !m.opt.Headless {
+			if c, explicit := m.caps[id]; explicit {
+				if l, ok := wireLevel(c); ok && l < levelOff {
+					localWatch = true
+				}
+			}
+		}
+		n := &need{from: from, own: m.ownWishLocked(id), localWatch: localWatch}
 		for _, r := range m.peers {
-			if m.targetLocked(r, id, from) {
-				n.targets = append(n.targets, r)
+			if r.connected.Load() && m.targetLocked(r, id, from) {
+				n.targets = append(n.targets, targetInfo{r: r, isRelay: m.isRelayLocked(r.id)})
 			}
 		}
 		needs[id] = n
 	}
 	m.mu.Unlock()
-	want := map[up]int{}
+	want := map[up]demandVal{}
 	for id, n := range needs {
 		best := n.own
-		for _, r := range n.targets {
-			r.polMu.Lock()
-			c, ok := r.originCap[id]
-			r.polMu.Unlock()
-			if !ok {
+		ws := []string{}
+		if n.localWatch && me != "" && me != id {
+			ws = append(ws, me)
+		}
+		for _, ti := range n.targets {
+			ti.r.polMu.Lock()
+			c, hasCap := ti.r.originCap[id]
+			tw := slices.Clone(ti.r.originWatchers[id])
+			ti.r.polMu.Unlock()
+			if ti.isRelay {
+				for _, wid := range tw {
+					if wid != "" && wid != id && members[wid] {
+						ws = append(ws, wid)
+					}
+				}
+			} else if hasCap && c < levelOff && members[ti.r.id] {
+				ws = append(ws, ti.r.id)
+			}
+			if !hasCap {
 				c = levelHigh
 			}
 			best = min(best, c)
 		}
+		slices.Sort(ws)
+		ws = slices.Compact(ws)
 		k := up{to: n.from}
 		if n.from != id {
 			k.origin = id
 		}
-		want[k] = levelWire(best)
+		want[k] = demandVal{wire: levelWire(best), watchers: ws}
 	}
 	m.mu.Lock()
 	var send []up
-	for k, w := range want {
-		if old, ok := m.demand[k]; !ok || old != w {
+	for k, dv := range want {
+		if old, ok := m.demand[k]; !ok || !old.equal(dv) {
 			send = append(send, k)
 		}
 	}
 	m.demand = want
 	m.mu.Unlock()
 	for _, k := range send {
-		w := want[k]
-		m.sig.Signal(k.to, signalMsg{MaxLayer: &w, Origin: k.origin})
+		dv := want[k]
+		ws := slices.Clone(dv.watchers)
+		_ = m.sendPeerCapWatchers(k.to, k.origin, dv.wire, &ws, false)
 	}
 }
 
@@ -1378,21 +1580,22 @@ func (m *Mesh) pushDemand() {
 func (m *Mesh) localCapOff(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.opt.Headless || m.caps[id] == wireOff && m.forwardingLocked()
+	return m.opt.Headless || m.ownWishLocked(id) >= levelOff && m.forwardingLocked()
 }
 
-// pacedWriter is how slot of r writes its packets (nil = straight out).
+// pacedWriter is how slot of r writes its packets (straight out when unpaced).
 func (m *Mesh) pacedWriter(r *remote, slot int) func(int, *rtp.Packet) {
-	if m.pacer == nil {
-		return nil
-	}
 	t := r.slotV[slot].track
 	return func(src int, p *rtp.Packet) {
-		class := classHigh
-		if src == srcLow {
-			class = classLow
+		if pc := m.pacer.Load(); pc != nil {
+			class := classHigh
+			if src == srcLow {
+				class = classLow
+			}
+			pc.send(class, t, p)
+			return
 		}
-		m.pacer.send(class, t, p)
+		t.WriteRTP(p)
 	}
 }
 

@@ -23,39 +23,40 @@ const (
 	gridFPS      = 30
 )
 
-// Tile is one stream in the grid window.
+// Tile is one stream in a video window.
 type Tile struct {
-	Channel string // the ViewGrid player's Channel
+	Channel string // the ViewGrid player's Channel (or self preview channel)
 	Label   string // shown in the tile's top left corner
-	// ID is the peer the tile shows; with GridConfig.OnControl the tile
-	// gets controls for it: mute, pause and volume. Muted, Paused and
-	// Volume (0..2) are its state.
-	ID            string
-	Muted, Paused bool
-	Volume        float64
+	// ID is the feed ID ("self" or peer ID); with GridConfig.OnControl the
+	// tile gets overlay controls.
+	ID        string
+	Self      bool    // our own preview tile (no mute or volume slider)
+	Muted     bool    // playback muted (remote tiles)
+	Volume    float64 // playback gain 0..2 (remote tiles)
+	Pinned    bool    // takes the primary area of the main window
+	PoppedOut bool    // shown in its own pop-out window
 	// Stopped: they stopped sharing. The tile says so on black instead of
 	// their last frame (Channel unused) and has no controls.
 	Stopped bool
 }
 
-// Control is a button on a tile.
+// Control is a button or slider on a tile.
 type Control string
 
 const (
-	ControlMute  Control = "mute"  // toggle their audio
-	ControlPause Control = "pause" // toggle their video
+	ControlEye    Control = "eye"     // stop watching (hide preview for self)
+	ControlPopOut Control = "pop_out" // pop out into own window, or pop back in
+	ControlPin    Control = "pin"     // pin or unpin in the main window
+	ControlMute   Control = "mute"    // toggle their audio
 	// ControlVolume sets their playback volume (0..2) from the slider.
 	ControlVolume Control = "volume"
 )
 
-// GridConfig describes a grid window.
+// GridConfig describes a grid or pop-out window.
 type GridConfig struct {
 	Tiles      []Tile
-	Rows, Cols int      // 0 = auto (GridSize)
+	Rows, Cols int      // 0 = auto (GridSize, or pinned + strip when a tile is Pinned)
 	View       ViewKind // ViewWindow, or ViewCount for headless tests
-	// Pip is a preview channel (see StartVideoSource) shown small in a
-	// corner; "" for none.
-	Pip string
 	// Width x Height is the canvas (the window's first size); 0 = 1920x1080.
 	Width, Height int
 	// OnControl gets the controls used on a tile with an ID (v: the
@@ -67,7 +68,7 @@ type GridConfig struct {
 	Window Window
 }
 
-// GridTileHeight is the height of a tile in a grid of n tiles on the
+// GridTileHeight is the height of a tile in a uniform grid of n tiles on the
 // default canvas.
 func GridTileHeight(n, rows, cols int) int {
 	r, _ := GridSize(n, rows, cols)
@@ -97,7 +98,44 @@ func GridSize(n, rows, cols int) (int, int) {
 	return rows, cols
 }
 
-// Grid is one window that shows several streams tiled.
+// layoutRects places tiles on a cw x ch canvas. When one of 2+ tiles is
+// Pinned (and rows/cols are auto), the pinned tile gets the primary 4/5 of
+// the width and the others stack in a strip on the right. All coordinates and
+// sizes are even for YUV / videoscale.
+func layoutRects(tiles []Tile, cw, ch, rows, cols int) (rects []rect, outW, outH int) {
+	rects = make([]rect, len(tiles))
+	pinIdx := slices.IndexFunc(tiles, func(t Tile) bool { return t.Pinned })
+	if pinIdx >= 0 && len(tiles) >= 2 && rows == 0 && cols == 0 {
+		outW, outH = cw&^1, ch&^1
+		mainW := (outW * 4 / 5) &^ 1
+		stripW := (outW - mainW) &^ 1
+		rects[pinIdx] = rect{0, 0, mainW, outH}
+		others := len(tiles) - 1
+		stripCols := 1
+		if others > 5 {
+			stripCols = 2
+		}
+		stripRows := (others + stripCols - 1) / stripCols
+		sw, sh := (stripW/stripCols)&^1, (outH/stripRows)&^1
+		k := 0
+		for i := range tiles {
+			if i == pinIdx {
+				continue
+			}
+			rects[i] = rect{mainW + (k%stripCols)*sw, (k / stripCols) * sh, sw, sh}
+			k++
+		}
+		return rects, outW, outH
+	}
+	r, c := GridSize(len(tiles), rows, cols)
+	tw, th := (cw/c)&^1, (ch/r)&^1
+	for i := range tiles {
+		rects[i] = rect{(i % c) * tw, (i / c) * th, tw, th}
+	}
+	return rects, tw * c, th * r
+}
+
+// Grid is one window that shows one or more streams.
 type Grid struct {
 	*Pipeline
 	feed *Pipeline // pushes the drawn controls and spinners (nil: none)
@@ -155,15 +193,6 @@ func (r rect) has(x, y float64) bool {
 	return x >= float64(r.x) && x < float64(r.x+r.w) && y >= float64(r.y) && y < float64(r.y+r.h)
 }
 
-// The self-preview in the grid sits in the bottom right corner, gridPipH
-// lines of the gridH canvas: 144p to 240p on screen for a grid window
-// 640 to 1080 lines tall.
-const (
-	gridPipW, gridPipH = 384, 216
-	gridPipMargin      = 16
-	gridPipFrame       = 3 // white border, so the preview stands out from dark content
-)
-
 // interHold is how long an intervideosrc keeps showing the last frame
 // before it turns black. Its default, 1 s, blanked a window share whenever
 // the window sat still: Windows window capture only sends frames when the
@@ -177,84 +206,79 @@ var overlaySeq atomic.Uint64
 // show its first frames.
 const gridStartTimeout = 3 * time.Second
 
-// StartGrid opens a window with the tiles laid out rows x cols (GridSize).
-// With cfg.Window it draws into that window with the first sink that
-// works there, else the sink opens a window of its own.
+// StartGrid opens a window with cfg.Tiles laid out uniformly or with a pinned
+// primary tile and a strip. With cfg.Window it draws into that window with
+// the first sink that works there, else the sink opens a window of its own.
 func StartGrid(cfg GridConfig) (*Grid, error) {
 	switch {
 	case cfg.View == ViewCount:
-		g, err := startGrid(cfg, "fakesink name=vsink sync=false", nil)
-		if g != nil {
-			g.win = cfg.Window // headless: take it as drawn into
-		}
-		return g, err
+		// Headless: set g.win inside startGrid before the tick goroutine starts,
+		// while skipping native window embedding on fakesink.
+		return startGrid(cfg, "fakesink name=vsink sync=false", cfg.Window, false)
 	case cfg.Window != nil:
 		var errs []error
 		for _, sink := range VideoWindowSinks() {
 			if !gst.HasFactory(sink) {
 				continue
 			}
-			g, err := startGrid(cfg, sink+" name=vsink sync=false force-aspect-ratio=true", cfg.Window)
+			g, err := startGrid(cfg, sink+" name=vsink sync=false force-aspect-ratio=true", cfg.Window, true)
 			if err == nil {
 				return g, nil
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", sink, err))
 		}
-		g, err := startGrid(cfg, "autovideosink name=vsink sync=false", nil)
+		g, err := startGrid(cfg, "autovideosink name=vsink sync=false", nil, false)
 		if err != nil {
 			return nil, errors.Join(append(errs, err)...)
 		}
 		g.Sink += " (" + errors.Join(errs...).Error() + ")"
 		return g, nil
 	}
-	return startGrid(cfg, "autovideosink name=vsink sync=false", nil)
+	return startGrid(cfg, "autovideosink name=vsink sync=false", nil, false)
 }
 
-func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
+func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, error) {
 	tiles := cfg.Tiles
-	rows, cols := GridSize(len(tiles), cfg.Rows, cfg.Cols)
 	cw, ch := cfg.Width, cfg.Height
 	if cw <= 0 || ch <= 0 {
 		cw, ch = gridW, gridH
 	}
-	tw, th := cw/cols&^1, ch/rows&^1
-	pipW, pipH, pipMargin := gridPipW*cw/gridW&^1, gridPipH*cw/gridW&^1, gridPipMargin*cw/gridW
+	rects, outW, outH := layoutRects(tiles, cw, ch, cfg.Rows, cfg.Cols)
 	controls := cfg.OnControl != nil
 	ovs := make([]tileOverlay, len(tiles))
 	var b, feed strings.Builder
 	fmt.Fprintf(&b, "compositor name=mix background=black")
-	rects := make([]rect, len(tiles))
-	for i := range tiles {
-		rects[i] = rect{i % cols * tw, i / cols * th, tw, th}
-		fmt.Fprintf(&b, " sink_%d::xpos=%d sink_%d::ypos=%d", i, rects[i].x, i, rects[i].y)
-	}
-	pipPad := len(tiles)
-	if cfg.Pip != "" { // the pad's position includes the frame videobox adds
-		fmt.Fprintf(&b, " sink_%d::xpos=%d sink_%d::ypos=%d sink_%d::zorder=%d", pipPad,
-			tw*cols-pipW-pipMargin-gridPipFrame, pipPad, th*rows-pipH-pipMargin-gridPipFrame, pipPad, pipPad+1)
+	for i, r := range rects {
+		fmt.Fprintf(&b, " sink_%d::xpos=%d sink_%d::ypos=%d", i, r.x, i, r.y)
 	}
 	// Drawn layers: two pads per tile with controls, above everything,
 	// hidden (alpha 0) until shown.
 	type layer struct {
-		pad, ch     string
-		x, y, w, h  int
-		appsrc, out string
+		pad, ch string
+		x, y    int
+		w, h    int
+		appsrc  string
 	}
 	var layers []layer
-	next := pipPad + 1
+	next := len(tiles)
 	for i, t := range tiles {
 		if !controls || t.ID == "" || t.Stopped {
 			continue
 		}
+		r := rects[i]
 		o := &ovs[i]
-		o.barW, o.barH = barSize(th)
-		o.barX, o.barY = rects[i].x+(tw-o.barW)/2, rects[i].y+th-o.barH-o.barH/3
-		o.spinS = spinnerSize(th)
+		o.barW, o.barH = barSize(r.w, r.h, t.Self)
+		o.barX, o.barY = r.x+(r.w-o.barW)/2, r.y+r.h-o.barH-o.barH/3
+		o.spinS = spinnerSize(r.w, r.h)
 		seq := overlaySeq.Add(1)
 		for k, l := range []layer{
 			{x: o.barX, y: o.barY, w: o.barW, h: o.barH},
-			{x: rects[i].x + (tw-o.spinS)/2, y: rects[i].y + (th-o.spinS)/2, w: o.spinS, h: o.spinS},
+			{x: r.x + (r.w-o.spinS)/2, y: r.y + (r.h-o.spinS)/2, w: o.spinS, h: o.spinS},
 		} {
+			if t.Self && k == 1 {
+				// Our own preview comes from local capture, so no network spinner.
+				continue
+			}
 			l.pad = fmt.Sprintf("sink_%d", next)
 			l.ch = fmt.Sprintf("blite-ov-%d-%d", seq, k)
 			l.appsrc = fmt.Sprintf("ov%d_%d", i, k)
@@ -270,32 +294,24 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	for _, l := range layers {
 		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d %s::alpha=0", l.pad, l.x, l.pad, l.y, l.pad, next+1, l.pad)
 	}
-	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", tw*cols, th*rows, gridFPS, sink)
+	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, gridFPS, sink)
 	for i, t := range tiles {
+		r := rects[i]
 		if t.Stopped { // black, the text in the middle (showStateLocked sets it)
 			fmt.Fprintf(&b, " videotestsrc is-live=true pattern=black ! "+
 				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! "+
 				"textoverlay name=label%d valignment=center halignment=center font-desc=\"Sans 28\" ! mix.sink_%d",
-				tw, th, gridFPS, i, i)
+				r.w, r.h, gridFPS, i, i)
 			continue
 		}
 		wait := ""
-		if ovs[i].barPad != "" {
+		if ovs[i].spinPad != "" {
 			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=%s valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i, launchQuote(i18n.L("Waiting for video")))
 		}
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! videoscale add-borders=true ! "+
 			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
 			"textoverlay name=label%d valignment=top halignment=left font-desc=\"%s\" shaded-background=true ! %smix.sink_%d",
-			t.Channel, interHold, tw, th, i, labelFont(ovs[i].barPad == ""), wait, i)
-	}
-	if cfg.Pip != "" {
-		// videobox draws the frame: a separate live source for it broke
-		// the compositor's latency query and flooded the logs with errors.
-		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! videoscale add-borders=true ! "+
-			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
-			"textoverlay text=%s valignment=bottom halignment=left font-desc=\"Sans 24\" shaded-background=true ! "+
-			"videobox left=-%d right=-%d top=-%d bottom=-%d fill=white ! mix.sink_%d",
-			cfg.Pip, interHold, pipW, pipH, launchQuote(i18n.L("You")), gridPipFrame, gridPipFrame, gridPipFrame, gridPipFrame, pipPad)
+			t.Channel, interHold, r.w, r.h, i, labelFont(ovs[i].barPad == ""), wait, i)
 	}
 	for _, l := range layers {
 		// intervideosrc repeats the last frame we drew, like the tiles.
@@ -315,7 +331,8 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 			if ovs[i].barPad == "" {
 				continue
 			}
-			if ovs[i].bar, err = fp.element(fmt.Sprintf("ov%d_0", i)); err == nil {
+			ovs[i].bar, err = fp.element(fmt.Sprintf("ov%d_0", i))
+			if err == nil && ovs[i].spinPad != "" {
 				ovs[i].spin, err = fp.element(fmt.Sprintf("ov%d_1", i))
 			}
 			if err != nil {
@@ -355,16 +372,18 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 		if g.ctl.labels[i], err = p.element(fmt.Sprintf("label%d", i)); err != nil {
 			return fail(err)
 		}
-		if ovs[i].barPad != "" {
+		if ovs[i].spinPad != "" {
 			if g.ctl.ov[i].wait, err = p.element(fmt.Sprintf("wait%d", i)); err != nil {
 				return fail(err)
 			}
-			g.pushBarLocked(i)
 			g.pushSpinnerLocked(i)
+		}
+		if ovs[i].barPad != "" {
+			g.pushBarLocked(i)
 		}
 		g.showStateLocked(i)
 	}
-	if win != nil {
+	if embed && win != nil {
 		vs, err := p.element("vsink")
 		if err != nil {
 			return fail(err)
@@ -392,7 +411,7 @@ func startGrid(cfg GridConfig, sink string, win Window) (*Grid, error) {
 	if err := p.start(); err != nil {
 		return fail(err)
 	}
-	if win != nil && g.out != nil {
+	if embed && win != nil && g.out != nil {
 		// A sink can accept PLAYING and fail on its first frame (no Xv
 		// port, no Direct3D device): see frames go through first.
 		deadline := time.Now().Add(gridStartTimeout)
@@ -498,7 +517,7 @@ func (g *Grid) pointerLocked(st gst.NavState, now time.Time) {
 			return i, "", 0
 		}
 		o := g.ctl.ov[i]
-		c, v, _ := barHit(x-float64(o.barX), y-float64(o.barY), o.barH)
+		c, v, _ := barHit(x-float64(o.barX), y-float64(o.barY), o.barH, g.ctl.tiles[i].Self)
 		return i, c, v
 	}
 	i, c, _ := hit(st.At.X, st.At.Y)
@@ -524,7 +543,7 @@ func (g *Grid) pointerLocked(st gst.NavState, now time.Time) {
 	for _, k := range st.Clicks {
 		ki, kc, v := hit(k.X, k.Y)
 		switch kc {
-		case ControlMute, ControlPause:
+		case ControlEye, ControlPopOut, ControlPin, ControlMute:
 			id, on := g.ctl.tiles[ki].ID, g.ctl.on
 			go on(id, kc, 0)
 		case ControlVolume:
@@ -596,12 +615,12 @@ func (g *Grid) pushBarLocked(i int) {
 	if i == g.ctl.shown {
 		hover = g.ctl.hover
 	}
-	key := fmt.Sprint(t.Muted, t.Paused, t.Volume, hover)
+	key := fmt.Sprint(t.Self, t.Muted, t.Volume, t.Pinned, t.PoppedOut, hover)
 	if key == o.drawn {
 		return
 	}
 	o.drawn = key
-	o.bar.Push(drawBar(o.barH, t.Muted, t.Paused, t.Volume, hover).Pix)
+	o.bar.Push(drawBar(o.barW, o.barH, t, hover).Pix)
 }
 
 // pushSpinnerLocked shows or hides tile i's spinner, turning it.
@@ -624,23 +643,39 @@ func (g *Grid) pushSpinnerLocked(i int) {
 	}
 }
 
-// SetState updates tile id's mute, pause and volume on its label and
-// controls.
-func (g *Grid) SetState(id string, muted, paused bool, volume float64) {
+// SetState updates tile id's mute, volume, pinned and pop-out state on its
+// label and controls.
+func (g *Grid) SetState(id string, muted bool, volume float64, pinned, poppedOut bool) {
 	g.ctl.Lock()
 	defer g.ctl.Unlock()
 	if g.ctl.done {
 		return
 	}
 	for i, t := range g.ctl.tiles {
-		if t.ID == id && (t.Muted != muted || t.Paused != paused || (t.Volume != volume && g.ctl.drag != i)) {
-			g.ctl.tiles[i].Muted, g.ctl.tiles[i].Paused = muted, paused
+		if t.ID == id && (t.Muted != muted || t.Pinned != pinned || t.PoppedOut != poppedOut || (t.Volume != volume && g.ctl.drag != i)) {
+			g.ctl.tiles[i].Muted = muted
+			g.ctl.tiles[i].Pinned = pinned
+			g.ctl.tiles[i].PoppedOut = poppedOut
 			if g.ctl.drag != i { // the slider leads while dragged
 				g.ctl.tiles[i].Volume = volume
 			}
 			g.showStateLocked(i)
 		}
 	}
+}
+
+// EffectiveTileHeight returns the 16:9-fitted height of tile id on this
+// grid's canvas (0 if id is not shown here).
+func (g *Grid) EffectiveTileHeight(id string) int {
+	g.ctl.Lock()
+	defer g.ctl.Unlock()
+	for i, t := range g.ctl.tiles {
+		if t.ID == id {
+			r := g.ctl.rects[i]
+			return min(r.h, r.w*9/16)
+		}
+	}
+	return 0
 }
 
 // SetWaiting shows (or hides) a spinner on tile id: no video yet, or it
@@ -682,17 +717,13 @@ func (g *Grid) showStateLocked(i int) {
 	g.pushBarLocked(i)
 }
 
-// tileText is the tile's label: their name and what's off.
+// tileText is the tile's label: their name and whether playback is muted.
 func tileText(t Tile) string {
 	switch {
 	case t.Stopped:
 		return i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": t.Label})
-	case t.Muted && t.Paused:
-		return t.Label + "  " + i18n.L("(muted, video paused)")
-	case t.Muted:
+	case t.Muted && !t.Self:
 		return t.Label + "  " + i18n.L("(muted)")
-	case t.Paused:
-		return t.Label + "  " + i18n.L("(video paused)")
 	}
 	return t.Label
 }

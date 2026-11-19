@@ -33,8 +33,8 @@ uploads their screen once per viewer. That's fine for a handful of people;
 forwards everyone's video, so each sharer uploads once. Three ways, from
 easiest:
 
-1. **Volunteer from the app:** *People > Volunteer as relay* on a PC with a
-   fast, wired upload that isn't busy gaming.
+1. **Volunteer from the app:** switch on *Volunteer as relay* at the bottom of
+   the People list, on a PC with a fast, wired upload that isn't busy gaming.
 2. **A dedicated relay machine for your group:** a spare PC, home server or
    VPS joins your room by its share link and relays, on any server including
    bellion.app:
@@ -50,26 +50,33 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
 ## Features
 
 **Sharing**
-- **Go live: main monitor** starts a session, shares your main monitor and
-  copies the share link. No account needed.
-- The Share menu switches what you share at any time: all screens combined,
-  a single monitor, one window, a test pattern, or nothing (watch only).
-- 720p, 1080p or 4K, tuned for desktop (sharp text, 30 fps) or games
-  (smooth motion, 60 fps). Bellion Share steps the resolution down when the
-  encoder can't keep up.
-- Share audio from all apps (never the call itself, so nothing echoes back)
-  or only the apps you pick; sharing a window shares that window's app audio
-  automatically. PipeWire on Linux, per-app loopback capture on Windows.
+- Pick **Entire screen** or **A window** (a list with app icons), then
+  **Go live and copy link** starts a session, shares it and copies the share
+  link. No account needed.
+- Switch what you share at any time in the call; *Share options > Advanced*
+  also has all screens combined, a test pattern, or nothing (watch only).
+- Quality presets: 720p, 1080p or 4K at 30 fps (sharp text) or 60 fps
+  (smooth motion), plus your own (**+** adds one, **x** removes it).
+  Bellion Share steps the resolution down when the encoder can't keep up.
+- Sharing a window shares that app's audio automatically (if the app can't
+  be found, there's no window audio and a note says so); the entire screen
+  starts without sound. Or share the whole system's audio (never the call
+  itself, so nothing echoes back) or only the apps you pick. PipeWire on
+  Linux, per-app loopback capture on Windows.
 - Hardware H.264 encoding when available (NVENC, Quick Sync, AMF, VA-API,
   Media Foundation), x264 otherwise.
-- An optional preview of your own stream.
+- A preview of your own stream in the video window, hidden with one click.
 
 **Watching**
-- One window per person, or everyone in one grid window (automatic or your
-  own rows and columns). Closed a video window? **Show video** brings it back.
+- Everyone you watch in one video window: pin a tile, or pop it out into
+  its own window. An eye next to each person starts or stops watching them;
+  new streams start watching automatically (you can turn that off).
 - When someone stops sharing, their tile says so and fades out.
-- Per-person video quality (Best, Low, Off), volume and mute, and a choice of
+- Click someone for their panel: volume (up to 200%), mute, video quality
+  (Best or Low), connection details and owner actions. Plus a choice of
   playback device.
+- Short sounds when someone joins, starts sharing or starts watching you, and
+  when you go live (can be turned off).
 - Adapts to each viewer: every sharer sends a high and a low layer, plus
   in-between sizes (1080p, 720p) for viewers whose connection or computer
   can't take the top size. Lost packets are concealed by holding the last
@@ -77,8 +84,9 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
 
 **Discord**
 - Connect Discord once, and Bellion Share follows the voice channel you're
-  in: **Go live in #channel** starts a session tied to it, and people in the
-  channel see a **Watch** button. It only reads which voice channel you're in.
+  in: **Share** starts a session tied to it (**Join** enters it without
+  sharing), and people in the channel see who's sharing and a **Watch**
+  button. It only reads which voice channel you're in.
   See [Discord integration](https://bellion.app/docs/discord).
 - **Not open to everyone yet:** Discord is still reviewing the Bellion app.
   Until then, Connect Discord only works for people added as testers, and
@@ -87,6 +95,8 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
 **Rooms and security**
 - Sessions are a room code plus an optional password, shared as one link;
   links open the app directly (`bshare://`, and older `blite://` links).
+  Typing just the room code works too, and the home screen lists your recent
+  rooms for one-click rejoining.
 - End-to-end encryption, on by default: each sender encrypts its media with
   keys only room members get, so a TURN server or relay passing it on can't
   read it.
@@ -98,7 +108,12 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   ban them.
 - The password stays out of the join page and HTTP logs (it's in the link's
   `#` part), but the app sends it to the server over WSS to check it; the
-  server keeps only an Argon2id hash, in memory. The password isn't part of
+  server keeps only an Argon2id hash, for as long as the session is open.
+  So that restarts don't end calls, bellion.app saves open sessions to its
+  disk (room code, password hash, members' names, identity keys and resume
+  token hashes; no IP addresses), and drops each one within about 30 seconds
+  after the session ends; self-hosted servers do this with
+  `BLITE_STATE_FILE`. The password isn't part of
   the encryption keys, so a compromised server could add someone to your
   session: they would show in the People list and change the safety code.
   Relays get the room's keys, like any member.
@@ -123,12 +138,10 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   allowed (`-udp-port 0` turns that off); STUN by default, TURN for peers
   behind strict NAT. As in any peer-to-peer app, people in a session learn
   each other's IP addresses.
-- Send feedback and logs from the Help menu. On Windows, a crash guard runs
-  Bellion Share and keeps crash dumps locally (never uploaded). Today they
-  hold the app's full memory, and opening a share link writes the link,
-  password included, to the local log, which crash reports and Send logs
-  can upload. Both are fixed in an upcoming version (smaller dumps, redacted
-  logs).
+- Send feedback and logs from the **?** menu. Room passwords are redacted
+  from the log before it's written and from everything the app uploads. On
+  Windows, a crash guard runs Bellion Share and keeps small crash dumps
+  locally (never uploaded; no full memory, at most two, for up to 14 days).
 - Release binaries on bellion.app are built privately, without public CI
   attestations; for full certainty, build from this repository.
 
@@ -140,7 +153,7 @@ signaling server runs anywhere Go does.
 (Simplified and Traditional), Hindi, Spanish, French, Bengali, Portuguese,
 Russian, Indonesian, German, Japanese, Korean, Turkish, Vietnamese, Italian,
 Polish, Ukrainian, Thai, Dutch, Tamil, Telugu, Marathi, Filipino and Swahili.
-Arabic, Urdu and Persian are a preview you can pick in View > Language
+Arabic, Urdu and Persian are a preview you can pick in the gear menu's Language
 (right-to-left layout isn't there yet). Translations were made by AI;
 corrections are welcome.
 
@@ -151,10 +164,11 @@ corrections are welcome.
    may still warn: More info > Run anyway), or
    use the portable zip and run `blite-guard.exe`. Linux:
    `sudo apt install ./blite_*.deb`.
-2. Press **Go live: main monitor**. The share link is copied to your
-   clipboard; paste it to your friends.
-3. They click the link (or paste it into **Watch someone**) and see your
-   screen. Everyone can press Go live too.
+2. Pick **Entire screen** or **A window** and press **Go live and copy
+   link**. The share link is copied to your clipboard; paste it to your
+   friends.
+3. They click the link (or paste it, or the room code, into **Watch
+   someone**) and see your screen. Everyone can go live too.
 
 Details: [Getting started](https://bellion.app/docs/getting-started),
 [Features](https://bellion.app/docs/features),

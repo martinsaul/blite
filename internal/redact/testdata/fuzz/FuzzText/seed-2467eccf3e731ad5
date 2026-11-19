@@ -1,0 +1,2 @@
+go test fuzz v1
+string("us%40er:p@ss@us%40er:p@ss@us%40er:p@ss@")

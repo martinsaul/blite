@@ -49,6 +49,6 @@ func (u *UI) askAutostart() {
 		return
 	}
 	u.confirm(i18n.L("Start with your computer?"),
-		i18n.L("Start Bellion Share in the background when you sign in? You can change this later in the Help menu."),
+		i18n.L("Start Bellion Share in the background when you sign in? You can change this later in Settings."),
 		func() error { return u.a.SetAutostart(true) })
 }

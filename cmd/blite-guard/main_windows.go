@@ -4,8 +4,9 @@
 //     %LOCALAPPDATA%\Blite\logs (quiet ones expire after 24 h; ones with an
 //     error, crash or injected DLL are kept 7 days);
 //   - every DLL loaded into Blite is recorded;
-//   - when Blite crashes, a full memory dump goes to
-//     %LOCALAPPDATA%\Blite\crash\blite-<time>.dmp (the newest 3 are kept).
+//   - when Blite crashes, a minidump goes to
+//     %LOCALAPPDATA%\Blite\crash\blite-<time>.dmp (the newest 2 are kept,
+//     and dumps older than 14 days are deleted at guard start).
 //
 // The dump is taken at the first access violation (or illegal instruction),
 // before the Go runtime prints its traceback. Blite also runs with
@@ -14,18 +15,18 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"blite/internal/redact"
 )
 
 var (
@@ -52,11 +53,19 @@ const (
 	excFailFast     = 0xC0000602
 	excStackOverrun = 0xC0000409
 
-	// MiniDumpWithFullMemory | WithHandleData | WithThreadInfo |
-	// WithFullMemoryInfo | WithUnloadedModules: goroutine stacks live in the
-	// Go heap, so the dump needs all memory.
-	dumpType = 0x2 | 0x4 | 0x1000 | 0x800 | 0x20
-	keepDump = 3
+	miniDumpWithDataSegs                   = 0x00000001
+	miniDumpWithUnloadedModules            = 0x00000020
+	miniDumpWithIndirectlyReferencedMemory = 0x00000040
+	miniDumpWithThreadInfo                 = 0x00001000
+
+	// MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
+	// MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithUnloadedModules:
+	// captures thread contexts, globals, unloaded DLLs, and memory pointed to
+	// by registers and stacks, while omitting MiniDumpWithFullMemory and
+	// MiniDumpWithHandleData so room passwords, E2EE keys, and media buffers
+	// on the heap aren't written to disk.
+	dumpType = miniDumpWithDataSegs | miniDumpWithThreadInfo |
+		miniDumpWithIndirectlyReferencedMemory | miniDumpWithUnloadedModules
 )
 
 // debugEvent is DEBUG_EVENT on amd64: three DWORDs, padding, then the union.
@@ -77,6 +86,7 @@ func main() {
 	logs, crash := filepath.Join(base, "logs"), filepath.Join(base, "crash")
 	os.MkdirAll(logs, 0o755)
 	os.MkdirAll(crash, 0o755)
+	pruneDumps(crash, time.Now(), keepDump)
 	exe, _ := os.Executable()
 	root := filepath.Dir(exe)
 	child := filepath.Join(root, "bin", "blite.exe")
@@ -94,8 +104,9 @@ func main() {
 
 	// WaitForDebugEvent must run on the thread that created the process.
 	runtime.LockOSThread()
+	rw := redact.NewWriter(j)
 	cmd := exec.Command(child, os.Args[1:]...)
-	cmd.Stdout, cmd.Stderr = j, j
+	cmd.Stdout, cmd.Stderr = rw, rw
 	// BLITE_GUARD tells Blite it is guarded, so it doesn't relaunch itself
 	// through the guard.
 	cmd.Env = append(os.Environ(), "GOTRACEBACK=crash", "BLITE_GUARD=1")
@@ -106,10 +117,11 @@ func main() {
 	}
 	// If the guard dies, Blite keeps running.
 	procKillOnExit.Call(0)
-	j.Guardf(false, "started %s pid %d args %q", child, cmd.Process.Pid, os.Args[1:])
+	j.Guardf(false, "started %s pid %d args %q", child, cmd.Process.Pid, redact.Args(os.Args[1:]))
 
 	code := debugLoop(j, cmd.Process.Pid, crash, root)
 	cmd.Wait()
+	rw.Flush()
 	j.Guardf(code != 0, "blite exited with code %#x", code)
 	j.Close()
 	os.Exit(int(code & 0xff))
@@ -167,7 +179,7 @@ func debugLoop(j *journal, pid int, crashDir, root string) uint32 {
 }
 
 func dump(j *journal, proc windows.Handle, pid int, tid uint32, dir string) {
-	prune(dir, "blite-*.dmp", keepDump-1)
+	pruneDumps(dir, time.Now(), keepDump-1)
 	path := filepath.Join(dir, "blite-"+time.Now().Format("20060102-150405")+".dmp")
 	f, err := os.Create(path)
 	if err != nil {
@@ -212,18 +224,4 @@ func foreign(path, root string) bool {
 		return false
 	}
 	return !strings.HasPrefix(p, strings.ToLower(root))
-}
-
-// prune keeps the newest keep files matching pattern in dir.
-func prune(dir, pattern string, keep int) {
-	m, _ := filepath.Glob(filepath.Join(dir, pattern))
-	if len(m) <= keep {
-		return
-	}
-	sort.Strings(m) // names carry a sortable timestamp
-	for _, p := range m[:len(m)-keep] {
-		if err := os.Remove(p); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-		}
-	}
 }

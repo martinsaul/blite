@@ -7,16 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"blite/internal/audio"
 	"blite/internal/capture"
+	"blite/internal/i18n"
 	"blite/internal/identity"
 	"blite/internal/media"
 	"blite/internal/proto"
+	"blite/internal/redact"
 	"blite/internal/register"
 	"blite/internal/session"
 	"blite/internal/sigclient"
@@ -30,15 +32,31 @@ type App struct {
 	log *slog.Logger
 	bc  ui.Broadcaster
 
-	mu      sync.Mutex
-	sess    *session.Session
-	lastErr string
-	res     media.Resolution  // last chosen share resolution; new sessions keep it
-	mode    media.ContentMode // last chosen content mode; new sessions keep it
-	layout  session.Layout    // how we show received streams; kept on disk
-	discord Discord           // the user's Discord voice channel (RunDiscord)
-	servers serverSettings    // the user's signaling servers; kept on disk
-	picked  string            // the lobby's server for new sessions; "" = the default
+	mu          sync.Mutex
+	sess        *session.Session
+	lastErr     string
+	homeSource  string               // pre-call source choice ("primary", "window:...", "screen", "test", "none")
+	srcInfo     sourceInfo           // what we know of the picked "window:"/"monitor:" source
+	res         media.Resolution     // last chosen share resolution; new sessions keep it
+	mode        media.ContentMode    // last chosen content mode; new sessions keep it
+	shareOpts   session.ShareOptions // outgoing FPS, slow-viewer policy, floor, smaller copy, upload limit
+	audio       audio.Selection      // pre-call shared audio selection
+	presets     []QualityPreset      // the user's own quality presets; kept on disk
+	presetMu    sync.Mutex           // serializes preset changes and their saving
+	srcAudioMu  sync.Mutex           // serializes SetSource and SetAudio: a call's sound follows the last one
+	output      string               // pre-call playback device ("" = default)
+	requirePw   bool                 // pre-call "Require a password" toggle
+	roomPw      string               // pre-call room password
+	e2ee        bool                 // pre-call "Encrypt end to end" toggle; kept on disk
+	portMap     bool                 // "Open a port on my router automatically"; kept on disk
+	sessPortMap bool                 // portMap setting active in the current session
+	autoWatch   bool                 // start watching new remote streams automatically; kept on disk
+	playSounds  bool                 // play notification sounds; kept on disk
+	discord     Discord              // the user's Discord voice channel (RunDiscord)
+	servers     serverSettings       // the user's signaling servers; kept on disk
+	picked      string               // the lobby's server for new sessions; "" = the default
+	recent      []recentEntry        // last 5 rooms created or joined; kept on disk
+	recentGen   uint64               // bumps on each ProbeRecentRooms pass
 	// discordAuth wakes RunDiscord to ask Discord for permission.
 	discordAuth chan struct{}
 	// DefaultSource is what a new session shares first.
@@ -75,17 +93,85 @@ type App struct {
 // minimum, so no new sessions until it's updated.
 var ErrUpdateRequired = errors.New("this Bellion Share is too old: install the update first")
 
+func modeFromShareOptions(o session.ShareOptions) media.ContentMode {
+	if o.EffectiveSlowViewer() == session.SlowResolution {
+		return media.ModeGame
+	}
+	return media.ModeDesktop
+}
+
+func orAppRes(r media.Resolution) media.Resolution {
+	if r == "" {
+		return media.Res720
+	}
+	return r
+}
+
 // New returns an App that creates sessions with cfg.
 func New(cfg session.Config, def media.SourceKind) *App {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
-	return &App{cfg: cfg, log: cfg.Log, DefaultSource: def, layout: loadLayout(), servers: loadServers(), discordAuth: make(chan struct{}, 1)}
+	autoWatch := loadAutoWatch()
+	if cfg.AutoWatch != nil {
+		autoWatch = *cfg.AutoWatch
+	}
+	playSounds := loadPlaySounds()
+	if cfg.PlaySounds != nil {
+		playSounds = *cfg.PlaySounds
+	}
+	portMap := LoadPortMap()
+	if cfg.Port != nil {
+		cfg.Port.SetMapping(portMap)
+	}
+	res, opts, e2ee := loadShareSettings(cfg.UploadKbps)
+	return &App{
+		cfg:           cfg,
+		log:           cfg.Log,
+		DefaultSource: def,
+		homeSource:    "primary",
+		res:           res,
+		mode:          modeFromShareOptions(opts),
+		shareOpts:     opts,
+		audio:         audio.Selection{Mode: "none"},
+		presets:       loadPresets(),
+		e2ee:          e2ee,
+		portMap:       portMap,
+		autoWatch:     autoWatch,
+		playSounds:    playSounds,
+		servers:       loadServers(),
+		recent:        loadRecent(cfg.Server),
+		discordAuth:   make(chan struct{}, 1),
+	}
+}
+
+// ShareConfig describes our current or pre-call share options for the UI.
+type ShareConfig struct {
+	Source             string          `json:"source"`                    // "primary", "none", "screen", "test", "monitor:...", "window:..."
+	SourceName         string          `json:"-"`                         // a picked window's title (or app) or monitor's name; never a handle. Not in JSON: logs carry the state
+	Resolution         string          `json:"resolution"`                // "720p", "1080p", "2160p"
+	FPS                int             `json:"fps"`                       // 10..60 step 5
+	SlowViewer         string          `json:"slowViewer,omitempty"`      // "" (auto), "resolution", "fps"
+	EffectiveSlow      string          `json:"effectiveSlow"`             // "resolution" or "fps"
+	MinHeight          int             `json:"minHeight"`                 // 360, 540, 720
+	SmallerCopy        bool            `json:"smallerCopy"`               // default true
+	UploadKbps         int             `json:"uploadKbps,omitempty"`      // 0 = Automatic, >0 = kbit/s
+	Audio              audio.Selection `json:"audio"`                     // "none", "system", "apps", "window"
+	Output             string          `json:"output"`                    // "" = system default
+	RequirePassword    bool            `json:"requirePassword,omitempty"` // pre-call room creation option
+	RoomPassword       string          `json:"-"`                         // pre-call custom password (not exposed via JSON)
+	HasPassword        bool            `json:"hasPassword,omitempty"`
+	E2EE               bool            `json:"e2ee"`                         // pre-call E2EE option (default true)
+	PortMap            bool            `json:"portMap"`                      // router port mapping (default true)
+	PortMapNextSession bool            `json:"portMapNextSession,omitempty"` // true if changed during an active call
+	NoWindowAudio      bool            `json:"noWindowAudio,omitempty"`      // the shared window's process is unknown: its app's audio can't be shared
+	Presets            []QualityPreset `json:"presets,omitempty"`            // the user's own; BuiltinPresets come first
 }
 
 // UIState is what /api/state returns.
 type UIState struct {
 	Session *session.State `json:"session"`
+	Share   ShareConfig    `json:"share"`
 	Error   string         `json:"error,omitempty"`
 	Version string         `json:"version"` // our build, e.g. "0.1.0 (57) linux"
 	// Name and Tag: who we are (name#tag), also outside a session.
@@ -95,9 +181,11 @@ type UIState struct {
 	// Autostart is whether Blite starts at sign-in; nil where it can't
 	// (dev builds).
 	Autostart *bool `json:"autostart,omitempty"`
-	// Layout is how received streams are shown, also outside a session.
-	Layout session.Layout `json:"layout"`
-	Logs   any            `json:"logs,omitempty"`
+	// AutoWatch is whether new remote streams open automatically.
+	AutoWatch bool `json:"autoWatch"`
+	// PlaySounds is whether call notification sounds play.
+	PlaySounds bool `json:"playSounds"`
+	Logs       any  `json:"logs,omitempty"`
 	// Reach says whether others can reach us from the internet.
 	Reach *Reach `json:"reach,omitempty"`
 	// Discord: the user's voice channel and its session (nil until the
@@ -105,6 +193,8 @@ type UIState struct {
 	Discord *Discord `json:"discord,omitempty"`
 	// Servers: the signaling servers and which one new sessions use.
 	Servers *Servers `json:"servers,omitempty"`
+	// Recent: the last 5 rooms created or joined, newest first (no passwords).
+	Recent []RecentRoom `json:"recent,omitempty"`
 }
 
 // Reach is the reachability line; OK false is a warning.
@@ -116,15 +206,47 @@ type Reach struct {
 // State implements ui.Backend.
 func (a *App) State() any {
 	a.mu.Lock()
-	s, e := a.sess, a.lastErr
+	s, e, autoWatch, playSounds := a.sess, a.lastErr, a.autoWatch, a.playSounds
+	portMap, sessPortMap := a.portMap, a.sessPortMap
+	opts := session.NormalizeShareOptions(a.shareOpts)
+	homeSrc := a.homeSource
+	if homeSrc == "" {
+		homeSrc = "primary"
+	}
+	asel := a.audio
+	if asel.Mode == "" {
+		asel.Mode = "none"
+	}
+	srcInfo := a.srcInfo
+	presets := slices.Clone(a.presets)
+	share := ShareConfig{
+		Source:             homeSrc,
+		Resolution:         string(orAppRes(a.res)),
+		FPS:                opts.FPS,
+		SlowViewer:         opts.SlowViewer,
+		EffectiveSlow:      opts.EffectiveSlowViewer(),
+		MinHeight:          opts.MinHeight,
+		SmallerCopy:        opts.SmallerCopy,
+		UploadKbps:         opts.UploadKbps,
+		Audio:              asel,
+		Output:             a.output,
+		RequirePassword:    a.requirePw,
+		RoomPassword:       a.roomPw,
+		HasPassword:        a.roomPw != "",
+		E2EE:               a.e2ee,
+		PortMap:            portMap,
+		PortMapNextSession: s != nil && portMap != sessPortMap,
+		Presets:            presets,
+	}
 	var dc *Discord
 	if a.discord.Status != "" {
 		d := a.discord
 		dc = &d
 	}
 	servers := a.serverState()
+	recent := a.recentStateLocked()
 	a.mu.Unlock()
-	st := UIState{Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), Layout: a.currentLayout(), Discord: dc, Servers: servers}
+	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), AutoWatch: autoWatch, PlaySounds: playSounds, Discord: dc, Servers: servers, Recent: recent}
 	if a.cfg.Identity.Private != nil {
 		st.Tag = identity.Tag(a.cfg.Identity.Public())
 	}
@@ -139,13 +261,32 @@ func (a *App) State() any {
 	if a.Logs != nil {
 		st.Logs = a.Logs()
 	}
-	if a.cfg.Port != nil {
+	if a.cfg.Port != nil && a.cfg.Port.Mapping() {
 		ok, text := a.cfg.Port.State().Describe()
 		st.Reach = &Reach{OK: ok, Text: text}
 	}
 	if s != nil {
 		ss := s.State()
 		st.Session = &ss
+		curSrc := ss.Source
+		if curSrc == "" {
+			curSrc = "none"
+		}
+		st.Share.Source = curSrc
+		st.Share.SourceName = ""
+		st.Share.Resolution = ss.Resolution
+		st.Share.FPS = ss.ShareOptions.FPS
+		st.Share.SlowViewer = ss.ShareOptions.SlowViewer
+		st.Share.EffectiveSlow = ss.EffectiveSlow
+		st.Share.MinHeight = ss.ShareOptions.MinHeight
+		st.Share.SmallerCopy = ss.ShareOptions.SmallerCopy
+		st.Share.UploadKbps = ss.ShareOptions.UploadKbps
+		st.Share.Audio = ss.Audio
+		st.Share.Output = ss.Output
+	}
+	if st.Share.Source == srcInfo.src && srcInfo.src != "" {
+		st.Share.SourceName = srcInfo.name
+		st.Share.NoWindowAudio = isWindowSource(srcInfo.src) && srcInfo.pid == 0
 	}
 	return st
 }
@@ -153,7 +294,12 @@ func (a *App) State() any {
 func (a *App) config() session.Config {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.cfg
+	cfg := a.cfg
+	on := a.autoWatch
+	ps := a.playSounds
+	cfg.AutoWatch = &on
+	cfg.PlaySounds = &ps
+	return cfg
 }
 
 // DisplayName is our name#tag, for reports.
@@ -197,17 +343,6 @@ func (a *App) Feedback(ctx context.Context, kind, text string, withDiag bool) er
 
 const maxFeedback = 8000
 
-// ShowWindow implements ui.Backend.
-func (a *App) ShowWindow(id string) error {
-	a.mu.Lock()
-	s := a.sess
-	a.mu.Unlock()
-	if s == nil {
-		return errors.New("not in a call")
-	}
-	return s.ShowWindow(id)
-}
-
 // Diagnostics implements ui.Backend: this computer, the call, and the
 // last log lines, with links and passwords cut out.
 func (a *App) Diagnostics() string {
@@ -215,6 +350,8 @@ func (a *App) Diagnostics() string {
 	if a.System != nil {
 		b.WriteString(a.System())
 	}
+	fmt.Fprintf(&b, "language: %s (system: %s, preference: %s)\n",
+		i18n.Current(), orNone(strings.Join(i18n.SystemLocales(), ", ")), orNone(i18n.Preference()))
 	a.mu.Lock()
 	s := a.sess
 	a.mu.Unlock()
@@ -225,13 +362,17 @@ func (a *App) Diagnostics() string {
 	}
 	if a.RecentLog != nil {
 		b.WriteString("\nrecent log:\n")
-		b.WriteString(secretField.ReplaceAllString(a.RecentLog(), "$1=[cut]"))
+		b.WriteString(redact.Text(a.RecentLog()))
 	}
 	return b.String()
 }
 
-// secretField matches log fields that could let someone into a call.
-var secretField = regexp.MustCompile(`\b(link|password|pw|token)=("[^"]*"|\S+)`)
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
 
 // OpenLogFolder implements ui.Backend.
 func (a *App) OpenLogFolder() error {
@@ -239,12 +380,6 @@ func (a *App) OpenLogFolder() error {
 		return errors.New("no log folder")
 	}
 	return a.OpenLogs()
-}
-
-func (a *App) currentLayout() session.Layout {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.layout
 }
 
 func (a *App) cfgName() string {
@@ -268,17 +403,67 @@ func (a *App) Notify() { a.bc.Notify() }
 
 func (a *App) adopt(s *session.Session) { a.adoptAs(s, a.DefaultSource) }
 
+func (a *App) applyPortMap(on bool) {
+	if a.cfg.Port != nil {
+		a.cfg.Port.SetMapping(on)
+	}
+}
+
+func (a *App) syncPortMapForNextSession() bool {
+	a.mu.Lock()
+	want := a.portMap
+	a.mu.Unlock()
+	a.applyPortMap(want)
+	return want
+}
+
+func (a *App) applyPortMapIfIdle() {
+	a.mu.Lock()
+	idle := a.sess == nil
+	want := a.portMap
+	a.mu.Unlock()
+	if idle {
+		a.applyPortMap(want)
+	}
+}
+
 // adoptAs makes s the live session, sharing src first ("" or "none" =
 // nothing).
 func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
+	// The first audio and source, in order with SetSource and SetAudio
+	// (never called with srcAudioMu held: those don't start sessions).
+	a.srcAudioMu.Lock()
+	defer a.srcAudioMu.Unlock()
+	rj := s.Rejoin()
+	a.recordRecent(rj.Server, rj.Room, rj.Password)
 	s.OnChange(a.bc.Notify)
+	s.OnLeavePrompt(a.ShowUI)
 	a.mu.Lock()
 	a.sess, a.lastErr = s, ""
-	res, mode, layout := a.res, a.mode, a.layout
+	if a.cfg.Port != nil {
+		a.sessPortMap = a.cfg.Port.Mapping()
+	} else {
+		a.sessPortMap = a.portMap
+	}
+	if isWindowSource(string(src)) && string(src) != a.homeSource {
+		a.audio = audioForSource(string(src), a.audio) // a window from elsewhere (flag, link)
+	}
+	res, opts, asel, out, playSounds := a.res, a.shareOpts, a.audio, a.output, a.playSounds
 	a.mu.Unlock()
+	s.SetPlaySounds(playSounds)
 	s.SetResolution(res)
-	s.SetMode(mode)
-	s.SetLayout(layout)
+	s.SetShareOptions(opts)
+	if out != "" {
+		s.SetOutput(out)
+	}
+	// A shared window's app audio, if that's the choice (the session finds
+	// the process once the window is shared); else the audio chosen.
+	s.SetWindowAudio(asel.Mode == "window")
+	if asel.Mode != "" && asel.Mode != "none" && asel.Mode != "window" {
+		if err := s.SetAudio(asel); err != nil {
+			a.log.Warn("initial audio", "err", err)
+		}
+	}
 	go func() {
 		<-s.Done()
 		a.mu.Lock()
@@ -289,8 +474,12 @@ func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 			}
 		}
 		a.mu.Unlock()
+		a.applyPortMapIfIdle()
 		a.bc.Notify()
 	}()
+	if src == "primary" {
+		src = media.SourceKind(capture.PrimarySource())
+	}
 	if src != "" && src != "none" {
 		if err := s.SetSource(src); err != nil {
 			a.setErr("could not start sharing: " + err.Error())
@@ -322,6 +511,10 @@ func (a *App) Create(ctx context.Context, password string, e2ee bool) error {
 
 // create starts a session, tied to Discord voice channel channel if set.
 func (a *App) create(ctx context.Context, password string, e2ee bool, channel string) error {
+	return friendly(a.createRaw(ctx, password, e2ee, channel, a.DefaultSource))
+}
+
+func (a *App) createRaw(ctx context.Context, password string, e2ee bool, channel string, src media.SourceKind) error {
 	if a.busy() {
 		return ErrInSession
 	}
@@ -330,37 +523,56 @@ func (a *App) create(ctx context.Context, password string, e2ee bool, channel st
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
+	a.syncPortMapForNextSession()
 	a.mu.Lock()
 	cfg := a.cfg
+	on := a.autoWatch
+	ps := a.playSounds
+	cfg.AutoWatch = &on
+	cfg.PlaySounds = &ps
 	cfg.Server = a.selectedLocked()
 	a.mu.Unlock()
 	cfg.E2EE, cfg.Channel = e2ee, channel
 	s, err := session.Create(ctx, cfg, password)
 	if err != nil {
-		return friendly(err)
+		return err
 	}
-	a.adopt(s)
+	a.adoptAs(s, src)
 	return nil
 }
 
-// JoinLink implements ui.Backend: the room is on the link's server.
+// JoinLink implements ui.Backend: accepts either a share link (whose room is
+// on the link's server) or a bare room code (joined on the selected server).
 func (a *App) JoinLink(ctx context.Context, link string) error {
-	server, code, pw, err := session.ParseLinkServer(link)
+	server, code, pw, isLink, err := session.ParseJoinInput(link)
 	if err != nil {
 		return err
 	}
-	server = a.linkServer(server)
-	if a.busy() {
-		return ErrInSession
-	}
-	if err := a.confirmServer(server); err != nil {
-		return err
+	if isLink {
+		server = a.linkServer(server)
+		if a.busy() {
+			return ErrInSession
+		}
+		if err := a.confirmServer(server); err != nil {
+			return err
+		}
+	} else {
+		if a.busy() {
+			return ErrInSession
+		}
+		a.mu.Lock()
+		server = a.selectedLocked()
+		a.mu.Unlock()
 	}
 	return a.join(ctx, server, code, pw)
 }
 
 // join joins room code on server.
 func (a *App) join(ctx context.Context, server, code, pw string) error {
+	return friendly(a.joinRaw(ctx, server, code, pw, a.DefaultSource))
+}
+
+func (a *App) joinRaw(ctx context.Context, server, code, pw string, src media.SourceKind) error {
 	if a.busy() {
 		return ErrInSession
 	}
@@ -369,14 +581,20 @@ func (a *App) join(ctx context.Context, server, code, pw string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
+	a.syncPortMapForNextSession()
 	cfg := a.config()
 	cfg.Server = server
 	s, err := session.Join(ctx, cfg, code, pw)
 	if err != nil {
-		return friendly(err)
+		return err
 	}
-	a.adopt(s)
+	a.adoptAs(s, src)
 	return nil
+}
+
+func isProtoErr(err error, code string) bool {
+	var se sigclient.ServerError
+	return errors.As(err, &se) && string(se) == code
 }
 
 // Leave implements ui.Backend.
@@ -388,24 +606,100 @@ func (a *App) Leave() {
 	if s != nil {
 		s.Close()
 	}
+	a.applyPortMapIfIdle()
 	a.bc.Notify()
 }
 
-// SetSource implements ui.Backend.
+// SetSource implements ui.Backend. Outside a session it sets the source new
+// "Go live" sessions start sharing ("primary", "window:...", "screen", "test",
+// or "none").
+//
+// Picking another window turns sound on (its app's audio); picking anything
+// else turns off sound that followed a window and keeps a choice the user
+// made. Applying the same source again (Go live) keeps the sound as it is.
 func (a *App) SetSource(kind string) error {
+	if kind == "" {
+		kind = "none"
+	}
+	a.srcAudioMu.Lock()
+	defer a.srcAudioMu.Unlock()
+	a.nameSource(kind)
 	a.mu.Lock()
 	s := a.sess
 	a.mu.Unlock()
 	if s == nil {
-		return errors.New("not in a session")
+		if kind != "primary" && kind != "none" && !media.ValidSource(media.SourceKind(kind)) {
+			return errors.New("unknown source")
+		}
+		a.mu.Lock()
+		a.pickSourceLocked(kind)
+		a.mu.Unlock()
+		a.bc.Notify()
+		return nil
 	}
+	orig := kind
 	if kind == "primary" { // Go live: the main monitor, not all of them combined
 		kind = capture.PrimarySource()
 	}
 	if kind != "none" && !media.ValidSource(media.SourceKind(kind)) {
 		return errors.New("unknown source")
 	}
-	return s.SetSource(media.SourceKind(kind))
+	a.mu.Lock()
+	if orig != "none" {
+		a.pickSourceLocked(orig)
+	}
+	follow := a.audio.Mode == "window"
+	a.mu.Unlock()
+	// Before SetSource when off, so it doesn't share the window's app even
+	// for a moment; after it when on, so the audio restarts once.
+	if !follow {
+		s.SetWindowAudio(false)
+	}
+	err := s.SetSource(media.SourceKind(kind))
+	if follow {
+		s.SetWindowAudio(true)
+	}
+	return err
+}
+
+// pickSourceLocked makes kind the home source; a different one sets the
+// sound by audioForSource. A window whose process we can't find (no
+// _NET_WM_PID, an elevated app) gets no sound: its app's audio can't be
+// told apart. a.mu is held.
+func (a *App) pickSourceLocked(kind string) {
+	if kind != a.homeSource {
+		a.audio = audioForSource(kind, a.audio)
+		if a.audio.Mode == "window" && a.srcInfo.src == kind && a.srcInfo.pid == 0 {
+			a.audio = audio.Selection{Mode: "none"}
+		}
+	}
+	a.homeSource = kind
+}
+
+// sourceInfo is a picked window or monitor: its name for people and, for a
+// window, the process that owns it (0 = unknown).
+type sourceInfo struct {
+	src, name string
+	pid       int
+}
+
+// windowPID is capture.WindowPID; tests replace it.
+var windowPID = capture.WindowPID
+
+// nameSource looks up what to call a picked window or monitor on Home: its
+// title, or its app when untitled; each pick looks again (titles change).
+// Never the handle in the source string.
+func (a *App) nameSource(kind string) {
+	if !strings.HasPrefix(kind, "window:") && !strings.HasPrefix(kind, "monitor:") {
+		return
+	}
+	name, pid := capture.SourceName(kind), windowPID(kind)
+	a.mu.Lock()
+	if name == "" && a.srcInfo.src == kind { // a window that just closed keeps its last name
+		name = a.srcInfo.name
+	}
+	a.srcInfo = sourceInfo{kind, name, pid}
+	a.mu.Unlock()
 }
 
 // SetResolution implements ui.Backend: 720p, 1080p or 2160p for what we
@@ -415,14 +709,46 @@ func (a *App) SetResolution(res string) error {
 	if !media.ValidResolution(r) {
 		return errors.New("unknown resolution")
 	}
+	if err := saveResolution(string(r)); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
 	a.mu.Lock()
 	a.res = r
 	s := a.sess
 	a.mu.Unlock()
 	if s == nil {
+		a.bc.Notify()
 		return nil
 	}
 	return s.SetResolution(r)
+}
+
+// SetShareOptions implements ui.Backend: frame rate (10..60 step 5),
+// slow-viewer policy ("" auto, "resolution", "fps"), lowest resolution floor
+// (360/540/720), smaller copy toggle, and upload limit (kbit/s, 0 = Automatic).
+func (a *App) SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy bool, uploadKbps int) error {
+	opts := session.NormalizeShareOptions(session.ShareOptions{
+		FPS:         fps,
+		SlowViewer:  slowViewer,
+		MinHeight:   minHeight,
+		SmallerCopy: smallerCopy,
+		UploadKbps:  uploadKbps,
+	})
+	a.mu.Lock()
+	prev := session.NormalizeShareOptions(a.shareOpts)
+	flagSet := a.cfg.UploadKbps > 0
+	a.shareOpts = opts
+	a.mode = modeFromShareOptions(opts)
+	s := a.sess
+	a.mu.Unlock()
+	if err := saveShareOptions(opts, opts.UploadKbps != prev.UploadKbps, flagSet); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
+	if s == nil {
+		a.bc.Notify()
+		return nil
+	}
+	return s.SetShareOptions(opts)
 }
 
 // SetMode implements ui.Backend: desktop or game, now and in later sessions.
@@ -432,13 +758,31 @@ func (a *App) SetMode(mode string) error {
 		return errors.New("unknown mode")
 	}
 	a.mu.Lock()
-	a.mode = m
-	s := a.sess
+	opts := a.shareOpts
 	a.mu.Unlock()
-	if s == nil {
-		return nil
+	if m == media.ModeGame {
+		opts.FPS = 60
+		opts.SlowViewer = session.SlowResolution
+	} else {
+		opts.FPS = 30
+		opts.SlowViewer = session.SlowFPS
 	}
-	return s.SetMode(m)
+	return a.SetShareOptions(opts.FPS, opts.SlowViewer, opts.MinHeight, opts.SmallerCopy, opts.UploadKbps)
+}
+
+// SetRoomSecurity implements ui.Backend: pre-call room password and E2EE
+// toggles for new rooms created from Home.
+func (a *App) SetRoomSecurity(requirePw bool, password string, e2ee bool) error {
+	if err := saveE2EE(e2ee); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
+	a.mu.Lock()
+	a.requirePw = requirePw
+	a.roomPw = password
+	a.e2ee = e2ee
+	a.mu.Unlock()
+	a.bc.Notify()
+	return nil
 }
 
 // Sources implements ui.Backend: monitors and windows that can be shared.
@@ -473,21 +817,43 @@ func (a *App) current() (*session.Session, error) {
 
 // SetAudio implements ui.Backend.
 func (a *App) SetAudio(mode string, apps []string) error {
-	s, err := a.current()
-	if err != nil {
-		return err
+	if mode == "" {
+		mode = "none"
 	}
-	if mode == "test" {
+	switch mode {
+	case "none", "system", "apps", "window":
+	default:
 		return errors.New("unknown audio mode") // test tone is for headless peers only
 	}
-	return s.SetAudio(audio.Selection{Mode: mode, Apps: apps})
+	sel := audio.Selection{Mode: mode, Apps: slices.Clone(apps)}
+	a.srcAudioMu.Lock()
+	defer a.srcAudioMu.Unlock()
+	a.mu.Lock()
+	a.audio = sel
+	s := a.sess
+	a.mu.Unlock()
+	if s == nil {
+		a.bc.Notify()
+		return nil
+	}
+	if mode == "window" { // the shared window's app: the session knows which
+		s.SetWindowAudio(true)
+		return nil
+	}
+	// Any other choice holds until another window is picked.
+	s.SetWindowAudio(false)
+	return s.SetAudio(sel)
 }
 
 // SetOutput implements ui.Backend.
 func (a *App) SetOutput(device string) error {
-	s, err := a.current()
-	if err != nil {
-		return err
+	a.mu.Lock()
+	a.output = device
+	s := a.sess
+	a.mu.Unlock()
+	if s == nil {
+		a.bc.Notify()
+		return nil
 	}
 	s.SetOutput(device)
 	return nil

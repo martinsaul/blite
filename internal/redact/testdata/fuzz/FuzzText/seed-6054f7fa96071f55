@@ -1,0 +1,2 @@
+go test fuzz v1
+string("peer=alice#7F2A name=martin#0A1B chan#3 key=true key=12")

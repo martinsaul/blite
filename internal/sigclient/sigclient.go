@@ -13,13 +13,16 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
 	"blite/internal/proto"
+	"blite/internal/redact"
 )
 
 // ResumeWindow matches the server's slot grace period.
@@ -96,6 +99,8 @@ type Options struct {
 	HTTPClient *http.Client
 	// OnState is told "reconnecting" / "connected" while resuming.
 	OnState func(string)
+	// OnDrop is told why the socket dropped, before a resume.
+	OnDrop func(error)
 	// Renew moves the session to a fresh socket this often, give or take
 	// 10% (0 = DefaultRenew, < 0 = never). Members see nothing.
 	Renew time.Duration
@@ -111,6 +116,64 @@ func Create(ctx context.Context, url string, m proto.Create, o Options) (*Client
 func Join(ctx context.Context, url string, m proto.Join, o Options) (*Client, error) {
 	m.T = proto.TJoin
 	return enter(ctx, url, m, o)
+}
+
+// ProbeStatus is what Probe learned about a room.
+type ProbeStatus int
+
+const (
+	ProbeGone        ProbeStatus = iota // probe-result {exists: false}
+	ProbeExists                         // probe-result {exists: true}
+	ProbeUnsupported                    // older server (bad_request)
+)
+
+// Probe asks url whether room exists with password, without joining it.
+// Older servers that don't understand probe reply bad_request, reported as
+// ProbeUnsupported.
+func Probe(ctx context.Context, url, room, password string, o Options) (ProbeStatus, error) {
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPClient: o.HTTPClient})
+	if err != nil {
+		return 0, dialErr(url, err)
+	}
+	ws.SetReadLimit(64 << 10)
+	b, _ := json.Marshal(proto.Probe{T: proto.TProbe, Room: room, Password: password})
+	if err := ws.Write(dctx, websocket.MessageText, b); err != nil {
+		ws.CloseNow()
+		return 0, err
+	}
+	_, b, err = ws.Read(dctx)
+	ws.Close(websocket.StatusNormalClosure, "")
+	if err != nil {
+		return 0, err
+	}
+	var env proto.Envelope
+	if err := json.Unmarshal(b, &env); err != nil {
+		return 0, err
+	}
+	switch env.T {
+	case proto.TProbeResult:
+		var r proto.ProbeResult
+		if err := json.Unmarshal(b, &r); err != nil {
+			return 0, err
+		}
+		if r.Exists {
+			return ProbeExists, nil
+		}
+		return ProbeGone, nil
+	case proto.TError:
+		var e proto.Error
+		if err := json.Unmarshal(b, &e); err != nil {
+			return 0, err
+		}
+		if e.Code == proto.ErrBadRequest {
+			return ProbeUnsupported, nil
+		}
+		return 0, ServerError(e.Code)
+	default:
+		return 0, fmt.Errorf("unexpected probe reply %q", env.T)
+	}
 }
 
 // ServerError is an error code returned by the server.
@@ -135,7 +198,7 @@ func dialSeat(ctx context.Context, url string, first any, o Options) (*websocket
 	defer cancel()
 	ws, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPClient: o.HTTPClient})
 	if err != nil {
-		return nil, w, nil, fmt.Errorf("dial %s: %w", url, err)
+		return nil, w, nil, dialErr(url, err)
 	}
 	ws.SetReadLimit(64 << 10)
 	b, _ := json.Marshal(first)
@@ -234,6 +297,9 @@ func (c *Client) run() {
 		case r := <-c.renewed: // a renewal replaced the socket
 			ws, w, c.early = r.ws, r.w, r.early
 		default:
+			if c.opt.OnDrop != nil {
+				c.opt.OnDrop(err)
+			}
 			c.state("reconnecting")
 			var rerr error
 			if ws, w, rerr = c.resume(); rerr != nil {
@@ -498,6 +564,11 @@ func (c *Client) Rename(name string) error {
 	return c.send(proto.Rename{T: proto.TRename, Name: name})
 }
 
+// Sharing tells the server whether we are sharing video right now.
+func (c *Client) Sharing(on bool) error {
+	return c.send(proto.Sharing{T: proto.TSharing, On: on})
+}
+
 // Transfer (owner) makes peerID the room's owner.
 func (c *Client) Transfer(peerID string) error {
 	return c.send(proto.Transfer{T: proto.TTransfer, PeerID: peerID})
@@ -508,16 +579,36 @@ func (c *Client) Kick(peerID string, ban bool) error {
 	return c.send(proto.Kick{T: proto.TKick, PeerID: peerID, Ban: ban})
 }
 
+// leaveCloseWait bounds how long Leave waits for the server to close the
+// socket after our Leave before dropping it itself. A full close handshake
+// can take 5 s or more when the server doesn't answer; on quit that is time
+// the process runs on after its UI is gone.
+var leaveCloseWait = time.Second
+
 // Leave tells the server we're gone and closes the socket.
 func (c *Client) Leave() { c.LeaveFor("") }
 
-// LeaveFor is Leave with a reason (proto.LeaveUpdate).
+// LeaveFor is Leave with a reason (proto.LeaveUpdate). It returns within
+// about leaveCloseWait (plus the Leave write's own timeout).
+//
+// The Leave is out once send returns: Write has handed the frame to the
+// socket, and closing a socket still sends what is queued on it. The server
+// closes the socket when it has read the Leave, which ends run (it keeps
+// reading meanwhile, so nothing unread makes our close a reset); we wait for
+// that, then close without a handshake. A renewal that moved us to a new
+// socket repeats the Leave there (renew checks hasLeft under wmu).
 func (c *Client) LeaveFor(reason string) {
 	c.once.Do(func() {
 		c.leaveReason = reason
 		close(c.left)
 		c.send(proto.Leave{T: proto.TLeave, Reason: reason})
-		c.conn().Close(websocket.StatusNormalClosure, "")
+		t := time.NewTimer(leaveCloseWait)
+		defer t.Stop()
+		select {
+		case <-c.done: // the server closed us: the Leave arrived
+		case <-t.C:
+		}
+		c.conn().CloseNow()
 	})
 }
 
@@ -528,4 +619,44 @@ func (c *Client) Drop() { c.conn().CloseNow() }
 func IsServerError(err error, code string) bool {
 	var se ServerError
 	return errors.As(err, &se) && string(se) == code
+}
+
+type redactedDialError struct {
+	msg   string
+	inner error
+}
+
+func (e redactedDialError) Error() string { return e.msg }
+func (e redactedDialError) Unwrap() error { return e.inner }
+
+func dialErr(url string, err error) error {
+	var inner error
+	var opErr *net.OpError
+	switch {
+	case errors.Is(err, context.Canceled):
+		inner = context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		inner = context.DeadlineExceeded
+	case errors.As(err, &opErr) && opErr != nil:
+		var sub error
+		if opErr.Err != nil {
+			var ue *neturl.Error
+			if s := opErr.Err.Error(); !errors.As(opErr.Err, &ue) && redact.Text(s) == s {
+				sub = opErr.Err
+			} else {
+				sub = errors.New(redact.Text(s))
+			}
+		}
+		inner = &net.OpError{
+			Op:     opErr.Op,
+			Net:    opErr.Net,
+			Source: opErr.Source,
+			Addr:   opErr.Addr,
+			Err:    sub,
+		}
+	}
+	return redactedDialError{
+		msg:   fmt.Sprintf("dial %s: %s", redact.URL(url), redact.Text(err.Error())),
+		inner: inner,
+	}
 }

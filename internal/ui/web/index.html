@@ -107,20 +107,8 @@
       <p id="meshWarn" class="warn small" hidden></p>
       <p id="untrusted" class="error" hidden></p>
       <p class="muted small" id="ownerLine"></p>
-      <h3>How you see their screens</h3>
-      <div class="sources" role="radiogroup" aria-label="How you see their screens">
-        <label><input type="radio" name="layout" value="windows"> A separate window for each person</label>
-        <label><input type="radio" name="layout" value="grid"> All in one window</label>
-      </div>
-      <p class="small" id="gridClosed" hidden>You closed the video window. <button id="showGrid" type="button">Show video</button></p>
-      <p class="small" id="gridOpts"><label class="inline">Arrange
-        <select id="gridSize" aria-label="How the window is split">
-          <option value="auto">Automatically</option>
-          <option value="custom">Rows and columns</option>
-        </select></label>
-        <span id="gridCustom"><input type="number" id="gridRows" min="1" max="8" aria-label="Rows"> rows by
-          <input type="number" id="gridCols" min="1" max="8" aria-label="Columns"> columns</span></p>
-      <p class="muted small">After switching, each screen appears within a couple of seconds. If you close the window, pick the layout again to reopen it. Move the mouse over someone's video to mute them or pause their video.</p>
+      <p class="small"><label><input type="checkbox" id="autoWatch" checked> Start watching new streams automatically</label></p>
+      <p class="muted small">Streams open in the video window. Use Watch / Stop watching on a person (or the eye on their video tile) to turn their video on or off.</p>
       <details class="small"><summary>Your identity key</summary>
         <p class="muted">A hosted room's operator can list this key to make you its owner while you're in it.</p>
         <code id="idKey"></code></details>
@@ -153,17 +141,12 @@
         </select></label>
         <span class="muted">On a slow link or computer, Desktop lowers the frame rate first and Game lowers the resolution first. Game needs about 1.5x the upload.</span></p>
       <p class="warn" id="resNote" hidden></p>
-      <p class="small"><label>Preview of your stream
-        <select id="preview" aria-label="Preview of your stream">
-          <option value="">Off</option>
-          <option value="window">Small floating window</option>
-          <option value="grid">In a corner of the video window</option>
-        </select></label>
-        <span class="muted">Shows what you capture, small. Viewers may get a lower resolution. Drag the window's edge to resize it. In a corner, it shows in the grid window, or with a window per person in the first person's window; it floats until that window opens.</span></p>
+      <p class="small"><label><input type="checkbox" id="preview"> Show a preview of your stream in the video window</label></p>
       <p class="muted small" id="encoder"></p>
       <h3>Audio you share</h3>
       <div class="sources" role="radiogroup" aria-label="Shared audio">
         <label><input type="radio" name="amode" value="none"> No audio</label>
+        <label><input type="radio" name="amode" value="window"> The shared window's app (follows the window you share)</label>
         <label><input type="radio" name="amode" value="system"> All apps (everything you hear, except Bellion Share)</label>
         <label><input type="radio" name="amode" value="apps"> Only these apps:</label>
       </div>

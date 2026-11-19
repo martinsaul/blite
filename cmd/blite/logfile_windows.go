@@ -26,8 +26,11 @@ func logDir() (string, error) {
 func keepStderr() bool { return os.Getenv("BLITE_GUARD") != "" }
 
 // redirectStderr points the process's standard error, which the Go runtime
-// writes a crash to, and os.Stderr at f. (The C runtime's stderr, used by
-// GStreamer, keeps the handle it had at start.)
+// writes a crash to, and os.Stderr straight at f (without a pipe goroutine,
+// which would lose fatal panic output when the process dies; slog writes go
+// through redact.Writer first, and our own code never panics with links or
+// passwords). (The C runtime's stderr, used by GStreamer, keeps the handle it
+// had at start.)
 func redirectStderr(f *os.File) error {
 	if err := windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd())); err != nil {
 		return err

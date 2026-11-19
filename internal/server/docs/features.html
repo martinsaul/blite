@@ -1,42 +1,45 @@
 {{define "title"}}Features{{end}}
-{{define "description"}}What Bellion Share can do: share a monitor, a window or all screens at up to 4K and 60 fps with app audio, watch everyone in one grid, per-person quality and volume, end-to-end encryption, safety codes and room controls.{{end}}
+{{define "description"}}What Bellion Share can do: share a monitor, a window or all screens at up to 4K and 60 fps with app audio, quality presets, watch everyone in one window, per-person quality and volume, end-to-end encryption, safety codes and room controls.{{end}}
 {{define "body"}}
 <h1>Features</h1>
-<p class="lead">Everything below is in the app's menu bar: <em>Room</em>, <em>Share</em>, <em>View</em>, <em>People</em> and <em>Help</em>.</p>
+<p class="lead">Before a call, the home screen has everything to share or watch. In a call, the controls sit above the People list. The gear (Settings) and <em>?</em> (help) buttons at the top right hold the rest.</p>
 
 <h2 id="sharing">Sharing</h2>
 <figure>
   <a href="/static/shots/share-menu.webp"><img src="/static/shots/share-menu.webp" width="1280" height="600" alt="The Share menu: All screens combined, A monitor or window, Test pattern, Nothing (watch only), and submenus for Resolution, Tuned for, Preview of your stream, Audio you share and Play the call on" loading="lazy"></a>
-  <figcaption>The Share menu during a call.</figcaption>
+  <figcaption>Choosing what you share and how.</figcaption>
 </figure>
 <ul>
-  <li><strong>What you share.</strong> <em>Go live</em> shares your main monitor. The <em>Share</em> menu also offers <em>All screens combined</em>, <em>A monitor or window...</em> (pick one monitor or one app window), a <em>Test pattern</em>, and <em>Nothing (watch only)</em>. You can switch at any time without leaving the call.</li>
-  <li><strong>Resolution:</strong> 720p, 1080p or 4K. Higher needs more upload and CPU on your side and theirs. If your computer can't encode fast enough, Bellion Share steps the resolution down and tells you.</li>
-  <li><strong>Tuned for:</strong> <em>Desktop</em> (sharp text, 30 fps) or <em>Game</em> (smooth motion, 60 fps).</li>
-  <li><strong>Preview of your stream:</strong> off, a small floating window, or a corner of the video window, so you see what others get.</li>
-  <li><strong>Audio you share:</strong> no audio, all apps (everything you hear except Bellion Share itself, so the call never echoes back), or only the apps you pick. This uses PipeWire on Linux and per-app loopback capture on Windows.</li>
-  <li><strong>Play the call on:</strong> the speakers or headset other people's audio plays on.</li>
+  <li><strong>What you share.</strong> On the home screen, pick <em>Entire screen</em> (your main monitor) or <em>A window</em>, which lists your monitors and windows with their apps' icons. In a call, <em>Go live: main monitor</em> and <em>Share a window...</em> do the same. <em>Share options &gt; Advanced...</em> also offers <em>All screens combined</em>, a <em>Test pattern</em>, and <em>Nothing (watch only)</em>. You can switch at any time without leaving the call.</li>
+  <li id="quality"><strong>Quality presets.</strong> A row of presets on the home screen and in <em>Share options</em>: 720p, 1080p and 4K, each at 30 fps (sharp text) or 60 fps (smooth games and video). Scroll it sideways to see them all. Press <strong>+</strong> to add your own resolution and frame rate (10 to 60 fps); the x on one of yours removes it. <em>Advanced...</em> also has a custom frame rate. Higher needs more upload and CPU on your side and theirs. If your computer can't encode fast enough, Bellion Share steps the resolution down and tells you.</li>
+  <li id="sound"><strong>Sound.</strong> Picking a window shares its app's sound automatically. Picking the entire screen doesn't turn sound on. In <em>Share options</em>, choose <em>No audio</em>, <em>This window's app</em> (while you share a window), <em>Whole system</em> (everything you hear except Bellion Share itself, so the call never echoes back), or <em>Only these apps...</em>. If Bellion Share can't find the app a window belongs to (for example an app running as administrator), there's no window sound and a note says so. This uses PipeWire on Linux and per-app loopback capture on Windows.</li>
+  <li><strong>Play the call on</strong> (in <em>Share options</em>): the speakers or headset other people's audio plays on.</li>
+  <li><strong>Advanced...</strong> (in <em>Share options</em>): what to lower first when a viewer's connection is slow (resolution or frame rate), the lowest resolution allowed, whether slow viewers get a smaller copy, an upload limit (automatic or your own), opening a port on your router, and the session's password and encryption.</li>
+  <li><strong>Your preview.</strong> While you share, your own stream shows as a tile in the video window, so you see what others get. The eye on your row in the People list hides or shows it.</li>
   <li><strong>Hardware encoding.</strong> Bellion Share encodes H.264 on your graphics hardware when it can (NVIDIA NVENC, Intel Quick Sync, AMD AMF, VA-API on Linux, Media Foundation on Windows), and with x264 on the CPU otherwise.</li>
 </ul>
 
 <h2 id="watching">Watching</h2>
 <ul>
-  <li><strong>Layout</strong> (<em>View</em> menu): a separate window for each person, or everyone in one window. <em>Arrange the window...</em> sets the grid automatically or to your own rows and columns. If you close a window, <em>View</em> or <em>People</em> brings it back.</li>
-  <li><strong>Per person</strong> (in the People table or the <em>People</em> menu): their video at <em>Best</em>, <em>Low</em> or <em>Off (audio only)</em>, their volume (up to 200%), and mute.</li>
-  <li><strong>Adapts to each viewer.</strong> Every sharer sends a high and a low layer, plus in-between sizes (1080p, 720p) for viewers whose connection or computer can't take the top size. Each person's row shows what you get from them, for example <em>you get 720p</em>.</li>
+  <li><strong>One video window.</strong> Everyone you watch shows as a tile in one window. Each tile has buttons to stop watching (the eye), pop it out into its own window (and back), and pin it, so it takes the main part of the window. Remote tiles also have mute and a volume slider. When someone stops sharing, their tile says so and fades out.</li>
+  <li><strong>Who you watch.</strong> The eye next to each person in the People list starts or stops watching them. When you don't watch someone, you get neither their video nor their audio. New streams start watching automatically; turn off <em>Start watching new streams automatically</em> in the gear menu to pick them yourself. Closing the video window stops watching everyone in it and asks whether you want to leave the session.</li>
+  <li><strong>Per person.</strong> Click someone in the People list to open their panel: their volume (up to 200%), mute, and their video at <em>Best (automatic)</em> or <em>Low (saves data)</em>.</li>
+  <li><strong>Adapts to each viewer.</strong> Every sharer sends a high and a low layer, plus in-between sizes (1080p, 720p) for viewers whose connection or computer can't take the top size. Each person's row shows what you get from them, for example <em>Good, watching in 720p</em>.</li>
   <li><strong>Smooth over loss.</strong> When packets get lost, Bellion Share holds the last good picture until the next full frame instead of showing a smeared one.</li>
+  <li><strong>Sounds.</strong> Bellion Share plays a short sound when someone joins, when someone starts sharing, when you go live, and when someone starts watching you. Turn them off with <em>Play sounds</em> in the gear menu.</li>
 </ul>
 
 <h2 id="rooms">Rooms and people</h2>
 <figure>
   <a href="/static/shots/people-menu.webp"><img src="/static/shots/people-menu.webp" width="1280" height="600" alt="The People menu with a submenu for one person: Their video, Mute, Network path, Make owner, Disconnect and Ban; below the people, Volunteer as relay and About relays" loading="lazy"></a>
-  <figcaption>The People menu: per-person settings, owner controls, and relays.</figcaption>
+  <figcaption>Per-person settings, owner controls, and relays.</figcaption>
 </figure>
 <ul>
-  <li><strong>Sessions</strong> are a room code plus an optional password, shared as one link. Links open the app directly; older <code>blite://</code> links still work.</li>
-  <li><strong>No fixed room size.</strong> By default everyone sends their video directly to everyone (a full mesh), which strains most home uploads beyond about 5 people; Bellion Share warns you then. <a href="/docs/relays">Relays</a> let rooms grow past that.</li>
-  <li><strong>Room owner.</strong> Whoever starts the session owns it (if the owner leaves, the person who joined earliest takes over). The owner can hand ownership to someone else, disconnect people (they can rejoin with the link) or ban them from the room.</li>
-  <li><strong>The People table</strong> shows each person's status, what you send them, and the connection: <em>Good</em>, <em>Fair</em> or <em>Poor</em> with the round-trip time, packet loss and data rates, plus a hint when something is wrong.</li>
+  <li><strong>Sessions</strong> are a room code plus an optional password, shared as one link. Links open the app directly; older <code>blite://</code> links still work. You can also type just the room code into <em>Watch someone</em>.</li>
+  <li><strong>Recent rooms.</strong> The home screen lists the last 5 sessions you started or joined, so you can rejoin with one click. Ended ones show <em>Ended</em> and fade away.</li>
+  <li><strong>No fixed room size.</strong> By default everyone sends their video directly to everyone (a full mesh), which strains most home uploads beyond about 5 people; Bellion Share warns you then. <a href="/docs/relays">Relays</a> let rooms grow past that: <em>Volunteer as relay</em> is at the bottom of the People list.</li>
+  <li><strong>Room owner.</strong> Whoever starts the session owns it (if the owner leaves, the person who joined earliest takes over). In a person's panel, the owner can make them the owner, disconnect them (they can rejoin with the link) or ban them from the room.</li>
+  <li><strong>The People list</strong> shows each person's connection, <em>Good</em>, <em>Fair</em> or <em>Unstable</em>, and the quality you get from them, plus a hint when something is wrong. Their panel has the details: what you send them, the round-trip time, packet loss and data rates, and the network path.</li>
 </ul>
 
 <h2 id="security">Privacy and security</h2>
@@ -44,20 +47,21 @@
   <li><strong>Peer to peer.</strong> Your screen goes straight to the people in your session, not through a streaming service. The server only introduces people to each other. When a direct path is blocked, a TURN server forwards the encrypted traffic.</li>
   <li><strong>End-to-end encryption</strong> is on by default: each sender encrypts its media with keys only room members get.</li>
   <li><strong>Identity keys and tags.</strong> Each person has an identity key; names show with a 4-digit tag derived from it (like <em>Alice#4417</em>). If someone shows up with a familiar name but a new key, Bellion Share points it out. Bellion Share refuses to connect to someone whose encryption keys don't match their identity.</li>
-  <li><strong>Safety code.</strong> Everyone in a call sees a safety code. Read it aloud once: if everyone sees the same numbers, nobody is intercepting the connection.</li>
-  <li>The password stays in the part of the link after <code>#</code>, which browsers never send to the server, so it stays out of the join page and its logs. The app does send it to our server, over an encrypted connection, to check it when you join. The server keeps only a hash of it, in memory, while the session lasts.</li>
+  <li><strong>Safety code.</strong> Everyone in a call can see a safety code: click the <em>End-to-end encrypted</em> badge next to the room code. Read it aloud once: if everyone sees the same numbers, nobody is intercepting the connection.</li>
+  <li>The password stays in the part of the link after <code>#</code>, which browsers never send to the server, so it stays out of the join page and its logs. The app does send it to our server, over an encrypted connection, to check it when you join. The server keeps only a hash of it while the session lasts, in memory and in the sessions it saves to its disk so a restart doesn't end calls.</li>
   <li><strong>What a password does and doesn't protect.</strong> The password decides who the server lets in. It isn't part of the encryption keys, so a compromised server could add someone to your session without it. That person shows up in the People list and changes the safety code, so check both if it matters. Relays in your session also get the room's keys, like any member.</li>
 </ul>
 <p>See the <a href="/privacy">Privacy Policy</a> for what the app and our server handle.</p>
 
 <h2 id="app">The app</h2>
 <ul>
-  <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in.</li>
+  <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in (<em>Start Bellion Share when I sign in</em> in the gear menu).</li>
+  <li>The gear menu also sets your name, shows your identity key, adds your own <a href="/docs/self-hosting">servers</a>, picks the app's language, and checks for updates.</li>
   <li>Updates itself: new versions are signed, offered in the app, and rolled back automatically if something goes wrong.</li>
-  <li>Opens a UDP port (30471) on your router with UPnP, NAT-PMP or PCP by default, when the router allows it, so others can reach you directly. To turn this off, start the app with <code>-udp-port 0</code>.</li>
+  <li>Opens a UDP port (30471) on your router with UPnP, NAT-PMP or PCP by default, when the router allows it, so others can reach you directly. To turn this off, switch off <em>Open a port on my router automatically</em> in <em>Share options &gt; Advanced...</em> (it applies to your next session), or start the app with <code>-udp-port 0</code>.</li>
   <li>Like any peer-to-peer app, people in your session learn your IP address, and you learn theirs. Clicking a share link joins that session right away, so only click links from people you trust.</li>
-  <li><em>Help &gt; Send feedback...</em> sends an idea or a problem report, optionally with diagnostics (your setup and call stats, no names, keys or links). <em>Help &gt; Logs and problem reports</em> sends your logs, opens the log folder or copies diagnostics.</li>
-  <li>On Windows, a crash guard runs Bellion Share and keeps crash dumps on your computer. They are never uploaded, but today they hold the app's full memory, which can include session keys. An upcoming version makes them much smaller and keeps fewer. You can delete them any time from <code>%LOCALAPPDATA%\Blite\crash</code>.</li>
+  <li>In the <em>?</em> menu, <em>Send feedback...</em> sends an idea or a problem report, optionally with diagnostics (your setup and call stats, no names, keys or links). <em>Send logs to the developers</em>, <em>Open log folder</em> and <em>Copy diagnostics</em> help when something goes wrong. Room passwords are removed from the log before it's written, and from anything the app sends.</li>
+  <li>On Windows, a crash guard runs Bellion Share and keeps small crash dumps on your computer: without the app's full memory, at most two, for up to 14 days. They are never uploaded. You can delete them any time from <code>%LOCALAPPDATA%\Blite\crash</code>. Older versions wrote full-memory dumps, which can include session keys; delete those if you still have them.</li>
   <li><strong>Builds.</strong> The downloads on bellion.app are built by us, not by a public build service, so nothing proves they match a commit. If you want that certainty, build Bellion Share yourself from the <a href="https://github.com/martinsaul/blite">source code</a>.</li>
 </ul>
 

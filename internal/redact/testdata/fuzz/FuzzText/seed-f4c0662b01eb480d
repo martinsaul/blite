@@ -1,0 +1,2 @@
+go test fuzz v1
+string("?next=%23share.bellion.io/j/K7PQ2M4X#secretpw")

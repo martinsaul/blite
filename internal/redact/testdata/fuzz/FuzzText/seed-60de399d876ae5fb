@@ -1,0 +1,2 @@
+go test fuzz v1
+string("joining abcdefgh#7f2a")

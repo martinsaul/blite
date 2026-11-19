@@ -13,16 +13,22 @@ import (
 	"blite/internal/portmap"
 )
 
-// Port is our one UDP port for all peer connections, mapped on
-// the router while we run. Its socket is open while a mesh uses it, so it
-// binds to the interfaces of the moment.
+type portMapper interface {
+	State() portmap.State
+	Close()
+}
+
+// Port is our one UDP port for all peer connections, optionally mapped on the
+// router while we run. Its socket is open while a mesh uses it, so it binds to
+// the interfaces of the moment.
 type Port struct {
-	pref   int
-	mapper *portmap.Mapper
-	state  func() portmap.State // mapper.State; tests replace it
-	log    *slog.Logger
+	pref        int
+	state       func() portmap.State // tests replace it
+	startMapper func(port int, log *slog.Logger, onChange func(portmap.State)) portMapper
+	log         *slog.Logger
 
 	mu      sync.Mutex
+	mapper  portMapper
 	mux     *ice.MultiUDPMuxDefault
 	port    int
 	refs    int
@@ -36,20 +42,78 @@ const portTries = 10
 // NewPort picks the first free port from pref on, maps it on the router and
 // keeps it mapped until Close.
 func NewPort(pref int, log *slog.Logger) *Port {
+	return NewPortOpts(pref, true, log)
+}
+
+// NewPortOpts picks the first free port from pref on and, when mapRouter is
+// true, maps it on the router via PCP/NAT-PMP/UPnP. When mapRouter is false,
+// no router mapping requests are sent, while peer connections still share the
+// single fixed local UDP port.
+func NewPortOpts(pref int, mapRouter bool, log *slog.Logger) *Port {
 	if log == nil {
 		log = slog.Default()
 	}
-	p := &Port{pref: freePort(pref), log: log}
-	p.mapper = portmap.Start(p.pref, log, func(portmap.State) {
-		p.mu.Lock()
-		ws := p.watches
-		p.mu.Unlock()
-		for _, f := range ws {
-			f()
-		}
-	})
-	p.state = p.mapper.State
+	p := &Port{
+		pref: freePort(pref),
+		log:  log,
+		startMapper: func(port int, log *slog.Logger, onChange func(portmap.State)) portMapper {
+			return portmap.Start(port, log, onChange)
+		},
+	}
+	if mapRouter {
+		p.SetMapping(true)
+	}
 	return p
+}
+
+func (p *Port) notifyWatches() {
+	p.mu.Lock()
+	ws := append([]func(){}, p.watches...)
+	p.mu.Unlock()
+	for _, f := range ws {
+		f()
+	}
+}
+
+// SetMapping turns router port mapping (PCP/NAT-PMP/UPnP) on or off while
+// keeping the fixed local UDP port.
+func (p *Port) SetMapping(on bool) {
+	p.mu.Lock()
+	if on {
+		if p.mapper != nil {
+			p.mu.Unlock()
+			return
+		}
+		start := p.startMapper
+		if start == nil {
+			start = func(port int, log *slog.Logger, onChange func(portmap.State)) portMapper {
+				return portmap.Start(port, log, onChange)
+			}
+		}
+		p.mapper = start(p.pref, p.log, func(portmap.State) {
+			p.notifyWatches()
+		})
+		p.mu.Unlock()
+		p.notifyWatches()
+		return
+	}
+	m := p.mapper
+	p.mapper = nil
+	p.mu.Unlock()
+	if m != nil {
+		m.Close()
+		p.notifyWatches()
+	}
+}
+
+// Mapping reports whether router port mapping is active on this port.
+func (p *Port) Mapping() bool {
+	if p.state != nil {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.mapper != nil
 }
 
 // Watch calls f whenever the router mapping changes.
@@ -60,10 +124,21 @@ func (p *Port) Watch(f func()) {
 }
 
 // State is what the router mapping looks like.
-func (p *Port) State() portmap.State { return p.state() }
+func (p *Port) State() portmap.State {
+	if p.state != nil {
+		return p.state()
+	}
+	p.mu.Lock()
+	m := p.mapper
+	p.mu.Unlock()
+	if m == nil {
+		return portmap.State{}
+	}
+	return m.State()
+}
 
-// Close removes the router mapping.
-func (p *Port) Close() { p.mapper.Close() }
+// Close removes any router mapping.
+func (p *Port) Close() { p.SetMapping(false) }
 
 // usableIP skips link-local addresses: useless for calls, and a container
 // interface's (host networking) can't be bound for a moment after it
@@ -99,7 +174,7 @@ func (p *Port) acquire() (ice.UDPMux, int, error) {
 		if p.mux == nil {
 			return nil, 0, fmt.Errorf("no free UDP port in %d-%d: %w", p.pref, p.pref+portTries-1, err)
 		}
-		if p.port != p.pref {
+		if p.port != p.pref && p.mapper != nil {
 			p.log.Warn("udp port differs from the mapped one: peers can't use the router mapping", "port", p.port, "mapped", p.pref)
 		}
 	}

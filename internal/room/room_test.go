@@ -386,3 +386,41 @@ func TestResumeClosesReplaced(t *testing.T) {
 		t.Fatalf("new connection: err %v, old closed %d times, want 1", err, old.closed)
 	}
 }
+
+func TestProbe(t *testing.T) {
+	m := NewManager(time.Minute)
+	now := time.Unix(1_000_000, 0)
+	m.now = func() time.Time { return now }
+
+	a := &box{}
+	sa, _ := m.Create(pw, "alice", "ka", "", 0, false, a)
+	so, _ := m.Create("", "open", "ko", "", 0, false, &box{})
+
+	if !m.Probe(sa.Room, pw) {
+		t.Fatal("probe with right password failed")
+	}
+	if m.Probe(sa.Room, "wrong password") || m.Probe(sa.Room, "") {
+		t.Fatal("probe with wrong password succeeded")
+	}
+	if !m.Probe(so.Room, "") || !m.Probe(so.Room, "anything") {
+		t.Fatal("probe on open room failed")
+	}
+	if m.Probe("ZZZZZZZZ", pw) {
+		t.Fatal("probe on missing room succeeded")
+	}
+	if m.Count() != 2 || len(a.all()) != 0 {
+		t.Fatalf("probe touched state: count=%d msgs=%v", m.Count(), a.all())
+	}
+
+	// Probing an empty room inside EmptyGrace must not reset its expiry clock.
+	m.Leave(sa.Room, sa.PeerID)
+	now = now.Add(DefaultEmptyGrace - time.Second)
+	if !m.Probe(sa.Room, pw) {
+		t.Fatal("probe inside empty grace failed")
+	}
+	now = now.Add(2 * time.Second)
+	m.Sweep()
+	if m.Probe(sa.Room, pw) {
+		t.Fatal("probe kept empty room alive past EmptyGrace")
+	}
+}

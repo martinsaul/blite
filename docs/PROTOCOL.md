@@ -47,6 +47,19 @@ link; then it is deleted. There is no way to list rooms. A server run with
 `BLITE_STATE_FILE` keeps its rooms across a restart: members who were
 connected then have 60 s from the restart to `resume`.
 
+### Checking whether a room exists
+
+Before entering a room, a client may send `probe {room, password}` to check
+whether a recent room still lives without joining it. Reply: `probe-result
+{exists}` (or `error {code: "rate_limited"}`).
+
+- Authenticated by the room password: a wrong password and a missing room both
+  answer `probe-result {exists: false}` and count toward the same per-IP and
+  per-room failure limits as a failed `join` (no enumeration oracle).
+- Probes never create rooms, seat a peer, or touch room state (such as the
+  5-minute empty-room grace timer).
+- Servers from before `probe` reply `error {code: "bad_request"}`.
+
 ## In a room
 
 | Direction | Message |
@@ -57,6 +70,7 @@ connected then have 60 s from the restart to `resume`.
 | server -> client | `peer-left {peerId}` |
 | client -> server | `rename {name}`: change our display name |
 | server -> client | `peer-renamed {peerId, name}` |
+| client -> server | `sharing {on}`: whether we are sharing video now (reported on `GET /v1/channel/{id}`) |
 | client -> server | `relay-volunteer {on}`: join (`true`) or leave the relay queue |
 | client -> server | `caps {upKbps, upSource, cpuFree, reach, uptime}`: what we could do as a relay |
 | server -> client | `plan {epoch, relays, home, queue, paused}`: the relay plan, whenever it changes |
@@ -121,7 +135,7 @@ forward encrypted media unchanged. Encrypted rooms refuse builds below 72
 | `bad_password` | wrong password |
 | `no_room` | no such room |
 | `room_full` | only if the operator set `BLITE_MAX_PEERS` |
-| `rate_limited` | 5 failed joins per IP or 20 per room in 10 min; 10 creates per IP in 10 min |
+| `rate_limited` | 5 failed joins or probes per IP, or 20 per room, in 10 min; 10 creates per IP in 10 min |
 | `bad_request` | malformed or unknown message |
 | `no_peer` | signal/transfer/kick target not in the room or disconnected |
 | `resume_failed` | the slot or token is gone |
@@ -135,8 +149,9 @@ forward encrypted media unchanged. Encrypted rooms refuse builds below 72
 
 - `GET /j/{code}`: the share-link landing page.
 - `GET /v1/channel/{id}`: the room tied to a Discord voice channel, as
-  `{room, open, people}` (`open`: no password needed); 404 if none. Rate
-  limited per IP.
+  `{room, open, people, sharers, members}` (`open`: no password needed;
+  `sharers` and `members` are display names in join order, `sharers` omitted
+  while nobody shares); 404 if none. Rate limited per IP.
 - `POST /v1/discord/token`: exchanges a Discord authorization code
   (`{"code": ...}`) or refresh token (`{"refresh": ...}`) with the server's
   Discord app secret, so the secret never ships in the app. Only when the

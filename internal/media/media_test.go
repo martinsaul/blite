@@ -140,3 +140,46 @@ func TestHighFPS(t *testing.T) {
 		t.Errorf("game: HIGH %d fps", h)
 	}
 }
+
+func TestLayersForOpts(t *testing.T) {
+	off := false
+	// Custom 15 fps + 540p floor + 720p rendition on a 1080p share:
+	// 540p is already the floor, so only 720p runs as a rendition.
+	ls := LayersForOpts(LayerOpts{
+		Resolution: Res1080,
+		FPS:        15,
+		MinHeight:  540,
+		Renditions: []int{720, 540},
+	})
+	if ls[High].Height != 1080 || ls[High].FPS != 15 {
+		t.Fatalf("high = %+v", ls[High])
+	}
+	if ls[Low].Height != 540 || ls[Low].FPS != 15 {
+		t.Fatalf("low = %+v", ls[Low])
+	}
+	if ls[Rend720].Height != 720 || ls[Rend540].Height != 0 {
+		t.Fatalf("rends = 720:%+v 540:%+v", ls[Rend720], ls[Rend540])
+	}
+
+	// SmallerCopy=false omits LOW and all renditions.
+	lsNoLow := LayersForOpts(LayerOpts{
+		Resolution:  Res2160,
+		FPS:         45,
+		SmallerCopy: &off,
+		Renditions:  []int{1080, 720, 540},
+	})
+	if lsNoLow[High].Height != 2160 || lsNoLow[High].FPS != 45 {
+		t.Fatalf("high 45fps = %+v", lsNoLow[High])
+	}
+	for _, id := range []int{Low, Rend1080, Rend720, Rend540} {
+		if lsNoLow[id].Height != 0 {
+			t.Fatalf("layer %d should be disabled when SmallerCopy=false, got %+v", id, lsNoLow[id])
+		}
+	}
+
+	// MinHeight=720 on a 720p share has no lower copy below HIGH.
+	ls720Floor := LayersForOpts(LayerOpts{Resolution: Res720, FPS: 30, MinHeight: 720})
+	if ls720Floor[Low].Height != 0 {
+		t.Fatalf("720p share with 720p floor should not run duplicate LOW, got %+v", ls720Floor[Low])
+	}
+}

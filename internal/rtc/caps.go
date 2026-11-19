@@ -37,28 +37,20 @@ func (m *Mesh) relayCaps() proto.Caps {
 func (m *Mesh) reach() string {
 	best := ""
 	for _, r := range m.peerList() {
-		if r.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+		pair, _, _, _, ok := m.iceStats(r)
+		if !ok || pair == nil || pair.Local == nil {
 			continue
 		}
-		m.statsMu.RLock()
-		st := r.pc.GetStats()
-		m.statsMu.RUnlock()
-		for _, v := range st {
-			cp, ok := v.(webrtc.ICECandidatePairStats)
-			if !ok || !cp.Nominated {
-				continue
+		l := pair.Local
+		switch ip := net.ParseIP(l.Address); {
+		case l.Typ == webrtc.ICECandidateTypeRelay:
+			if best == "" {
+				best = "turn"
 			}
-			l, _ := st[cp.LocalCandidateID].(webrtc.ICECandidateStats)
-			switch ip := net.ParseIP(l.IP); {
-			case l.CandidateType == webrtc.ICECandidateTypeRelay:
-				if best == "" {
-					best = "turn"
-				}
-			case l.CandidateType == webrtc.ICECandidateTypeHost && ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate():
-				return "public"
-			default:
-				best = "nat"
-			}
+		case l.Typ == webrtc.ICECandidateTypeHost && ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate():
+			return "public"
+		default:
+			best = "nat"
 		}
 	}
 	return best

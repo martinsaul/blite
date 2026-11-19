@@ -1,0 +1,2 @@
+go test fuzz v1
+string("see:https://h/j/ABCD#pw")

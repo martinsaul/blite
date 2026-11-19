@@ -1,0 +1,2 @@
+go test fuzz v1
+string("msg=\"line1\\nhttps://h.example.com/j/ABCD#pw77\\nline3\"")

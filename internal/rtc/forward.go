@@ -23,8 +23,9 @@ const (
 	layerLow   = 1
 	layerR1080 = 2
 	layerR720  = 3
-	numLayers  = 4 // encoded layers
-	layerOff   = 4 // forwarder state: no video to this peer (audio continues)
+	layerR540  = 4
+	numLayers  = 5 // encoded layers
+	layerOff   = 5 // forwarder state: no video to this peer (audio continues)
 	frameTicks = clockRate / 30
 )
 
@@ -53,7 +54,7 @@ func wireLevel(w int) (int, bool) {
 }
 
 // rendHeights are the rendition heights, largest first, and their layers.
-var rendHeights = []int{1080, 720}
+var rendHeights = []int{1080, 720, 540}
 
 func rendLayer(h int) int {
 	switch h {
@@ -61,30 +62,47 @@ func rendLayer(h int) int {
 		return layerR1080
 	case 720:
 		return layerR720
+	case 540:
+		return layerR540
 	}
 	return -1
 }
 
 // layerHeight is a layer's height given the top's (0 = off or unknown).
 func layerHeight(layer, top int) int {
+	return layerHeightFloor(layer, top, 360)
+}
+
+func layerHeightFloor(layer, top, lowH int) int {
 	switch layer {
 	case layerHigh:
 		return top
 	case layerLow:
-		return 360
+		if lowH <= 0 {
+			return 360
+		}
+		return lowH
 	case layerR1080:
 		return 1080
 	case layerR720:
 		return 720
+	case layerR540:
+		return 540
 	}
 	return 0
 }
 
 // rendFor is the best rendition no taller than maxHeight that a top of
-// height top offers (0 = none).
+// height top offers above the default 360p floor (0 = none).
 func rendFor(top, maxHeight int) int {
+	return rendForFloor(top, maxHeight, 360)
+}
+
+// rendForFloor is the best rendition strictly between floorHeight and top,
+// and no taller than maxHeight (0 = none).
+func rendForFloor(top, maxHeight, floorHeight int) int {
 	for _, h := range rendHeights {
-		if h < top && h <= maxHeight {
+		if floorHeight < h && h < top && h <= maxHeight {
 			return h
 		}
 	}
@@ -271,15 +289,17 @@ type layerPolicy struct {
 	hasMid    bool      // levelMid exists for this peer (a granted rendition)
 
 	// Frame rate steps on HIGH: before levelHigh steps down to
-	// the next layer, it steps through highFPS[1..fpsSteps]. fpsSteps is 0
-	// when not allowed (game mode, or HIGH has other viewers).
+	// the next layer, it steps through ladder[1..fpsSteps] (default highFPS).
+	// fpsSteps is 0 when not allowed (resolution-first, or HIGH has other viewers).
 	fps      int
 	fpsSteps int
+	ladder   []int
 
 	// Baseline RTT: the minimum over the current and previous window, so it
 	// follows route changes within rttWindow..2*rttWindow.
 	rttMin, rttPrevMin time.Duration
 	rttWindowStart     time.Time
+	lastRTT, lastQD    time.Duration
 }
 
 // rr is what one receiver report tells us.
@@ -331,6 +351,9 @@ func (lp *layerPolicy) observe(cur int, r rr, now time.Time) int {
 	}
 	lp.ewma = ewmaWeight*r.lost + (1-ewmaWeight)*lp.ewma
 	qd := lp.queueDelay(r.rtt, now)
+	if r.rtt > 0 {
+		lp.lastRTT, lp.lastQD = r.rtt, qd
+	}
 	if now.Before(lp.settle) {
 		return lp.switchTo(cur, cur, now)
 	}
@@ -380,12 +403,31 @@ func (lp *layerPolicy) observe(cur int, r rr, now time.Time) int {
 // highFPS are the frame rates of HIGH's steps at 30 fps (desktop shares).
 var highFPS = [...]int{30, 20, 15, 10}
 
+// fpsLadder returns HIGH's frame rate steps starting at baseFPS and stepping
+// down through clean rates to 10 fps.
+func fpsLadder(baseFPS int) []int {
+	if baseFPS <= 0 {
+		baseFPS = 30
+	}
+	out := []int{baseFPS}
+	for _, cand := range []int{30, 20, 15, 10} {
+		if cand < baseFPS {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
 // fpsCap is the frame rate this peer can take on HIGH (0: no cap).
 func (lp *layerPolicy) fpsCap() int {
 	if lp.fps == 0 {
 		return 0
 	}
-	return highFPS[lp.fps]
+	lad := lp.ladder
+	if len(lad) == 0 {
+		lad = highFPS[:]
+	}
+	return lad[min(lp.fps, len(lad)-1)]
 }
 
 func (lp *layerPolicy) switchTo(cur, target int, now time.Time) int {

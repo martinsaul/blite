@@ -11,15 +11,19 @@ import (
 // composed over the tile: crisp, of even size, and faded through the
 // compositor pad's alpha.
 
-// The bar, in units of its height h: mute and pause buttons, then the
-// volume slider (0..maxVolume, a tick at 100%).
+// The bar, in units of its height h: eye, pop-out/pop-in and pin on every
+// tile, plus mute and the volume slider (0..maxVolume, a tick at 100%) on
+// remote tiles.
 const (
 	barPad       = 0.3
-	barMuteX     = barPad + 0.5 // button centres
-	barPauseX    = barPad + 1.5
-	barSliderX0  = barPad + 2.35
-	barSliderX1  = barPad + 5.25
-	barUnits     = barSliderX1 + 0.4
+	barEyeX      = barPad + 0.5 // button centres
+	barPopX      = barPad + 1.5
+	barPinX      = barPad + 2.5
+	barMuteX     = barPad + 3.5
+	barSliderX0  = barPad + 4.35
+	barSliderX1  = barPad + 7.15
+	barFullUnits = barSliderX1 + 0.4
+	barSelfUnits = barPad + 3.0 + barPad
 	maxVolume    = 2.0
 	barMinH      = 24
 	barMaxH      = 48
@@ -27,27 +31,49 @@ const (
 	spinnerMaxPx = 88
 )
 
-// barSize is the bar's size on a tile th lines tall.
-func barSize(th int) (w, h int) {
-	h = min(max(th/12, barMinH), barMaxH) &^ 1
-	return int(barUnits*float64(h)) &^ 1, h
+func barUnits(self bool) float64 {
+	if self {
+		return barSelfUnits
+	}
+	return barFullUnits
 }
 
-// spinnerSize is the spinner's side on a tile th lines tall.
-func spinnerSize(th int) int { return min(max(th/7, spinnerMinPx), spinnerMaxPx) &^ 1 }
+// barSize is the bar's size on a tile tw x th pixels.
+func barSize(tw, th int, self bool) (w, h int) {
+	u := barUnits(self)
+	h = min(max(th/12, barMinH), barMaxH)
+	if maxH := int(float64(max(tw-8, 24)) / u); h > maxH {
+		h = max(maxH, 12)
+	}
+	h &^= 1
+	w = min(int(u*float64(h))&^1, tw&^1)
+	return max(w, 2), max(h, 2)
+}
+
+// spinnerSize is the spinner's side on a tile tw x th pixels.
+func spinnerSize(tw, th int) int {
+	side := min(tw, th)
+	return max(min(max(side/7, spinnerMinPx), min(spinnerMaxPx, side&^1))&^1, 2)
+}
 
 // barHit is what a point x, y of the bar (pixels from its top left) hits:
 // a button, or the slider with the volume there.
-func barHit(x, y float64, h int) (Control, float64, bool) {
+func barHit(x, y float64, h int, self bool) (Control, float64, bool) {
 	u, v := x/float64(h), y/float64(h)
-	if v < 0 || v > 1 || u < 0 || u > barUnits {
+	if v < 0 || v > 1 || u < 0 || u > barUnits(self) {
 		return "", 0, false
 	}
 	switch {
 	case u < barPad+1:
-		return ControlMute, 0, true
+		return ControlEye, 0, true
 	case u < barPad+2:
-		return ControlPause, 0, true
+		return ControlPopOut, 0, true
+	case u < barPad+3:
+		return ControlPin, 0, true
+	case self:
+		return "", 0, false
+	case u < barPad+4:
+		return ControlMute, 0, true
 	case u >= barSliderX0-0.25:
 		return ControlVolume, sliderValue(u), true
 	}
@@ -145,46 +171,91 @@ var (
 	dimWhite = color.NRGBA{255, 255, 255, 110}
 	panel    = color.NRGBA{0, 0, 0, 150}
 	hoverBg  = color.NRGBA{255, 255, 255, 46}
+	accentBg = color.NRGBA{108, 123, 255, 190}
 )
 
-// drawBar draws the controls h pixels tall: the button under the pointer
-// (hover) lit, the speaker crossed out when muted, play when paused.
-func drawBar(h int, muted, paused bool, volume float64, hover Control) *image.NRGBA {
-	w := int(barUnits*float64(h)) &^ 1
-	cv := canvas{image.NewNRGBA(image.Rect(0, 0, w, h)), float64(h)}
-	cv.fill(panel, capsule(0.5, 0.5, barUnits-0.5, 0.5, 0.5))
-	for _, b := range []struct {
+// drawBar draws tile t's control bar w x h pixels: eye, pop-out/pop-in, pin,
+// and (for remote tiles) mute and the volume slider.
+func drawBar(w, h int, t Tile, hover Control) *image.NRGBA {
+	u := barUnits(t.Self)
+	cv := canvas{image.NewNRGBA(image.Rect(0, 0, w, h)), float64(w) / u}
+	cv.fill(panel, capsule(0.5, 0.5, u-0.5, 0.5, 0.5))
+	if t.Pinned {
+		cv.fill(accentBg, circle(barPinX, 0.5, 0.42))
+	}
+	buttons := []struct {
 		c Control
 		x float64
-	}{{ControlMute, barMuteX}, {ControlPause, barPauseX}} {
+	}{
+		{ControlEye, barEyeX},
+		{ControlPopOut, barPopX},
+		{ControlPin, barPinX},
+	}
+	if !t.Self {
+		buttons = append(buttons, struct {
+			c Control
+			x float64
+		}{ControlMute, barMuteX})
+	}
+	for _, b := range buttons {
 		if hover == b.c {
 			cv.fill(hoverBg, circle(b.x, 0.5, 0.42))
 		}
 	}
+
+	y, s := 0.5, 0.5
+
+	// eye (watching; clicking stops watching)
+	x := barEyeX
+	cv.fill(white, arc(x, y+0.20*s, 0.44*s, 0.055*s, -2.32, -0.82))
+	cv.fill(white, arc(x, y-0.20*s, 0.44*s, 0.055*s, 0.82, 2.32))
+	cv.fill(white, circle(x, y, 0.13*s))
+
+	// pop out (arrow out of frame) or pop in (arrow back into frame)
+	x = barPopX
+	cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.34*s, y+0.34*s, 0.05*s))
+	cv.fill(white, capsule(x-0.34*s, y+0.34*s, x+0.20*s, y+0.34*s, 0.05*s))
+	cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.06*s, y-0.20*s, 0.05*s))
+	cv.fill(white, capsule(x+0.20*s, y+0.06*s, x+0.20*s, y+0.34*s, 0.05*s))
+	if t.PoppedOut {
+		cv.fill(white, capsule(x+0.34*s, y-0.34*s, x-0.04*s, y+0.04*s, 0.05*s))
+		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.20*s, y+0.04*s, 0.05*s))
+		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x-0.04*s, y-0.20*s, 0.05*s))
+	} else {
+		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.34*s, y-0.34*s, 0.05*s))
+		cv.fill(white, capsule(x+0.10*s, y-0.34*s, x+0.34*s, y-0.34*s, 0.05*s))
+		cv.fill(white, capsule(x+0.34*s, y-0.34*s, x+0.34*s, y-0.10*s, 0.05*s))
+	}
+
+	// pin (pushpin)
+	x = barPinX
+	cv.fill(white, capsule(x-0.18*s, y-0.30*s, x+0.18*s, y-0.30*s, 0.055*s))
+	cv.fill(white, polygon([2]float64{x - 0.14*s, y - 0.28*s}, [2]float64{x + 0.14*s, y - 0.28*s},
+		[2]float64{x + 0.24*s, y + 0.06*s}, [2]float64{x - 0.24*s, y + 0.06*s}))
+	cv.fill(white, capsule(x-0.26*s, y+0.06*s, x+0.26*s, y+0.06*s, 0.05*s))
+	cv.fill(white, capsule(x, y+0.08*s, x, y+0.38*s, 0.045*s))
+
+	if t.Self {
+		return cv.img
+	}
+
 	// speaker: box and cone, then waves or a cross
-	x, y, s := barMuteX-0.06, 0.5, 0.5
+	x = barMuteX - 0.06
 	cv.fill(white, polygon([2]float64{x - 0.34*s, y - 0.13*s}, [2]float64{x - 0.12*s, y - 0.13*s}, [2]float64{x + 0.14*s, y - 0.4*s},
 		[2]float64{x + 0.14*s, y + 0.4*s}, [2]float64{x - 0.12*s, y + 0.13*s}, [2]float64{x - 0.34*s, y + 0.13*s}))
-	if muted {
+	if t.Muted {
 		cv.fill(white, capsule(x+0.3*s, y-0.17*s, x+0.62*s, y+0.17*s, 0.055*s))
 		cv.fill(white, capsule(x+0.3*s, y+0.17*s, x+0.62*s, y-0.17*s, 0.055*s))
 	} else {
 		cv.fill(white, arc(x+0.14*s, y, 0.26*s, 0.05*s, -0.85, 0.85))
 		cv.fill(white, arc(x+0.14*s, y, 0.46*s, 0.05*s, -0.85, 0.85))
 	}
-	// pause bars, or play
-	x = barPauseX
-	if paused {
-		cv.fill(white, polygon([2]float64{x - 0.18*s, y - 0.34*s}, [2]float64{x + 0.34*s, y}, [2]float64{x - 0.18*s, y + 0.34*s}))
-	} else {
-		cv.fill(white, capsule(x-0.15*s, y-0.3*s, x-0.15*s, y+0.3*s, 0.08*s))
-		cv.fill(white, capsule(x+0.15*s, y-0.3*s, x+0.15*s, y+0.3*s, 0.08*s))
-	}
+
 	// volume slider
-	f := min(max(volume/maxVolume, 0), 1)
+	f := min(max(t.Volume/maxVolume, 0), 1)
 	xv := barSliderX0 + f*(barSliderX1-barSliderX0)
 	fillC := white
-	if muted {
+	if t.Muted {
 		fillC = dimWhite
 	}
 	cv.fill(dimWhite, capsule(barSliderX0, y, barSliderX1, y, 0.06))

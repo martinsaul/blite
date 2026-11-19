@@ -1,0 +1,2 @@
+go test fuzz v1
+string("msg=\"paste k7pq 2m4x #pwSp5\"")

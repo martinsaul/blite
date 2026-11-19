@@ -1,16 +1,40 @@
 package media
 
 import (
+	"encoding/binary"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
 )
 
+// Both scale to the window; xvimagesink needs an Xv port, which some
+// drivers and VMs lack.
+var videoWindowSinks = []string{"xvimagesink", "glimagesink"}
+
+func atom(c *xgb.Conn, name string) xproto.Atom {
+	r, err := xproto.InternAtom(c, false, uint16(len(name)), name).Reply()
+	if err != nil {
+		return 0
+	}
+	return r.Atom
+}
+
+func u32s(vs ...uint32) []byte {
+	b := make([]byte, 4*len(vs))
+	for i, v := range vs {
+		binary.LittleEndian.PutUint32(b[4*i:], v)
+	}
+	return b
+}
+
 type x11Video struct {
 	c         *xgb.Conn
 	win       xproto.Window
 	closed    chan struct{}
+	closeReq  chan struct{}
+	intercept atomic.Bool
 	closeOnce sync.Once
 	destroy   sync.Once
 }
@@ -32,7 +56,7 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 		c.Close()
 		return nil, err
 	}
-	v := &x11Video{c: c, win: wid, closed: make(chan struct{})}
+	v := &x11Video{c: c, win: wid, closed: make(chan struct{}), closeReq: make(chan struct{}, 1)}
 	v.SetTitle(title)
 	class := []byte("bellionshare-video\x00BellionShare\x00")
 	xproto.ChangeProperty(c, xproto.PropModeReplace, wid, atom(c, "WM_CLASS"), xproto.AtomString, 8, uint32(len(class)), class)
@@ -47,6 +71,13 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 				return // connection closed
 			}
 			if cm, ok := ev.(xproto.ClientMessageEvent); ok && cm.Format == 32 && xproto.Atom(cm.Data.Data32[0]) == del {
+				if v.intercept.Load() {
+					select {
+					case v.closeReq <- struct{}{}:
+					default:
+					}
+					continue
+				}
 				xproto.UnmapWindow(c, wid) // hide now, the owner destroys it
 				v.closeOnce.Do(func() { close(v.closed) })
 			}
@@ -55,8 +86,10 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 	return v, nil
 }
 
-func (v *x11Video) Handle() uintptr         { return uintptr(v.win) }
-func (v *x11Video) Closed() <-chan struct{} { return v.closed }
+func (v *x11Video) Handle() uintptr                 { return uintptr(v.win) }
+func (v *x11Video) Closed() <-chan struct{}         { return v.closed }
+func (v *x11Video) SetInterceptClose(on bool)       { v.intercept.Store(on) }
+func (v *x11Video) CloseRequested() <-chan struct{} { return v.closeReq }
 
 func (v *x11Video) SetTitle(title string) {
 	for _, p := range []struct {

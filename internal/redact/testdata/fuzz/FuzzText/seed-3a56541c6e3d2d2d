@@ -1,0 +1,2 @@
+go test fuzz v1
+string("guard: started blite.exe pid 99 args [\"bshare://join/K7PQ2M4X?server=share.example.com#correct \\\"horse\\\" battery\" \"-background\"]")

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"blite/internal/redact"
 )
 
 // Retention: a segment where nothing happened expires after keepQuiet; one
@@ -101,8 +103,10 @@ func (j *journal) writeLine(line []byte) {
 }
 
 // Guardf writes one guard line. event marks the segment as worth keeping.
+// Child stdout/stderr is already redacted once by the redact.Writer in front
+// of j, so only guard-originated lines call redact.Text here.
 func (j *journal) Guardf(event bool, format string, args ...any) {
-	line := fmt.Sprintf("%s guard: %s\n", time.Now().Format("2006-01-02T15:04:05.000Z07:00"), fmt.Sprintf(format, args...))
+	line := redact.Text(fmt.Sprintf("%s guard: %s\n", time.Now().Format("2006-01-02T15:04:05.000Z07:00"), fmt.Sprintf(format, args...)))
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if len(j.partial) > 0 { // keep Blite's unterminated output in order

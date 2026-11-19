@@ -1,0 +1,2 @@
+go test fuzz v1
+string("password = s1 password :s2 joinPassword=s3 passwords=s4 room.password=s5 password=pw\"58")

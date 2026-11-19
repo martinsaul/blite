@@ -100,9 +100,9 @@ instead: it joins a room by its share link and volunteers.
 
 ## 4. Clients
 
-Official builds can use your server as they are: under *Room > Servers...*,
-add `blite.example.com` (or `wss://blite.example.com/ws`) and, if you like,
-make it the default. Once a server is added, a picker at the bottom right of
+Official builds can use your server as they are: under *Servers...* in the
+gear menu, add `blite.example.com` (or `wss://blite.example.com/ws`) and, if
+you like, make it the default. Once a server is added, a picker at the bottom right of
 the window chooses where new sessions start. Share links name their server
 (`https://blite.example.com/j/CODE#password`, which opens
 `bshare://join/CODE?server=blite.example.com#password`), so anyone can join

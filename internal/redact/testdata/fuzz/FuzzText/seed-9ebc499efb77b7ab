@@ -1,0 +1,2 @@
+go test fuzz v1
+string("api_key=a1 apikey=a2 access_token=a3 x-token=a4 passwd=a5 password: a6 Bearer a7 -password a8 {\"password\":123}")

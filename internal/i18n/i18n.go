@@ -122,6 +122,32 @@ func System() string {
 	return "en"
 }
 
+// SystemLocales are the OS locale tags detected for this user, in priority
+// order (for diagnostics).
+func SystemLocales() []string {
+	return slices.Clone(systemLocales())
+}
+
+// mergeLocales puts primary (e.g. Windows's display language) ahead of rest,
+// dropping blanks and case-insensitive duplicates.
+func mergeLocales(primary string, rest []string) []string {
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if !slices.ContainsFunc(out, func(x string) bool { return strings.EqualFold(x, s) }) {
+			out = append(out, s)
+		}
+	}
+	add(primary)
+	for _, s := range rest {
+		add(s)
+	}
+	return out
+}
+
 func apply(tag string) {
 	active.Store(&state{tag: tag, loc: i18n.NewLocalizer(bundle, tag)})
 }

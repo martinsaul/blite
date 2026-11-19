@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -32,6 +33,9 @@ type Options struct {
 	OnReady func()
 	// Hidden starts with the window hidden (only the tray icon).
 	Hidden bool
+	// Scene opens a secondary UI surface after the initial draw (for blite-uidemo):
+	// "sharesheet", "advanced", "panel", "gear", "help".
+	Scene string
 }
 
 // UI is the running native interface.
@@ -41,18 +45,26 @@ type UI struct {
 	win   fyne.Window
 	shown bool // the window showed once (Fyne thread)
 
-	closed  atomic.Bool // Run returned: the driver is gone
+	// closed: a quit was asked for (or Run returned). From then on nothing
+	// may queue work for the driver: once it has quit, fyne.Do runs the
+	// function inline on the calling goroutine, against a terminated GLFW
+	//.
+	closed atomic.Bool
+	// bg counts goroutines that report back to the UI (Go live, busy
+	// buttons), until their UI work ran, so tests can wait for them.
+	bg      sync.WaitGroup
 	mu      sync.Mutex
 	st      app.UIState
-	menuKey string
 	ownLink string // the share link we copied for our own session
 	devices []audio.Device
 
-	icon     fyne.Resource
-	view     *fyne.Container
-	viewKind string // lobby | call
-	lobby    *lobbyView
-	call     *callView
+	icon             fyne.Resource
+	view             *fyne.Container
+	viewKind         string // lobby | call
+	lobby            *lobbyView
+	call             *callView
+	sheet            *shareSheet
+	leaveDialogShown bool
 }
 
 var (
@@ -77,7 +89,11 @@ func Run(a ui.Backend, o Options) {
 	u.win.SetIcon(icon)
 	u.win.SetMaster()
 	u.win.SetCloseIntercept(func() { u.win.Hide() }) // keeps running in the tray
-	u.win.Resize(fyne.NewSize(1100, 720))
+	winH := float32(760)
+	if o.Scene == "advanced" {
+		winH = 960
+	}
+	u.win.Resize(fyne.NewSize(1100, winH))
 	u.view = container.NewStack()
 	u.win.SetContent(u.view)
 
@@ -90,7 +106,7 @@ func Run(a ui.Backend, o Options) {
 	ch, stop := a.Subscribe()
 	go func() {
 		for range ch {
-			fyne.Do(u.refresh)
+			u.later(u.refresh)
 		}
 	}()
 	fa.Lifecycle().SetOnEnteredForeground(func() {
@@ -100,6 +116,12 @@ func Run(a ui.Backend, o Options) {
 	})
 	fa.Lifecycle().SetOnStarted(func() {
 		fyne.Do(u.refresh) // the first draw, on Fyne's thread
+		if o.Scene != "" {
+			go func() {
+				time.Sleep(250 * time.Millisecond)
+				u.later(func() { u.applyScene(o.Scene) })
+			}()
+		}
 		if o.OnReady != nil {
 			go o.OnReady()
 		}
@@ -120,15 +142,53 @@ func Run(a ui.Backend, o Options) {
 // Show brings the window to the front (the tray, a second launch).
 func Show() {
 	if u := get(); u != nil {
-		fyne.Do(u.Show)
+		u.later(u.Show)
 	}
 }
 
 // Quit closes the window and the tray icon and makes Run return.
 func Quit() {
-	if u := get(); u != nil {
+	if u := get(); u != nil && !u.closed.Swap(true) {
 		fyne.Do(u.fa.Quit)
 	}
+}
+
+// quit is the tray's Quit, on the UI goroutine. It must be the app's Quit,
+// not the driver's (what Fyne gives an IsQuit item without an Action): that
+// one terminates GLFW but leaves the windows registered and the settings
+// watcher running, whose theme re-apply then crashed.
+func (u *UI) quit() {
+	if !u.closed.Swap(true) {
+		u.fa.Quit()
+	}
+}
+
+// later runs f on the UI goroutine unless the UI is closing. Use it, not
+// fyne.Do, from other goroutines.
+func (u *UI) later(f func()) {
+	if u.closed.Load() {
+		return
+	}
+	fyne.Do(func() {
+		if !u.closed.Load() {
+			f()
+		}
+	})
+}
+
+// laterDone is later for a goroutine counted in bg: it counts as done once
+// f ran (or won't run).
+func (u *UI) laterDone(f func()) {
+	if u.closed.Load() {
+		u.bg.Done()
+		return
+	}
+	fyne.Do(func() {
+		defer u.bg.Done()
+		if !u.closed.Load() {
+			f()
+		}
+	})
 }
 
 func get() *UI {
@@ -143,10 +203,9 @@ func (u *UI) setTrayMenu() {
 	if !ok {
 		return
 	}
-	quit := quitItem()
+	quit := u.quitItem()
 	d.SetSystemTrayMenu(fyne.NewMenu("Bellion Share",
 		fyne.NewMenuItem(i18n.L("Open Bellion Share"), u.Show),
-		fyne.NewMenuItem(i18n.L("Show video"), u.showVideo),
 		fyne.NewMenuItem(i18n.L("Leave session"), u.a.Leave),
 		fyne.NewMenuItemSeparator(),
 		quit,
@@ -160,14 +219,16 @@ func (u *UI) Show() {
 	if !u.shown {
 		u.shown = true
 		u.askAutostart() // the first time the window shows
+	} else if u.viewKind == "lobby" && u.lobby != nil {
+		u.lobby.checkClipboard(u)
+		go u.a.ProbeRecentRooms()
 	}
 }
 
 func (u *UI) loadDevices() {
 	devs, _ := audio.ListDevices()
-	fyne.Do(func() {
+	u.later(func() {
 		u.devices = devs
-		u.menuKey = "" // rebuild the Share menu with them
 		u.refresh()
 	})
 }
@@ -179,19 +240,38 @@ func (u *UI) refresh() {
 	}
 	st, _ := u.a.State().(app.UIState)
 	u.st = st
-	u.updateMenu()
+	if u.sheet != nil {
+		u.sheet.update(st)
+	}
 	if st.Session == nil {
+		u.leaveDialogShown = false
+		enteredLobby := false
 		if u.viewKind != "lobby" {
 			u.lobby = newLobby(u)
 			u.call = nil
 			u.view.Objects = []fyne.CanvasObject{u.lobby.root}
 			u.viewKind = "lobby"
 			u.view.Refresh()
+			enteredLobby = true
 		}
 		u.lobby.update(st)
+		if enteredLobby {
+			go u.a.ProbeRecentRooms()
+		}
 		return
 	}
+	if !st.Session.LeavePrompt {
+		u.leaveDialogShown = false
+	} else if !u.leaveDialogShown {
+		u.leaveDialogShown = true
+		u.showLeaveStreamDialog()
+	}
 	if u.viewKind != "call" {
+		if u.lobby != nil && u.lobby.recent != nil {
+			for _, r := range u.lobby.recent.rows {
+				r.stopFade()
+			}
+		}
 		u.call = newCall(u)
 		u.lobby = nil
 		u.view.Objects = []fyne.CanvasObject{u.call.root}
@@ -201,19 +281,55 @@ func (u *UI) refresh() {
 	u.call.update(st)
 }
 
+// applyScene opens a secondary UI surface on the UI goroutine.
+func (u *UI) applyScene(scene string) {
+	switch scene {
+	case "sharesheet":
+		u.openShareSheet(false)
+	case "advanced":
+		u.openShareSheet(true)
+	case "panel":
+		if u.call != nil && u.st.Session != nil && len(u.st.Session.Members) > 0 {
+			u.call.selectPeer(u.st.Session.Members[0].ID)
+		}
+	case "gear":
+		if btn := u.activeGearButton(); btn != nil {
+			showMenuBelow(btn, u.gearMenuItems()...)
+		}
+	case "help":
+		if btn := u.activeHelpButton(); btn != nil {
+			showMenuBelow(btn, u.helpMenuItems()...)
+		}
+	}
+}
+
+func (u *UI) activeGearButton() *iconDotButton {
+	if u.viewKind == "call" && u.call != nil {
+		return u.call.gear
+	}
+	if u.lobby != nil {
+		return u.lobby.gear
+	}
+	return nil
+}
+
+func (u *UI) activeHelpButton() *iconDotButton {
+	if u.viewKind == "call" && u.call != nil {
+		return u.call.help
+	}
+	if u.lobby != nil {
+		return u.lobby.help
+	}
+	return nil
+}
+
 // do runs f off the UI goroutine and shows its error, if any.
 func (u *UI) do(f func() error) {
 	go func() {
 		if err := f(); err != nil {
-			fyne.Do(func() { u.showErr(err) })
+			u.later(func() { u.showErr(err) })
 		}
 	}()
-}
-
-// showVideo reopens every video window the user closed (nothing outside
-// a call).
-func (u *UI) showVideo() {
-	go u.a.ShowWindow("*")
 }
 
 func (u *UI) showErr(err error) {
@@ -222,9 +338,10 @@ func (u *UI) showErr(err error) {
 }
 
 // quitItem is our own Quit, so it's in our language (Fyne adds its own
-// where a menu has none; it quits the app).
-func quitItem() *fyne.MenuItem {
-	q := fyne.NewMenuItem(i18n.L("Quit"), nil)
+// where a menu has none). Its Action must be set: Fyne fills a nil one with
+// the driver's Quit (see quit).
+func (u *UI) quitItem() *fyne.MenuItem {
+	q := fyne.NewMenuItem(i18n.L("Quit"), u.quit)
 	q.IsQuit = true
 	return q
 }
@@ -265,6 +382,8 @@ func limitText(limit string) string {
 		return i18n.L("their choice")
 	case "bandwidth":
 		return i18n.L("their link")
+	case "upload":
+		return i18n.L("upload limit")
 	case "cpu":
 		return i18n.L("your CPU")
 	}
@@ -351,5 +470,6 @@ func label(text string) *widget.Label {
 type discordBackend interface {
 	DiscordLogin()
 	GoLiveInChannel(ctx context.Context, password string, e2ee bool) error
+	EnterChannel(ctx context.Context, password string, e2ee bool) error
 	JoinChannel(ctx context.Context, password string) error
 }

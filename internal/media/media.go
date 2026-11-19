@@ -68,13 +68,15 @@ func HighFPS(m ContentMode) int {
 	return 30
 }
 
-// atFPS is l at fps, with the bitrate grown for the extra frames (60 fps
-// needs about 1.5x of 30, not 2x: consecutive frames differ less).
+// atFPS is l at fps, with the bitrate scaled sublinearly for the frame rate
+// (60 fps needs about 1.5x of 30, 15 fps about 0.75x: consecutive frames
+// differ less).
 func atFPS(l Layer, fps int) Layer {
-	if fps > l.FPS {
-		l.BitrateKbs = l.BitrateKbs * (l.FPS + fps) / (2 * l.FPS)
-		l.FPS = fps
+	if fps <= 0 || fps == l.FPS {
+		return l
 	}
+	l.BitrateKbs = max(300, l.BitrateKbs*(l.FPS+fps)/(2*l.FPS))
+	l.FPS = fps
 	return l
 }
 
@@ -84,19 +86,35 @@ func ValidResolution(r Resolution) bool {
 	return ok || r == ""
 }
 
-// Layer IDs. HIGH is the chosen resolution and LOW (360p15) always runs;
-// the renditions are in-between sizes encoded only while a viewer was
-// granted one. IDs are fixed per size so a ladder change keeps
-// each viewer on the size it had.
+// Layer IDs. HIGH is the chosen resolution and LOW (360p15 by default, or the
+// configured floor) runs when a smaller copy is enabled; the renditions are
+// in-between sizes encoded only while a viewer was granted one. IDs are fixed
+// per size so a ladder change keeps each viewer on the size it had.
 const (
 	High      = 0
 	Low       = 1
 	Rend1080  = 2
 	Rend720   = 3
-	NumLayers = 4
+	Rend540   = 4
+	NumLayers = 5
 )
 
-var lowLayer = Layer{Width: 640, Height: 360, FPS: 15, BitrateKbs: 500}
+var (
+	lowLayer = Layer{Width: 640, Height: 360, FPS: 15, BitrateKbs: 500}
+	rend540  = Layer{Width: 960, Height: 540, FPS: 30, BitrateKbs: 1200}
+)
+
+// LowLayerFor returns the floor LOW layer for minHeight (360, 540 or 720).
+func LowLayerFor(minHeight int) Layer {
+	switch {
+	case minHeight >= 720:
+		return Layer{Width: 1280, Height: 720, FPS: 15, BitrateKbs: 1800}
+	case minHeight >= 540:
+		return Layer{Width: 960, Height: 540, FPS: 15, BitrateKbs: 1000}
+	default:
+		return lowLayer
+	}
+}
 
 // rendLayers are the renditions by height, with their layer IDs.
 var rendLayers = map[int]struct {
@@ -105,6 +123,7 @@ var rendLayers = map[int]struct {
 }{
 	1080: {Rend1080, highLayers[Res1080]},
 	720:  {Rend720, highLayers[Res720]},
+	540:  {Rend540, rend540},
 }
 
 // LowerResolution is one size below r ("" below 720p).
@@ -139,10 +158,11 @@ func TopHeight(r Resolution) int {
 }
 
 // RenditionsBelow lists the rendition heights a top of height top can
-// offer, largest first: 4K has 1080p and 720p, 1080p has 720p.
+// offer, largest first: 4K has 1080p, 720p and 540p; 1080p has 720p and 540p;
+// 720p has 540p.
 func RenditionsBelow(top int) []int {
 	var out []int
-	for _, h := range []int{1080, 720} {
+	for _, h := range []int{1080, 720, 540} {
 		if h < top {
 			out = append(out, h)
 		}
@@ -174,24 +194,63 @@ func LayerHeight(id, top int) int {
 	return 0
 }
 
+// LayerOpts configures the layers a video source encodes.
+type LayerOpts struct {
+	Resolution  Resolution
+	FPS         int   // 10..60 (0 -> 30)
+	MinHeight   int   // floor height: 360 (default), 540 or 720
+	SmallerCopy *bool // encode LOW / renditions below HIGH (nil -> true)
+	Renditions  []int
+}
+
+// LayersForOpts returns the layers to encode for o, indexed by layer ID.
+// When SmallerCopy is false or MinHeight >= HIGH's height, only HIGH runs.
+func LayersForOpts(o LayerOpts) []Layer {
+	hi, ok := highLayers[o.Resolution]
+	if !ok {
+		hi = highLayers[Res720]
+	}
+	fps := o.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	fps = min(max(fps, 10), 60)
+	out := make([]Layer, NumLayers)
+	out[High] = atFPS(hi, fps)
+
+	smaller := o.SmallerCopy == nil || *o.SmallerCopy
+	minH := o.MinHeight
+	if minH <= 0 {
+		minH = 360
+	}
+	if !smaller || minH >= hi.Height {
+		return out
+	}
+
+	low := LowLayerFor(minH)
+	if fps < low.FPS {
+		low.FPS = fps
+	}
+	out[Low] = low
+	for _, h := range o.Renditions {
+		if rl, ok := rendLayers[h]; ok && minH < h && h < hi.Height {
+			out[rl.id] = atFPS(rl.l, fps)
+		}
+	}
+	return out
+}
+
 // LayersFor is what we encode, indexed by layer ID: HIGH at the chosen
 // resolution, LOW, and the renditions in rends (heights below the top; others
 // are ignored). Absent IDs are zero Layers. Keyframes every 2 s, plus on
 // demand (ForceKeyframe) when a peer switches layer or reports loss.
 func LayersFor(r Resolution, m ContentMode, rends []int) []Layer {
-	hi, ok := highLayers[r]
-	if !ok {
-		hi = highLayers[Res720]
-	}
-	fps := HighFPS(m)
-	out := make([]Layer, NumLayers)
-	out[High], out[Low] = atFPS(hi, fps), lowLayer
-	for _, h := range rends {
-		if rl, ok := rendLayers[h]; ok && h < hi.Height {
-			out[rl.id] = atFPS(rl.l, fps)
-		}
-	}
-	return out
+	return LayersForOpts(LayerOpts{
+		Resolution: r,
+		FPS:        HighFPS(m),
+		MinHeight:  360,
+		Renditions: rends,
+	})
 }
 
 // SourceKind selects what to capture.
@@ -453,6 +512,11 @@ func (p *Pipeline) Stop() {
 	})
 }
 
+// Done returns a channel closed when Stop runs.
+func (p *Pipeline) Done() <-chan struct{} {
+	return p.done
+}
+
 func (p *Pipeline) stopped() bool {
 	select {
 	case <-p.done:
@@ -488,18 +552,30 @@ func LiveVideoSources() int { return int(liveSources.Load()) }
 // A non-empty preview is the intervideo channel SetPreview feeds with our
 // picture (PreviewW x PreviewH at PreviewFPS) for a self-preview.
 func StartVideoSource(kind SourceKind, res Resolution, mode ContentMode, rends []int, encoderForce, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
+	return StartVideoSourceOpts(kind, LayerOpts{
+		Resolution: res,
+		FPS:        HighFPS(mode),
+		MinHeight:  360,
+		Renditions: rends,
+	}, encoderForce, preview, onAU)
+}
+
+// StartVideoSourceOpts captures from kind once and encodes every active layer
+// of LayersForOpts(opts).
+func StartVideoSourceOpts(kind SourceKind, opts LayerOpts, encoderForce, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
 	encs := availableEncoders(encoderForce)
 	if len(encs) == 0 {
 		return nil, "", errors.New("no H.264 encoder available (install gstreamer1.0-plugins-ugly for x264enc)")
 	}
+	layers := LayersForOpts(opts)
 	var lastErr error
 	for _, enc := range encs {
-		vs, err := startVideoSource(kind, LayersFor(res, mode, rends), enc, preview, onAU)
+		vs, err := startVideoSource(kind, layers, enc, preview, onAU)
 		if err == nil {
 			liveSources.Add(1)
 			return vs, enc.factory, nil
 		}
-		Log.Warn("encoder failed, trying the next", "encoder", enc.factory, "res", res, "err", err)
+		Log.Warn("encoder failed, trying the next", "encoder", enc.factory, "res", opts.Resolution, "err", err)
 		lastErr = fmt.Errorf("%s: %w", enc.factory, err)
 	}
 	return nil, "", lastErr
@@ -530,9 +606,10 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 	if preview != "" {
 		// The valve drops everything until SetPreview opens it, so a
 		// preview nobody looks at costs nothing.
+		pfps := min(PreviewFPS, hi.FPS)
 		branches = append(branches, fmt.Sprintf("t. ! queue max-size-buffers=1 leaky=downstream ! valve name=preview drop=true ! "+
 			"videoscale ! videorate drop-only=true ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=previewed ! intervideosink channel=%s sync=false async=false",
-			PreviewW, PreviewH, PreviewFPS, preview))
+			PreviewW, PreviewH, pfps, preview))
 	}
 	p, err := launch(strings.Join(branches, "  "))
 	if err != nil {

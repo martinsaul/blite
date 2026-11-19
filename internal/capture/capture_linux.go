@@ -2,9 +2,12 @@ package capture
 
 import (
 	"fmt"
+	"image"
 	"io"
 	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/randr"
@@ -48,7 +51,7 @@ func List() ([]Target, error) {
 		if title == "" {
 			continue
 		}
-		out = append(out, Target{Kind: "window", Name: title, Source: fmt.Sprintf("window:%#x", uint32(w))})
+		out = append(out, Target{Kind: "window", Name: title, Source: fmt.Sprintf("window:%#x", uint32(w)), App: windowClass(c, w)})
 	}
 	return out, nil
 }
@@ -130,6 +133,138 @@ func windowTitle(c *xgb.Conn, w xproto.Window) string {
 		return strings.TrimSpace(string(r.Value))
 	}
 	return ""
+}
+
+// windowClass is the class half of WM_CLASS ("Firefox"), else its instance.
+func windowClass(c *xgb.Conn, w xproto.Window) string {
+	r := prop(c, w, "WM_CLASS", xproto.AtomString)
+	if r == nil {
+		return ""
+	}
+	parts := strings.Split(strings.TrimRight(string(r.Value), "\x00"), "\x00")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if p := strings.TrimSpace(parts[i]); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func windowApp(id uint64) string {
+	c, err := xgb.NewConn()
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	return windowClass(c, xproto.Window(id))
+}
+
+type cachedIcon struct {
+	img image.Image // nil: none (yet; apps often set it after mapping)
+	at  time.Time
+}
+
+// noIconRetry is how long "no icon" is believed.
+const noIconRetry = 10 * time.Second
+
+var (
+	iconMu    sync.Mutex
+	iconCache = map[uint64]cachedIcon{} // by window id
+)
+
+func icons(ts []Target) map[string]image.Image {
+	out := map[string]image.Image{}
+	keep := map[uint64]bool{}
+	defer func() { // forget windows that closed (ids get reused)
+		iconMu.Lock()
+		for id := range iconCache {
+			if !keep[id] {
+				delete(iconCache, id)
+			}
+		}
+		iconMu.Unlock()
+	}()
+	var c *xgb.Conn
+	for _, t := range ts {
+		id, err := ParseWindow(strings.TrimPrefix(t.Source, "window:"))
+		if err != nil {
+			continue
+		}
+		keep[id] = true
+		iconMu.Lock()
+		ci, ok := iconCache[id]
+		iconMu.Unlock()
+		img := ci.img
+		if !ok || img == nil && time.Since(ci.at) > noIconRetry {
+			if c == nil {
+				if c, err = xgb.NewConn(); err != nil {
+					return out
+				}
+				defer c.Close()
+			}
+			img = netWMIcon(c, xproto.Window(id))
+			iconMu.Lock()
+			iconCache[id] = cachedIcon{img, time.Now()}
+			iconMu.Unlock()
+		}
+		if img != nil {
+			out[t.Source] = img
+		}
+	}
+	return out
+}
+
+// netWMIcon decodes _NET_WM_ICON (width, height, then ARGB pixels, for each
+// size), picking the smallest size of at least 32 pixels, else the largest.
+func netWMIcon(c *xgb.Conn, w xproto.Window) image.Image {
+	a := atom(c, "_NET_WM_ICON")
+	if a == xproto.AtomNone {
+		return nil
+	}
+	// Ask for its size first: some apps set several big icons (megabytes).
+	r, err := xproto.GetProperty(c, false, w, a, xproto.AtomCardinal, 0, 0).Reply()
+	if err != nil || r.Format != 32 || r.BytesAfter == 0 {
+		return nil
+	}
+	n := min((r.BytesAfter+3)/4, maxNetWMIcon)
+	if r, err = xproto.GetProperty(c, false, w, a, xproto.AtomCardinal, 0, n).Reply(); err != nil || r.Format != 32 {
+		return nil
+	}
+	return decodeNetWMIcon(r.Value)
+}
+
+// maxNetWMIcon bounds what we read of _NET_WM_ICON, in 32-bit values (16 MB);
+// icons cut off past it are skipped.
+const maxNetWMIcon = 1 << 22
+
+func decodeNetWMIcon(v []byte) image.Image {
+	n := len(v) / 4
+	best, bestW, bestH := -1, 0, 0
+	for i := 0; i+2 <= n; {
+		w, h := int(xgb.Get32(v[4*i:])), int(xgb.Get32(v[4*i+4:]))
+		if w <= 0 || h <= 0 || w > 1024 || h > 1024 || i+2+w*h > n {
+			break // bad, or cut off: pick from the ones before
+		}
+		better := best < 0 ||
+			(bestW < 32 && w > bestW) || // too small so far: anything bigger
+			(w >= 32 && w < bestW) // big enough: the smaller the better
+		if better {
+			best, bestW, bestH = i+2, w, h
+		}
+		i += 2 + w*h
+	}
+	if best < 0 {
+		return nil
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, bestW, bestH))
+	for p := 0; p < bestW*bestH; p++ {
+		argb := xgb.Get32(v[4*(best+p):])
+		img.Pix[4*p] = byte(argb >> 16)
+		img.Pix[4*p+1] = byte(argb >> 8)
+		img.Pix[4*p+2] = byte(argb)
+		img.Pix[4*p+3] = byte(argb >> 24)
+	}
+	return img
 }
 
 func windowGone(id uint64) bool {

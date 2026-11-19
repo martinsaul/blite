@@ -13,8 +13,9 @@ import (
 )
 
 // handleChannel tells people in a Discord voice channel which room is tied
-// to it: 404 when none. Anyone can ask: being in the channel is enough,
-// the server doesn't check it.
+// to it, who is in it, and who is sharing (proto.ChannelRoom): 404 when
+// none. Anyone can ask: being in the channel is enough, the server doesn't
+// check it.
 func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	if s.lookIP.Blocked(ip) {

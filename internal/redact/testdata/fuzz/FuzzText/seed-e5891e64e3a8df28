@@ -1,0 +1,2 @@
+go test fuzz v1
+string("detail=\"a\\nK7PQ-2M4X#pwNL3\"")

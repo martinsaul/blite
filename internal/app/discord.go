@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"blite/internal/discord"
+	"blite/internal/proto"
 )
 
 // Discord is the voice channel the user is in on Discord and the session
@@ -28,9 +29,11 @@ type Discord struct {
 	Channel   string `json:"channel,omitempty"`
 	Guild     string `json:"guild,omitempty"`
 	// The session tied to the channel, if any.
-	Room   string `json:"room,omitempty"`
-	Open   bool   `json:"open,omitempty"`
-	People int    `json:"people,omitempty"`
+	Room    string   `json:"room,omitempty"`
+	Open    bool     `json:"open,omitempty"`
+	People  int      `json:"people,omitempty"`
+	Sharers []string `json:"sharers,omitempty"`
+	Members []string `json:"members,omitempty"`
 }
 
 type discordToken struct {
@@ -125,22 +128,18 @@ func (a *App) exchange(ctx context.Context, code, refresh string) (*discordToken
 }
 
 // lookupChannel asks the server which session is tied to a voice channel.
-func (a *App) lookupChannel(ctx context.Context, id string) (room string, open bool, people int) {
+func (a *App) lookupChannel(ctx context.Context, id string) proto.ChannelRoom {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpBase(a.discordServer())+"/v1/channel/"+url.PathEscape(id), nil)
 	res, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return "", false, 0
+		return proto.ChannelRoom{}
 	}
 	defer res.Body.Close()
-	var r struct {
-		Room   string `json:"room"`
-		Open   bool   `json:"open"`
-		People int    `json:"people"`
-	}
+	var r proto.ChannelRoom
 	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&r) != nil {
-		return "", false, 0
+		return proto.ChannelRoom{}
 	}
-	return r.Room, r.Open, r.People
+	return r
 }
 
 func (a *App) setDiscord(f func(d *Discord)) {
@@ -254,7 +253,8 @@ func (a *App) followDiscord(ctx context.Context, c *discord.Conn) error {
 				guilds[ch.GuildID] = c.GuildName(ch.GuildID)
 			}
 			nd.Guild = guilds[ch.GuildID]
-			nd.Room, nd.Open, nd.People = a.lookupChannel(ctx, ch.ID)
+			cr := a.lookupChannel(ctx, ch.ID)
+			nd.Room, nd.Open, nd.People, nd.Sharers, nd.Members = cr.Room, cr.Open, cr.People, cr.Sharers, cr.Members
 		}
 		a.setDiscord(func(d *Discord) { *d = nd })
 	}
@@ -275,10 +275,11 @@ func (a *App) followDiscord(ctx context.Context, c *discord.Conn) error {
 	}
 }
 
-// GoLiveInChannel starts a session tied to the user's Discord voice channel.
+// GoLiveInChannel starts or joins the session tied to the user's Discord voice
+// channel.
 func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) error {
 	a.mu.Lock()
-	id, ok := a.discord.ChannelID, a.discordReadyLocked()
+	id, code, ok := a.discord.ChannelID, a.discord.Room, a.discordReadyLocked()
 	a.mu.Unlock()
 	if id == "" {
 		return errors.New("you're not in a Discord voice channel")
@@ -286,7 +287,52 @@ func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) e
 	if !ok {
 		return ErrDiscordServer
 	}
-	return a.create(ctx, password, e2ee, id)
+	if code != "" {
+		err := a.joinRaw(ctx, a.discordServer(), code, password, a.DefaultSource)
+		if err == nil {
+			return nil
+		}
+		if !isProtoErr(err, proto.ErrNoRoom) {
+			return friendly(err)
+		}
+	}
+	err := a.createRaw(ctx, password, e2ee, id, a.DefaultSource)
+	if isProtoErr(err, proto.ErrChannelBusy) {
+		if cr := a.lookupChannel(ctx, id); cr.Room != "" {
+			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, a.DefaultSource))
+		}
+	}
+	return friendly(err)
+}
+
+// EnterChannel creates or joins the session tied to the user's Discord voice
+// channel without sharing ("none").
+func (a *App) EnterChannel(ctx context.Context, password string, e2ee bool) error {
+	a.mu.Lock()
+	id, code, ok := a.discord.ChannelID, a.discord.Room, a.discordReadyLocked()
+	a.mu.Unlock()
+	if id == "" {
+		return errors.New("you're not in a Discord voice channel")
+	}
+	if !ok {
+		return ErrDiscordServer
+	}
+	if code != "" {
+		err := a.joinRaw(ctx, a.discordServer(), code, password, "none")
+		if err == nil {
+			return nil
+		}
+		if !isProtoErr(err, proto.ErrNoRoom) {
+			return friendly(err)
+		}
+	}
+	err := a.createRaw(ctx, password, e2ee, id, "none")
+	if isProtoErr(err, proto.ErrChannelBusy) {
+		if cr := a.lookupChannel(ctx, id); cr.Room != "" {
+			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, "none"))
+		}
+	}
+	return friendly(err)
 }
 
 // JoinChannel joins the session tied to the user's Discord voice channel.

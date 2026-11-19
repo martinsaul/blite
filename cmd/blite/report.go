@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"blite/internal/proto"
+	"blite/internal/redact"
 )
 
 // logInfo is what the UI shows about our logs, so a user can tell where they
@@ -241,7 +242,7 @@ func buildZip(dir string, names []string, system string) ([]byte, []string, erro
 		zw := zip.NewWriter(&buf)
 		if system != "" {
 			w, _ := zw.Create("system.txt")
-			io.WriteString(w, system)
+			io.WriteString(w, redact.Text(system))
 		}
 		for _, n := range names {
 			t, err := tail(filepath.Join(dir, n), zipFileMax)
@@ -252,7 +253,7 @@ func buildZip(dir string, names []string, system string) ([]byte, []string, erro
 			if err != nil {
 				return nil, nil, err
 			}
-			io.WriteString(w, t)
+			io.WriteString(w, redact.Text(t))
 		}
 		if err := zw.Close(); err != nil {
 			return nil, nil, err
@@ -272,12 +273,13 @@ func (r *reporter) previous() {
 		return
 	}
 	for _, name := range crashedLogs(l.Dir, l.File, time.Now()) {
-		t, err := tail(filepath.Join(l.Dir, name), reportTail)
+		t, err := tail(filepath.Join(l.Dir, name), crashRead)
 		if err != nil {
 			continue
 		}
 		rep := r.base
-		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "crash", name, t, l.Guard
+		// crashLog redacts what it takes from t.
+		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "crash", name, crashLog(t, reportTail), redact.Text(l.Guard)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		err = sendReport(ctx, r.server, rep)
 		cancel()
@@ -342,10 +344,10 @@ func (r *reporter) send(ctx context.Context) error {
 	var b strings.Builder
 	for _, n := range names {
 		t, _ := tail(filepath.Join(l.Dir, n), reportTail)
-		fmt.Fprintf(&b, "===== %s\n%s\n", n, t)
+		fmt.Fprintf(&b, "===== %s\n%s\n", n, redact.Text(t))
 	}
 	rep := r.base
-	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "user", strings.Join(names, ", "), b.String(), l.Guard
+	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "user", strings.Join(names, ", "), b.String(), redact.Text(l.Guard)
 	var all []string
 	for _, e := range es {
 		if n := e.Name(); strings.HasSuffix(n, ".log") {
@@ -386,9 +388,9 @@ func (r *reporter) send(ctx context.Context) error {
 func (r *reporter) feedback(ctx context.Context, kind, text, diag string) error {
 	rep := r.base
 	rep.Name, rep.Kind, rep.Note = r.name(), "feedback", kind
-	rep.Log = "feedback (" + kind + "):\n" + text + "\n"
+	rep.Log = "feedback (" + kind + "):\n" + redact.Text(text) + "\n"
 	if diag != "" {
-		rep.Log += "\n===== diagnostics\n" + diag
+		rep.Log += "\n===== diagnostics\n" + redact.Text(diag)
 	}
 	err := sendReport(ctx, r.server, rep)
 	r.log.Info("feedback sent", "kind", kind, "chars", len(text), "err", err)

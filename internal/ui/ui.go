@@ -43,6 +43,12 @@ type Backend interface {
 	SetAutostart(on bool) error
 	Create(ctx context.Context, password string, e2ee bool) error
 	JoinLink(ctx context.Context, link string) error
+	// ProbeRecentRooms checks each recent room in the background.
+	ProbeRecentRooms()
+	// JoinRecentRoom joins a recent room with its stored server and password.
+	JoinRecentRoom(ctx context.Context, server, code string) error
+	// RemoveRecentRoom removes an entry from recent rooms.
+	RemoveRecentRoom(server, code string) error
 	Leave()
 	SetSource(kind string) error
 	// Sources lists monitors and windows that can be shared.
@@ -57,10 +63,29 @@ type Backend interface {
 	SetResolution(res string) error
 	// SetMode tunes the share for desktop (sharp text) or game (60 fps).
 	SetMode(mode string) error
-	// SetLayout shows received streams in separate windows ("windows") or
-	// in one window as a grid ("grid", rows x cols, 0 = auto), and our own
-	// stream in a preview: "" (none), "window" or "grid".
-	SetLayout(mode string, rows, cols int, preview string) error
+	// SetShareOptions sets outgoing FPS, slow-viewer policy, lowest resolution
+	// floor, smaller-copy toggle, and upload limit (kbit/s, 0 = Automatic).
+	SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy bool, uploadKbps int) error
+	// SetRoomSecurity sets pre-call password and E2EE toggles for new rooms.
+	SetRoomSecurity(requirePw bool, password string, e2ee bool) error
+	// AddQualityPreset keeps a resolution and frame rate to pick on Home;
+	// RemoveQualityPreset forgets one.
+	AddQualityPreset(res string, fps int) error
+	RemoveQualityPreset(res string, fps int) error
+	// ToggleWatch toggles the eye on "self" or a peer ID.
+	ToggleWatch(id string) error
+	// PopOut pops "self" or a peer stream out into its own window, or back in.
+	PopOut(id string) error
+	// Pin pins or unpins "self" or a peer stream in the main window.
+	Pin(id string) error
+	// SetAutoWatch sets "Start watching new streams automatically" (kept on disk).
+	SetAutoWatch(on bool) error
+	// SetPlaySounds sets "Play sounds" (kept on disk).
+	SetPlaySounds(on bool) error
+	// SetPortMap sets "Open a port on my router automatically" (kept on disk).
+	SetPortMap(on bool) error
+	// DismissLeavePrompt cancels the "Leave the session?" prompt.
+	DismissLeavePrompt()
 	// SendLogsNow uploads our recent logs for the developers.
 	SendLogsNow(ctx context.Context) error
 	// OpenLogFolder shows the log folder in the file manager.
@@ -69,9 +94,6 @@ type Backend interface {
 	Diagnostics() string
 	// Feedback sends an idea or a problem the user wrote.
 	Feedback(ctx context.Context, kind, text string, withDiag bool) error
-	// ShowWindow reopens a video window the user closed: a peer's, "" the
-	// grid window, "self" our preview, or "*" all of them.
-	ShowWindow(id string) error
 	// Volunteer joins (on) or leaves the relay queue.
 	Volunteer(on bool) error
 	// SetName sets our display name (kept; shown as name#tag).
@@ -161,14 +183,63 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.Feedback(r.Context(), b.Kind, b.Text, b.Diagnostics)
 	})))
-	mux.Handle("POST /api/window", s.authed(s.post(func(r *http.Request) error {
+	mux.Handle("POST /api/watch", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
 			ID string `json:"id"`
 		}
 		if err := decode(r, &b); err != nil {
 			return err
 		}
-		return s.be.ShowWindow(b.ID)
+		return s.be.ToggleWatch(b.ID)
+	})))
+	mux.Handle("POST /api/popout", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			ID string `json:"id"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.PopOut(b.ID)
+	})))
+	mux.Handle("POST /api/pin", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			ID string `json:"id"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.Pin(b.ID)
+	})))
+	mux.Handle("POST /api/autowatch", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			On bool `json:"on"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetAutoWatch(b.On)
+	})))
+	mux.Handle("POST /api/sounds", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			On bool `json:"on"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetPlaySounds(b.On)
+	})))
+	mux.Handle("POST /api/portmap", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			On bool `json:"on"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetPortMap(b.On)
+	})))
+	mux.Handle("POST /api/leave/dismiss", s.authed(s.post(func(*http.Request) error {
+		s.be.DismissLeavePrompt()
+		return nil
 	})))
 	mux.Handle("POST /api/mode", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
@@ -179,20 +250,33 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.SetMode(b.Mode)
 	})))
-	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error { return s.be.SendLogsNow(r.Context()) })))
-	mux.Handle("POST /api/logs/open", s.authed(s.post(func(*http.Request) error { return s.be.OpenLogFolder() })))
-	mux.Handle("POST /api/layout", s.authed(s.post(func(r *http.Request) error {
+	mux.Handle("POST /api/share-options", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
-			Mode    string `json:"mode"`
-			Rows    int    `json:"rows"`
-			Cols    int    `json:"cols"`
-			Preview string `json:"preview"`
+			FPS         int    `json:"fps"`
+			SlowViewer  string `json:"slowViewer"`
+			MinHeight   int    `json:"minHeight"`
+			SmallerCopy *bool  `json:"smallerCopy"`
+			UploadKbps  int    `json:"uploadKbps"`
 		}
 		if err := decode(r, &b); err != nil {
 			return err
 		}
-		return s.be.SetLayout(b.Mode, b.Rows, b.Cols, b.Preview)
+		sc := b.SmallerCopy == nil || *b.SmallerCopy
+		return s.be.SetShareOptions(b.FPS, b.SlowViewer, b.MinHeight, sc, b.UploadKbps)
 	})))
+	mux.Handle("POST /api/room-security", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			RequirePassword bool   `json:"requirePassword"`
+			Password        string `json:"password"`
+			E2EE            *bool  `json:"e2ee"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetRoomSecurity(b.RequirePassword, b.Password, b.E2EE == nil || *b.E2EE)
+	})))
+	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error { return s.be.SendLogsNow(r.Context()) })))
+	mux.Handle("POST /api/logs/open", s.authed(s.post(func(*http.Request) error { return s.be.OpenLogFolder() })))
 	mux.Handle("POST /api/relay", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
 			On bool `json:"on"`
@@ -232,8 +316,33 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 	})))
 	mux.Handle("POST /api/show", s.authed(s.post(func(*http.Request) error { s.be.ShowUI(); return nil })))
 	mux.Handle("POST /api/update/dismiss", s.authed(s.post(func(*http.Request) error { s.be.DismissUpdateResult(); return nil })))
+	mux.Handle("POST /api/recent/probe", s.authed(s.post(func(*http.Request) error { s.be.ProbeRecentRooms(); return nil })))
+	mux.Handle("POST /api/recent/join", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			Server string `json:"server"`
+			Code   string `json:"code"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.JoinRecentRoom(r.Context(), b.Server, b.Code)
+	})))
+	mux.Handle("POST /api/recent/remove", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			Server string `json:"server"`
+			Code   string `json:"code"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.RemoveRecentRoom(b.Server, b.Code)
+	})))
 
-	s.srv = &http.Server{Handler: s.guard(mux), ReadHeaderTimeout: 5 * time.Second}
+	s.srv = &http.Server{Handler: s.guard(mux), ReadHeaderTimeout: 5 * time.Second,
+		// A handler panic is logged as one record (its stack quoted in it),
+		// not as raw lines on stderr, which is our log file: a raw
+		// "goroutine N [running]:" there looked like a crash.
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn)}
 	go s.srv.Serve(ln)
 	return s, nil
 }

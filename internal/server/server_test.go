@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 
 	"blite/internal/proto"
+	"blite/internal/sigclient"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -133,6 +135,174 @@ func TestJoinRateLimit(t *testing.T) {
 		t.Fatalf("6th attempt, even with the right password: %v", e)
 	}
 	_ = s
+}
+
+func TestProbe(t *testing.T) {
+	s, url := newTestServer(t)
+	a := dial(t, url)
+	a.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
+	code := a.expect(proto.TWelcome)["room"].(string)
+
+	openCreator := dial(t, url)
+	openCreator.send(proto.Create{T: proto.TCreate, Password: "", Name: "bob"})
+	openCode := openCreator.expect(proto.TWelcome)["room"].(string)
+
+	// Correct password (and display formatting) answers exists: true without
+	// creating rooms or seating a peer.
+	p := dial(t, url)
+	p.send(proto.Probe{T: proto.TProbe, Room: strings.ToLower(code[:4] + "-" + code[4:]), Password: pw})
+	if r := p.expect(proto.TProbeResult); r["exists"] != true {
+		t.Fatalf("right password: %v", r)
+	}
+	p.send(proto.Probe{T: proto.TProbe, Room: openCode, Password: ""})
+	if r := p.expect(proto.TProbeResult); r["exists"] != true {
+		t.Fatalf("open room: %v", r)
+	}
+
+	// Wrong password and missing room both answer exists: false (no oracle).
+	p.send(proto.Probe{T: proto.TProbe, Room: code, Password: "wrong password"})
+	rWrong := p.expect(proto.TProbeResult)
+	p.send(proto.Probe{T: proto.TProbe, Room: "ZZZZZZZZ", Password: pw})
+	rMissing := p.expect(proto.TProbeResult)
+	p.send(proto.Probe{T: proto.TProbe, Room: "not a code!", Password: pw})
+	rBadCode := p.expect(proto.TProbeResult)
+	if rWrong["exists"] != false || rMissing["exists"] != false || rBadCode["exists"] != false {
+		t.Fatalf("wrong=%v missing=%v badCode=%v", rWrong, rMissing, rBadCode)
+	}
+	if s.Rooms().Count() != 2 {
+		t.Fatalf("rooms count = %d, want 2", s.Rooms().Count())
+	}
+
+	// Alice did not receive peer-joined from probes: a real join is the first message she sees.
+	j := dial(t, url)
+	j.send(proto.Join{T: proto.TJoin, Room: code, Password: pw, Name: "carol"})
+	j.expect(proto.TWelcome)
+	if pj := a.expect(proto.TPeerJoined); pj["name"] != "carol" {
+		t.Fatalf("alice got %v before carol", pj)
+	}
+}
+
+func TestProbeRateLimit(t *testing.T) {
+	// Per-IP: 5 failed probes (wrong password + missing room) block the 6th
+	// probe and a join from the same IP, even with the right password.
+	_, url := newTestServer(t)
+	a := dial(t, url)
+	a.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
+	code := a.expect(proto.TWelcome)["room"].(string)
+
+	for i := 0; i < 3; i++ {
+		c := dial(t, url)
+		c.send(proto.Probe{T: proto.TProbe, Room: code, Password: "nope nope"})
+		if r := c.expect(proto.TProbeResult); r["exists"] != false {
+			t.Fatalf("wrong pw probe %d: %v", i, r)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		c := dial(t, url)
+		c.send(proto.Probe{T: proto.TProbe, Room: "ZZZZZZZZ", Password: pw})
+		if r := c.expect(proto.TProbeResult); r["exists"] != false {
+			t.Fatalf("missing room probe %d: %v", i, r)
+		}
+	}
+	c := dial(t, url)
+	c.send(proto.Probe{T: proto.TProbe, Room: code, Password: pw})
+	if e := c.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("6th probe from blocked IP: %v", e)
+	}
+	j := dial(t, url)
+	j.send(proto.Join{T: proto.TJoin, Room: code, Password: pw, Name: "bob"})
+	if e := j.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("join from blocked IP: %v", e)
+	}
+
+	// Per-room: 20 failed probes from distinct IPs block the 21st probe and
+	// join on that room, while another room remains reachable.
+	s2 := New(Config{TrustProxy: true, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ts2 := httptest.NewServer(s2)
+	t.Cleanup(ts2.Close)
+	url2 := "ws" + strings.TrimPrefix(ts2.URL, "http")
+	dialIP := func(ip string) *client {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h := http.Header{"X-Forwarded-For": {ip}}
+		ws, _, err := websocket.Dial(ctx, url2+"/ws", &websocket.DialOptions{HTTPHeader: h})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ws.CloseNow() })
+		return &client{t: t, ws: ws}
+	}
+
+	ca := dialIP("10.0.0.1")
+	ca.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
+	roomA := ca.expect(proto.TWelcome)["room"].(string)
+	cb := dialIP("10.0.0.2")
+	cb.send(proto.Create{T: proto.TCreate, Password: pw, Name: "bob"})
+	roomB := cb.expect(proto.TWelcome)["room"].(string)
+
+	for i := 1; i <= 20; i++ {
+		p := dialIP(fmt.Sprintf("198.51.100.%d", i))
+		p.send(proto.Probe{T: proto.TProbe, Room: roomA, Password: "wrong password"})
+		if r := p.expect(proto.TProbeResult); r["exists"] != false {
+			t.Fatalf("room probe %d: %v", i, r)
+		}
+	}
+	p21 := dialIP("198.51.100.21")
+	p21.send(proto.Probe{T: proto.TProbe, Room: roomA, Password: pw})
+	if e := p21.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("21st probe on roomA: %v", e)
+	}
+	j22 := dialIP("198.51.100.22")
+	j22.send(proto.Join{T: proto.TJoin, Room: roomA, Password: pw, Name: "carol"})
+	if e := j22.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("join on blocked roomA: %v", e)
+	}
+	pOther := dialIP("198.51.100.22")
+	pOther.send(proto.Probe{T: proto.TProbe, Room: roomB, Password: pw})
+	if r := pOther.expect(proto.TProbeResult); r["exists"] != true {
+		t.Fatalf("probe on unblocked roomB: %v", r)
+	}
+}
+
+func TestSigclientProbe(t *testing.T) {
+	_, url := newTestServer(t)
+	wsURL := url + "/ws"
+	ctx := context.Background()
+
+	a, err := sigclient.Create(ctx, wsURL, proto.Create{Password: pw, Name: "alice"}, sigclient.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Leave()
+
+	if st, err := sigclient.Probe(ctx, wsURL, a.Welcome.Room, pw, sigclient.Options{}); err != nil || st != sigclient.ProbeExists {
+		t.Fatalf("right password: %v %v", st, err)
+	}
+	if st, err := sigclient.Probe(ctx, wsURL, a.Welcome.Room, "wrong", sigclient.Options{}); err != nil || st != sigclient.ProbeGone {
+		t.Fatalf("wrong password: %v %v", st, err)
+	}
+	if st, err := sigclient.Probe(ctx, wsURL, "ZZZZZZZZ", pw, sigclient.Options{}); err != nil || st != sigclient.ProbeGone {
+		t.Fatalf("missing room: %v %v", st, err)
+	}
+
+	// Older servers reply bad_request to unknown first messages.
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		if _, _, err := ws.Read(r.Context()); err != nil {
+			return
+		}
+		b, _ := json.Marshal(proto.Error{T: proto.TError, Code: proto.ErrBadRequest})
+		ws.Write(r.Context(), websocket.MessageText, b)
+	}))
+	defer legacy.Close()
+	legacyWS := "ws" + strings.TrimPrefix(legacy.URL, "http")
+	if st, err := sigclient.Probe(ctx, legacyWS, a.Welcome.Room, pw, sigclient.Options{}); err != nil || st != sigclient.ProbeUnsupported {
+		t.Fatalf("legacy server: %v %v", st, err)
+	}
 }
 
 func TestDisconnectResume(t *testing.T) {

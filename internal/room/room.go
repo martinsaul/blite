@@ -52,12 +52,13 @@ type replaceable interface {
 
 // Peer is one member's slot in a room.
 type Peer struct {
-	ID    string
-	Name  string
-	IDKey string
-	Ver   string // client build label
-	Build int    // client build number (0 = unknown)
-	caps  proto.Caps
+	ID      string
+	Name    string
+	IDKey   string
+	Ver     string // client build label
+	Build   int    // client build number (0 = unknown)
+	caps    proto.Caps
+	sharing bool
 
 	resume tokenHash // of the resume token; the token itself is only sent
 	out    Outbox    // nil while disconnected
@@ -380,6 +381,31 @@ func (m *Manager) Join(code, password, name, idKey, ver string, build int, out O
 	return seat, nil
 }
 
+// Probe reports whether room code exists and password opens it, without
+// creating a room or changing its state. Hashing runs outside the lock.
+func (m *Manager) Probe(code, password string) bool {
+	if len(password) > MaxPasswordLen {
+		return false
+	}
+	m.mu.Lock()
+	r := m.rooms[code]
+	if r == nil {
+		m.mu.Unlock()
+		return false
+	}
+	pw := r.pw
+	m.mu.Unlock()
+
+	if !pw.verify(password) {
+		return false
+	}
+
+	m.mu.Lock()
+	ok := m.rooms[code] == r
+	m.mu.Unlock()
+	return ok
+}
+
 func (m *Manager) seatLocked(r *Room, name, idKey, ver string, build int, out Outbox) Seat {
 	token := randToken(24)
 	p := &Peer{ID: randToken(9), Name: name, IDKey: idKey, Ver: ver, Build: build, resume: hashToken(token), out: out}
@@ -553,6 +579,18 @@ func (m *Manager) Rename(code, peerID, name string) error {
 	return nil
 }
 
+// SetSharing records whether peerID is sharing video right now.
+func (m *Manager) SetSharing(code, peerID string, on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.rooms[code]
+	if r == nil || r.peers[peerID] == nil {
+		return ErrNoRoom
+	}
+	r.peers[peerID].sharing = on
+	return nil
+}
+
 // Transfer makes `to` the owner, if `by` may moderate and `to` is online.
 func (m *Manager) Transfer(code, by, to string) error {
 	m.mu.Lock()
@@ -708,11 +746,7 @@ func (m *Manager) TieChannel(code, id string) error {
 }
 
 // ChannelRoom is what GET /v1/channel/{id} tells people in that channel.
-type ChannelRoom struct {
-	Room   string `json:"room"`
-	Open   bool   `json:"open"` // no password needed
-	People int    `json:"people"`
-}
+type ChannelRoom = proto.ChannelRoom
 
 // Channel returns the room tied to Discord channel id, if it has people.
 func (m *Manager) Channel(id string) (ChannelRoom, bool) {
@@ -723,5 +757,21 @@ func (m *Manager) Channel(id string) (ChannelRoom, bool) {
 	if r == nil || len(r.peers) == 0 {
 		return ChannelRoom{}, false
 	}
-	return ChannelRoom{Room: code, Open: r.pw.key == nil, People: len(r.peers)}, true
+	cr := ChannelRoom{
+		Room:    code,
+		Open:    r.pw.key == nil,
+		People:  len(r.peers),
+		Members: make([]string, 0, len(r.order)),
+	}
+	for _, pid := range r.order {
+		p := r.peers[pid]
+		if p == nil {
+			continue
+		}
+		cr.Members = append(cr.Members, p.Name)
+		if p.sharing {
+			cr.Sharers = append(cr.Sharers, p.Name)
+		}
+	}
+	return cr, true
 }

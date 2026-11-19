@@ -1,0 +1,2 @@
+go test fuzz v1
+string("pass=482913 pass=\"1234\" key=0xDEADBEEF key=Inf key=NaN key=1_000")

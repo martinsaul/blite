@@ -1,0 +1,2 @@
+go test fuzz v1
+string("https://share.bellion.io/j/ABCD#pw'22'")

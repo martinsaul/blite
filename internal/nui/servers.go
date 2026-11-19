@@ -172,11 +172,11 @@ func (u *UI) serversDialog() {
 // run by Bellion Share, and waits for the answer (App.ConfirmServer).
 func ConfirmServer(host string) bool {
 	u := get()
-	if u == nil {
+	if u == nil || u.closed.Load() {
 		return false
 	}
 	ch := make(chan bool, 1)
-	fyne.Do(func() {
+	u.later(func() {
 		u.Show()
 		d := dialog.NewCustomConfirm(i18n.L("Join a session on {{.Host}}?", i18n.D{"Host": host}), i18n.L("Join"), i18n.L("Cancel"),
 			label(i18n.L("This server isn't run by Bellion Share.")), func(ok bool) { ch <- ok }, u.win)

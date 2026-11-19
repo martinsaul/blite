@@ -1,0 +1,2 @@
+go test fuzz v1
+string("x#1 pw=1 ?token=a& https://share.bellion.io/j/K7PQ2M4X#pw1 ")

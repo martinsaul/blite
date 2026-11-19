@@ -85,18 +85,32 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 		return true, ErrInSession
 	}
 	a.log.Info("rejoining the call after an update", "source", r.Source, "audio", r.Audio.Mode)
-	if r.Resolution != "" || r.Mode != "" {
+	if r.Resolution != "" || r.Mode != "" || r.ShareOptions != nil || r.Output != "" {
 		a.mu.Lock()
 		if r.Resolution != "" {
 			a.res = r.Resolution
 		}
-		if r.Mode != "" {
+		if r.ShareOptions != nil {
+			a.shareOpts = session.NormalizeShareOptions(*r.ShareOptions)
+			a.mode = modeFromShareOptions(a.shareOpts)
+		} else if r.Mode != "" {
 			a.mode = r.Mode
+			if r.Mode == "game" {
+				a.shareOpts.FPS = 60
+				a.shareOpts.SlowViewer = session.SlowResolution
+			} else {
+				a.shareOpts.FPS = 30
+				a.shareOpts.SlowViewer = session.SlowFPS
+			}
+		}
+		if r.Output != "" {
+			a.output = r.Output
 		}
 		a.mu.Unlock()
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
+	a.syncPortMapForNextSession()
 	cfg := a.config()
 	if r.Server != "" { // the server the call was on; older files: the default
 		cfg.Server = r.Server
@@ -116,9 +130,6 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 		if err := s.SetAudio(r.Audio); err != nil {
 			errs = append(errs, errors.New("audio: "+err.Error()))
 		}
-	}
-	if r.Output != "" {
-		s.SetOutput(r.Output)
 	}
 	if err := errors.Join(errs...); err != nil {
 		a.setErr("rejoined, but could not restore " + err.Error())

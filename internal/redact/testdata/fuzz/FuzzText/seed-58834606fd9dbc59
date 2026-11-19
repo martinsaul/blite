@@ -1,0 +1,2 @@
+go test fuzz v1
+string("x\vhttps://h.example.com/j/ABCD#pwJ4")

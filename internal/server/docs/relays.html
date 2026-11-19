@@ -5,7 +5,7 @@
 <p class="lead">Sharing with more than about 5 people? Set up a relay. A relay is a member of the room with a fast upload that forwards everyone's video, so nobody else has to upload their screen once per viewer.</p>
 
 <h2 id="why">Why bigger groups need a relay</h2>
-<p>In a new room everyone sends their video directly to everyone else (a <em>full mesh</em>). That gives the lowest delay, but every sharer uploads their screen once per viewer: in a room of 8, each sharer uploads it 7 times. Most home connections can't keep that up at good quality, so with more than 5 people in a full mesh Bellion Share shows a warning: <em>"6 people in a full mesh: everyone who shares uploads their screen 5 times. Expect lower quality, or have someone with a fast upload volunteer as relay (People menu)."</em></p>
+<p>In a new room everyone sends their video directly to everyone else (a <em>full mesh</em>). That gives the lowest delay, but every sharer uploads their screen once per viewer: in a room of 8, each sharer uploads it 7 times. Most home connections can't keep that up at good quality, so with more than 5 people in a full mesh Bellion Share shows a warning: <em>"6 people in a full mesh: everyone who shares uploads their screen to each of the others. Expect lower quality, or have someone with a fast upload volunteer as relay below."</em></p>
 <p>With a relay, everyone sends their video once, to the relay, and the relay sends it on to whoever watches it.</p>
 
 <h2 id="relay-mode">Relay mode</h2>
@@ -22,7 +22,7 @@
 
 <h2 id="three-ways">Three ways to set up a relay</h2>
 <ol>
-  <li><a href="#volunteer"><strong>Volunteer from the app.</strong></a> Easiest: a member with a fast upload clicks one menu item. Works on any server.</li>
+  <li><a href="#volunteer"><strong>Volunteer from the app.</strong></a> Easiest: a member with a fast upload flips one switch. Works on any server.</li>
   <li><a href="#dedicated"><strong>A dedicated relay machine for your group.</strong></a> A spare PC, a home server or a rented server (VPS) joins your room by its share link and relays, so nobody's gaming PC has to. Works on any server, including bellion.app.</li>
   <li><a href="#hosted"><strong>A hosted relay on your own server.</strong></a> Keeps fixed rooms open around the clock. Needs your own Bellion Share server; it doesn't work with bellion.app.</li>
 </ol>
@@ -31,11 +31,10 @@
 <p>Good for: a group where one person has a fast, stable upload.</p>
 <ol>
   <li>Join the call as usual.</li>
-  <li>Open the <em>People</em> menu.</li>
-  <li>Choose <strong>Volunteer as relay</strong>.</li>
-  <li>Check the line under the People table: it should say <em>Relays: You relay for 4 people.</em> (the number is how many people you serve), or <em>You are standing by</em> if the room doesn't need you yet.</li>
+  <li>At the bottom of the People list, switch on <strong>Volunteer as relay</strong>.</li>
+  <li>Check the line just above it: it should say <em>Relays: You relay for 4 people.</em> (the number is how many people you serve), or <em>You are standing by</em> if the room doesn't need you yet.</li>
 </ol>
-<p>To stop, choose <strong>Stop relaying</strong> (or <strong>Leave the relay queue</strong> while standing by) in the same menu. Your members move to another relay, or back to full mesh.</p>
+<p>To stop, switch it off again (it reads <strong>Stop relaying</strong>, or <strong>Leave the relay queue</strong> while standing by). Your members move to another relay, or back to full mesh.</p>
 <div class="note">
   <p>Volunteer when you have a fast, stable upload (a wired connection helps) and a computer that isn't busy with a demanding game. Relaying while you play makes both worse. Several people can volunteer; the server uses the ones it needs.</p>
 </div>
@@ -51,7 +50,7 @@
 </ul>
 
 <h3>Step 2: get your room's share link</h3>
-<p>In the app on your own PC, start or join the session your group uses, and choose <em>Room &gt; Copy share link</em>. It looks like <code>https://bellion.app/j/CODE#password</code>. Keep it private: it contains the room password.</p>
+<p>In the app on your own PC, start or join the session your group uses, and press <em>Copy link</em> at the top of the call window. It looks like <code>https://bellion.app/j/CODE#password</code>. Keep it private: it contains the room password.</p>
 
 <h3>Step 3: start the relay</h3>
 <p>On Linux, in a terminal (keep the single quotes; replace the link and the upload with yours):</p>
@@ -60,7 +59,7 @@
   -name "Group relay" -relay-upload-kbps 50000</code></pre>
 <p>On Windows, in PowerShell or a Command Prompt, in the unzipped <code>blite</code> folder:</p>
 <pre><code>bin\blite.exe -headless -link "https://bellion.app/j/CODE#password" -volunteer -source none -view none -name "Group relay" -relay-upload-kbps 50000</code></pre>
-<p>It prints <code>room CODE link ...</code>, then <code>volunteered as relay</code>, and a status line per member every 5 seconds. In the app, the relay appears in the People table as <em>Group relay</em>, and the line under the table says <em>Relays: Group relay relays for N people.</em> Press Ctrl+C to stop it; it leaves the room cleanly.</p>
+<p>It prints <code>room CODE link ...</code>, then <code>volunteered as relay</code>, and a status line per member every 5 seconds. In the app, the relay appears in the People list as <em>Group relay</em>, and the line at the bottom of the list says <em>Relays: Group relay relays for N people.</em> Press Ctrl+C to stop it; it leaves the room cleanly.</p>
 <table class="flags">
   <tr><th>Flag</th><th>What it does</th></tr>
   <tr><td><code>-headless</code></td><td>No window or tray: runs one session from the command line.</td></tr>
@@ -68,7 +67,7 @@
   <tr><td><code>-volunteer</code></td><td>Volunteers as relay as soon as it's in.</td></tr>
   <tr><td><code>-source none</code></td><td>Shares nothing. Required: without it the relay tries to share its screen, and on a machine without a display it stops right away.</td></tr>
   <tr><td><code>-view none</code></td><td>Shows and plays nothing (no windows, no decoding). Needed on a machine without a display.</td></tr>
-  <tr><td><code>-name NAME</code></td><td>How it shows in the People table (default: the computer's name).</td></tr>
+  <tr><td><code>-name NAME</code></td><td>How it shows in the People list (default: the computer's name).</td></tr>
   <tr><td><code>-relay-upload-kbps N</code></td><td>Its upload in kbit/s (Mbit/s &times; 1000). The server uses it to decide how many members it serves, and the relay never sends faster than this. See <a href="#upload">How much upload do I need?</a></td></tr>
   <tr><td><code>-udp-port N</code></td><td>The UDP port for all its connections (default 30471; if that's taken, the next free one). See <a href="#troubleshooting">Troubleshooting</a>.</td></tr>
 </table>
@@ -77,7 +76,7 @@
 </div>
 
 <h3>Step 4: keep it running</h3>
-<p>The relay keeps running until you stop it, and keeps the room open while it's in it: everyone else can leave, and the same link still works days later. It rides out short network drops (up to about a minute) without leaving the room. After a longer outage, or when the server restarts, it exits, so let the system start it again.</p>
+<p>The relay keeps running until you stop it, and keeps the room open while it's in it: everyone else can leave, and the same link still works days later. It rides out short network drops (up to about a minute) without leaving the room, and a server restart is no different: bellion.app keeps rooms across restarts, and members reconnect into their places. After a longer outage it exits, so let the system start it again.</p>
 <p><strong>Linux: a systemd service.</strong> Put the link in a file only root can read, <code>/etc/bellion-relay.env</code> (<code>sudo chmod 600 /etc/bellion-relay.env</code>):</p>
 <pre><code>RELAY_LINK="https://bellion.app/j/CODE#password"</code></pre>
 <p>Create a user for it (<code>sudo useradd --system --create-home --home-dir /var/lib/bellion-relay bellion-relay</code>) and the service, <code>/etc/systemd/system/bellion-relay.service</code>:</p>
@@ -96,13 +95,13 @@ RestartSec=3min
 
 [Install]
 WantedBy=multi-user.target</code></pre>
-<p>Then <code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl enable --now bellion-relay</code>, and <code>journalctl -u bellion-relay -f</code> to watch its log. Use <code>Restart=always</code> rather than <code>on-failure</code>: when its session ends (for example after a server restart) the relay exits normally. Keep <code>RestartSec</code> at a few minutes: when the link no longer works, the server counts each failed join from your address, and too many in 10 minutes block joins from it for a while, for everyone on your connection.</p>
+<p>Then <code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl enable --now bellion-relay</code>, and <code>journalctl -u bellion-relay -f</code> to watch its log. Use <code>Restart=always</code> rather than <code>on-failure</code>: when its session ends (for example after an outage longer than a minute) the relay exits normally. Keep <code>RestartSec</code> at a few minutes: when the link no longer works, the server counts each failed join from your address, and too many in 10 minutes block joins from it for a while, for everyone on your connection.</p>
 <p><strong>Windows.</strong> The simplest way is to leave the command running in its terminal window. To start it at boot without a window, create a task in Task Scheduler: trigger <em>At startup</em>, action <em>Start a program</em> with <code>C:\BellionRelay\blite\bin\blite.exe</code> and the flags above as arguments, <em>Run whether user is logged on or not</em>, and under Settings, <em>If the task fails, restart every</em> 5 minutes. Update the relay from time to time by downloading the new zip; the headless relay doesn't update itself.</p>
 
 <h3>When things change</h3>
 <ul>
-  <li><strong>The person who started the room leaves.</strong> The room carries on. Ownership passes to whoever has been in the room longest, which can be the relay machine, and a relay can't disconnect or ban anyone. If you own the room, hand ownership to a person before you go: <em>People &gt; their name &gt; Make owner...</em></li>
-  <li><strong>The link stops working.</strong> A room ends 5 minutes after the last person (relay included) leaves, and when the server restarts. The relay then can't rejoin: start a new session, put its link in the relay's command (or <code>/etc/bellion-relay.env</code>) and restart the relay.</li>
+  <li><strong>The person who started the room leaves.</strong> The room carries on. Ownership passes to whoever has been in the room longest, which can be the relay machine, and a relay can't disconnect or ban anyone. If you own the room, hand ownership to a person before you go: click them in the People list and choose <em>Make owner...</em></li>
+  <li><strong>The link stops working.</strong> A room ends 5 minutes after the last person (relay included) leaves. A server restart doesn't end it on bellion.app; on your own server, only with <code>BLITE_STATE_FILE</code> set (see <a href="/docs/self-hosting">Self-hosting</a>). The relay then can't rejoin: start a new session, put its link in the relay's command (or <code>/etc/bellion-relay.env</code>) and restart the relay.</li>
   <li><strong>Encryption.</strong> The relay is a room member and gets the room's keys, like everyone else. It shows up with its own name tag (which changes each time it restarts), and the safety code includes it.</li>
   <li><strong>Updates.</strong> When a relay's build is too old for the server, it can't join; install the new version.</li>
 </ul>
@@ -114,10 +113,10 @@ WantedBy=multi-user.target</code></pre>
 </div>
 <ol>
   <li>Set up your server as in <a href="/docs/self-hosting">Self-hosting</a>, with <code>BLITE_HOST_KEY</code> set to a long random secret.</li>
-  <li>Write <code>rooms.json</code>. Codes are 4 to 12 letters and digits (no U; O counts as 0, I and L as 1); passwords need at least 4 characters. <code>owners</code> lists the identity keys of the people who own the room while they're in it (from <em>Room &gt; Your identity key...</em> in their app); otherwise the relay owns it.
+  <li>Write <code>rooms.json</code>. Codes are 4 to 12 letters and digits (no U; O counts as 0, I and L as 1); passwords need at least 4 characters. <code>owners</code> lists the identity keys of the people who own the room while they're in it (from <em>Your identity key...</em> in the gear menu of their app, during a session); otherwise the relay owns it.
 <pre><code>[
   {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Our relay",
-   "owners": ["&lt;identity key from Room &gt; Your identity key...&gt;"]}
+   "owners": ["&lt;identity key from Your identity key...&gt;"]}
 ]</code></pre></li>
   <li>Run it with the same key and your server, with good upload and host networking:
 <pre><code>BLITE_HOST_KEY=&lt;secret&gt; blite -host rooms.json -server wss://share.example.com/ws -relay-upload-kbps 200000</code></pre>
@@ -146,8 +145,8 @@ WantedBy=multi-user.target</code></pre>
 
 <h2 id="check">How to tell it's working</h2>
 <ul>
-  <li>The line under the People table lists the relays and how many people each serves, for example <em>Relays: Group relay relays for 6 people; Sam relays for 4 people; Alex is standing by.</em> Without a relay it says <em>Everyone sends their video to everyone (full mesh).</em></li>
-  <li>In a member's <em>People &gt; their name &gt; Network path</em>, people whose video comes through a relay show <em>via</em> the relay's name.</li>
+  <li>The line at the bottom of the People list lists the relays and how many people each serves, for example <em>Relays: Group relay relays for 6 people; Sam relays for 4 people; Alex is standing by.</em> Without a relay it says <em>Everyone sends their video to everyone (full mesh).</em></li>
+  <li>Click a member in the People list: for people whose video comes through a relay, <em>Network path</em> in their panel shows <em>via</em> the relay's name.</li>
   <li>A dedicated relay's log shows <code>volunteered as relay</code>, then <code>plan ... relays=[...]</code> lines when the server changes the plan, and per member <code>upKbps</code>, the rate it sends that member.</li>
 </ul>
 

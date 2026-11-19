@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,10 +38,11 @@ func testRenditions(t *testing.T, e2ee bool) {
 	if e2ee {
 		cm.Build = proto.E2EEBuild
 	}
-	allow := true
+	var allow atomic.Bool
+	allow.Store(true)
 	cfg := func(n string) Config {
 		return Config{Server: ws, Name: n, View: media.ViewCount, Client: cm, Log: quiet, E2EE: e2ee,
-			CanEncode: func() bool { return allow }}
+			CanEncode: allow.Load}
 	}
 	ctx := context.Background()
 
@@ -99,7 +101,7 @@ func testRenditions(t *testing.T, e2ee bool) {
 	framesGrow(t, "relay: bob sees the transcode", b, "alice")
 
 	// A late viewer whose relay refuses: stays on what it gets.
-	allow = false
+	allow.Store(false)
 	d, err := Join(ctx, cfg("dave"), a.sig.Welcome.Room, a.pw)
 	if err != nil {
 		t.Fatal(err)

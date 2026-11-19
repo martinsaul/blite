@@ -373,6 +373,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, data, err := ws.Read(ctx)
 		if err != nil {
+			if seat.PeerID != "" && !left && !updating && ctx.Err() == nil {
+				s.cfg.Log.Info("dropped", "status", websocket.CloseStatus(err), "err", err)
+			}
 			return
 		}
 		if !lim.Allow() {
@@ -424,6 +427,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if err := s.rooms.Rename(seat.Room, seat.PeerID, m.Name); err != nil {
+				c.Send(proto.Error{T: proto.TError, Code: err.Error()})
+			}
+		case proto.TSharing:
+			var m proto.Sharing
+			if json.Unmarshal(data, &m) != nil {
+				c.Send(proto.Error{T: proto.TError, Code: proto.ErrBadRequest})
+				continue
+			}
+			if err := s.rooms.SetSharing(seat.Room, seat.PeerID, m.On); err != nil {
 				c.Send(proto.Error{T: proto.TError, Code: err.Error()})
 			}
 		case proto.TTransfer:
@@ -547,6 +559,24 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 		if err != nil {
 			s.failIP.Add(ip)
 		}
+	case proto.TProbe:
+		var m proto.Probe
+		if json.Unmarshal(data, &m) != nil {
+			return fail(proto.ErrBadRequest)
+		}
+		code := room.NormalizeCode(m.Room)
+		if s.failIP.Blocked(ip) || (code != "" && s.failRoom.Blocked(code)) {
+			return fail(proto.ErrRateLimited)
+		}
+		exists := code != "" && s.rooms.Probe(code, m.Password)
+		if !exists {
+			s.failIP.Add(ip)
+			if code != "" {
+				s.failRoom.Add(code)
+			}
+		}
+		c.Send(proto.ProbeResult{T: proto.TProbeResult, Exists: exists})
+		return room.Seat{}
 	default:
 		return fail(proto.ErrBadRequest)
 	}

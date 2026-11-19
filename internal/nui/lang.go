@@ -41,6 +41,6 @@ func (u *UI) setLanguage(tag string) {
 	setFyneLanguage()
 	u.fa.Settings().SetTheme(themeFor()) // also redraws the text in the new fonts
 	u.setTrayMenu()
-	u.menuKey, u.viewKind = "", ""
+	u.viewKind = ""
 	u.refresh()
 }

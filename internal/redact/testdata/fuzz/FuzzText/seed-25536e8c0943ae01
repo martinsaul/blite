@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{Room:K7PQ-2M4X Link:https://share.bellion.io/j/K7PQ2M4X#pwState}")

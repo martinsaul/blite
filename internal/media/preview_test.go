@@ -6,28 +6,8 @@ import (
 	"time"
 )
 
-func TestFitAspect(t *testing.T) {
-	for _, c := range []struct {
-		w, h     int
-		byHeight bool
-		wantW    int
-		wantH    int
-	}{
-		{320, 999, false, 320, 180},
-		{1000, 10, false, PreviewW, PreviewH},
-		{10, 10, false, previewMinW, previewMinH},
-		{999, 200, true, 355, 200},
-		{1, 1000, true, PreviewW, PreviewH},
-		{1, 1, true, previewMinW, previewMinH},
-	} {
-		if w, h := fitAspect(c.w, c.h, c.byHeight); w != c.wantW || h != c.wantH {
-			t.Errorf("fitAspect(%d, %d, %v) = %dx%d, want %dx%d", c.w, c.h, c.byHeight, w, h, c.wantW, c.wantH)
-		}
-	}
-}
-
 // The preview branch costs nothing until SetPreview opens it, and a
-// preview pipeline and a grid corner can show it.
+// self-preview tile in the grid shows it.
 func TestPreviewValve(t *testing.T) {
 	Init()
 	ch := NewPreviewChannel()
@@ -45,17 +25,19 @@ func TestPreviewValve(t *testing.T) {
 	if n := src.PreviewFrames(); n != 0 {
 		t.Fatalf("closed preview passed %d frames", n)
 	}
-	pv, err := StartPreview(ch, ViewCount)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pv.Stop()
 	pl, err := StartPlayer(ViewGrid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pl.Stop()
-	g, err := StartGrid(GridConfig{Tiles: []Tile{{Channel: pl.Channel, Label: "alice"}}, View: ViewCount, Pip: ch})
+	g, err := StartGrid(GridConfig{
+		Tiles: []Tile{
+			{Channel: pl.Channel, Label: "alice", ID: "a"},
+			{Channel: ch, Label: "You", ID: "self", Self: true},
+		},
+		View:      ViewCount,
+		OnControl: func(string, Control, float64) {},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +52,8 @@ func TestPreviewValve(t *testing.T) {
 	if dh < 30 || d < dh*3/10 || d > dh*7/10 {
 		t.Fatalf("open preview passed %d frames while HIGH encoded %d, want about half", d, dh)
 	}
-	if pv.Frames() <= 0 || g.Frames() <= 0 {
-		t.Fatalf("preview showed %d frames, grid %d", pv.Frames(), g.Frames())
+	if g.Frames() <= 0 {
+		t.Fatalf("grid showed %d frames", g.Frames())
 	}
 	src.SetPreview(false)
 	time.Sleep(300 * time.Millisecond)

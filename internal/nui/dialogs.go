@@ -1,10 +1,12 @@
 package nui
 
 import (
+	"image"
 	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
@@ -42,9 +44,10 @@ func (u *UI) confirm(title, text string, f func() error) {
 // busyDo disables b while f runs.
 func (u *UI) busyDo(b *widget.Button, f func() error) {
 	b.Disable()
+	u.bg.Add(1)
 	go func() {
 		err := f()
-		fyne.Do(func() {
+		u.laterDone(func() {
 			b.Enable()
 			if err != nil {
 				u.showErr(err)
@@ -58,6 +61,26 @@ func (u *UI) leave() {
 		u.a.Leave()
 		return nil
 	})
+}
+
+func (u *UI) showLeaveStreamDialog() {
+	d := dialog.NewCustomConfirm(
+		i18n.L("Leave the session?"),
+		i18n.L("Leave"),
+		i18n.L("Cancel"),
+		label(i18n.L("You can rejoin with the link while the session is open.")),
+		func(ok bool) {
+			u.leaveDialogShown = false
+			if ok {
+				u.a.Leave()
+			} else {
+				u.a.DismissLeavePrompt()
+			}
+		},
+		u.win,
+	)
+	d.Resize(fyne.NewSize(420, 0))
+	d.Show()
 }
 
 func (u *UI) copyLink() {
@@ -74,14 +97,16 @@ func (u *UI) goLive(pw string, e2ee, pick bool) {
 	u.goLiveWith(func() error { return u.a.Create(ctx(), pw, e2ee) }, pick)
 }
 
-// goLiveWith runs create, then shares the screen and copies the link.
+// goLiveWith runs create, then shares the configured source and copies the link.
 func (u *UI) goLiveWith(create func() error, pick bool) {
+	src := normalizeShareState(u.st).Source
+	u.bg.Add(1)
 	go func() {
 		err := create()
-		if err == nil && !pick {
-			err = u.a.SetSource("primary")
+		if err == nil && !pick && src != "" {
+			err = u.a.SetSource(src)
 		}
-		fyne.Do(func() {
+		u.laterDone(func() {
 			if err != nil {
 				u.showErr(err)
 				return
@@ -93,34 +118,6 @@ func (u *UI) goLiveWith(create func() error, pick bool) {
 			}
 		})
 	}()
-}
-
-func (u *UI) createDialog() {
-	pw := widget.NewEntry()
-	pw.SetPlaceHolder(i18n.L("Optional: leave empty for an open room"))
-	e2ee := widget.NewCheck(i18n.L("Encrypt the call end to end (everyone needs build 72 or newer)"), nil)
-	e2ee.SetChecked(true)
-	dialog.ShowForm(i18n.L("Start a session"), i18n.L("Create"), i18n.L("Cancel"), []*widget.FormItem{
-		widget.NewFormItem(i18n.L("Password"), pw), widget.NewFormItem("", e2ee),
-	}, func(ok bool) {
-		if ok {
-			p, e := pw.Text, e2ee.Checked
-			u.do(func() error { return u.a.Create(ctx(), p, e) })
-		}
-	}, u.win)
-}
-
-func (u *UI) joinDialog() {
-	link := widget.NewEntry()
-	link.SetPlaceHolder("https://your-server/j/XXXXXXXX#password")
-	d := dialog.NewForm(i18n.L("Join a session"), i18n.L("Join"), i18n.L("Cancel"), []*widget.FormItem{widget.NewFormItem(i18n.L("Share link"), link)}, func(ok bool) {
-		if ok {
-			l := strings.TrimSpace(link.Text)
-			u.do(func() error { return u.a.JoinLink(ctx(), l) })
-		}
-	}, u.win)
-	d.Resize(fyne.NewSize(560, 0))
-	d.Show()
 }
 
 func (u *UI) nameDialog() {
@@ -168,24 +165,51 @@ func (u *UI) safetyDialog() {
 		i18n.L("Read it aloud once: everyone should see the same numbers. If someone's differs, the connection is being intercepted."), nil)
 }
 
-// sourceDialog picks a monitor or window to share.
+// sourceDialog picks a monitor or window to share. Windows show their app's
+// icon (a generic one when they have none), monitors a monitor.
 func (u *UI) sourceDialog() {
 	var targets []capture.Target
+	icons := map[string]image.Image{}
 	list := widget.NewList(func() int { return len(targets) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject {
+			img := canvas.NewImageFromResource(windowWhiteRes)
+			img.FillMode = canvas.ImageFillContain
+			img.SetMinSize(fyne.NewSize(20, 20))
+			return container.NewBorder(nil, nil, img, nil, widget.NewLabel(""))
+		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			t := targets[i]
-			text := i18n.L("Window: {{.Name}}", i18n.D{"Name": t.Name})
-			if t.Kind == "monitor" {
-				text = i18n.L("Monitor: {{.Name}}", i18n.D{"Name": t.Name})
+			row := o.(*fyne.Container)
+			var img *canvas.Image
+			var lbl *widget.Label
+			for _, c := range row.Objects {
+				switch c := c.(type) {
+				case *canvas.Image:
+					img = c
+				case *widget.Label:
+					lbl = c
+				}
 			}
-			o.(*widget.Label).SetText(text)
+			text := i18n.L("Window: {{.Name}}", i18n.D{"Name": t.Label()})
+			var res fyne.Resource = windowWhiteRes
+			var pic image.Image
+			if t.Kind == "monitor" {
+				text = i18n.L("Monitor: {{.Name}}", i18n.D{"Name": t.Label()})
+				res = screenWhiteRes
+			} else if pic = icons[t.Source]; pic != nil {
+				res = nil
+			}
+			lbl.SetText(text)
+			if img.Resource != res || img.Image != pic {
+				img.Resource, img.Image = res, pic
+				img.Refresh()
+			}
 		})
 	status := widget.NewLabel(i18n.L("Loading..."))
 	load := func() {
 		go func() {
 			ts, err := capture.List()
-			fyne.Do(func() {
+			u.later(func() {
 				targets = ts
 				status.SetText("")
 				if err != nil {
@@ -193,6 +217,12 @@ func (u *UI) sourceDialog() {
 				} else if len(ts) == 0 {
 					status.SetText(i18n.L("No monitors or windows found."))
 				}
+				list.Refresh()
+			})
+			// The icons after the list: a slow app doesn't hold it up.
+			imgs := capture.Icons(ts)
+			u.later(func() {
+				icons = imgs
 				list.Refresh()
 			})
 		}()
@@ -212,17 +242,14 @@ func (u *UI) sourceDialog() {
 
 // audioDialog picks the apps whose audio we share.
 func (u *UI) audioDialog() {
-	s := u.st.Session
-	if s == nil {
-		return
-	}
+	curApps := normalizeShareState(u.st).Audio.Apps
 	group := widget.NewCheckGroup(nil, nil)
 	keys := map[string]string{} // label -> key
 	status := widget.NewLabel(i18n.L("Loading..."))
 	load := func() {
 		go func() {
 			apps, err := audio.ListApps()
-			fyne.Do(func() {
+			u.later(func() {
 				var opts, sel []string
 				keys = map[string]string{}
 				for _, a := range apps {
@@ -232,7 +259,7 @@ func (u *UI) audioDialog() {
 					}
 					keys[l] = a.Key
 					opts = append(opts, l)
-					for _, k := range s.Audio.Apps {
+					for _, k := range curApps {
 						if k == a.Key {
 							sel = append(sel, l)
 						}
@@ -266,47 +293,10 @@ func (u *UI) audioDialog() {
 	d.Show()
 }
 
-func (u *UI) arrangeDialog() {
-	l := u.st.Layout
-	rows, cols := widget.NewEntry(), widget.NewEntry()
-	if l.Rows > 0 {
-		rows.SetText(strconv.Itoa(l.Rows))
-	}
-	if l.Cols > 0 {
-		cols.SetText(strconv.Itoa(l.Cols))
-	}
-	auto := widget.NewCheck(i18n.L("Automatically"), func(on bool) {
-		if on {
-			rows.Disable()
-			cols.Disable()
-		} else {
-			rows.Enable()
-			cols.Enable()
-		}
-	})
-	auto.SetChecked(l.Rows == 0 && l.Cols == 0)
-	dialog.ShowForm(i18n.L("Arrange the video window"), i18n.L("Apply"), i18n.L("Cancel"), []*widget.FormItem{
-		widget.NewFormItem("", auto), widget.NewFormItem(i18n.L("Rows"), rows), widget.NewFormItem(i18n.L("Columns"), cols),
-	}, func(ok bool) {
-		if !ok {
-			return
-		}
-		r, c := 0, 0
-		if !auto.Checked {
-			r, _ = strconv.Atoi(rows.Text)
-			c, _ = strconv.Atoi(cols.Text)
-			r, c = clamp(r), clamp(c)
-		}
-		u.do(func() error { return u.a.SetLayout(l.Mode, r, c, l.Preview) })
-	}, u.win)
-}
-
 func hinted(f *widget.FormItem, hint string) *widget.FormItem {
 	f.HintText = hint
 	return f
 }
-
-func clamp(n int) int { return max(1, min(n, 8)) }
 
 func (u *UI) relayDialog() {
 	u.info(i18n.L("Relays"), i18n.L("Everyone sends their video to everyone (full mesh). Members with a fast upload can volunteer as relays: the others then send their video only to a relay, which forwards it. Big rooms use several relays."), nil)
@@ -332,7 +322,7 @@ func (u *UI) feedbackDialog() {
 		t, dg := text.Text, diag.Checked
 		go func() {
 			err := u.a.Feedback(ctx(), k, t, dg)
-			fyne.Do(func() {
+			u.later(func() {
 				if err != nil {
 					u.showErr(err)
 				} else {
@@ -348,7 +338,7 @@ func (u *UI) feedbackDialog() {
 func (u *UI) sendLogs() {
 	go func() {
 		err := u.a.SendLogsNow(ctx())
-		fyne.Do(func() {
+		u.later(func() {
 			if err != nil {
 				u.showErr(err)
 				return

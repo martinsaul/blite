@@ -27,6 +27,36 @@ func TestGridSize(t *testing.T) {
 	}
 }
 
+func TestLayoutRectsPinned(t *testing.T) {
+	// Single pinned tile: still uses the whole canvas.
+	rs, w, h := layoutRects([]Tile{{ID: "a", Pinned: true}}, 1920, 1080, 0, 0)
+	if len(rs) != 1 || rs[0] != (rect{0, 0, 1920, 1080}) || w != 1920 || h != 1080 {
+		t.Fatalf("1 pinned tile: %+v %dx%d", rs, w, h)
+	}
+
+	// 3 tiles, middle one pinned: primary gets 4/5 width, strip gets 1/5 width.
+	rs, w, h = layoutRects([]Tile{{ID: "a"}, {ID: "b", Pinned: true}, {ID: "self", Self: true}}, 1920, 1080, 0, 0)
+	if rs[1] != (rect{0, 0, 1536, 1080}) {
+		t.Fatalf("pinned rect = %+v, want 0,0 1536x1080", rs[1])
+	}
+	if rs[0] != (rect{1536, 0, 384, 540}) || rs[2] != (rect{1536, 540, 384, 540}) {
+		t.Fatalf("strip rects = %+v, %+v", rs[0], rs[2])
+	}
+	if w != 1920 || h != 1080 {
+		t.Fatalf("canvas = %dx%d", w, h)
+	}
+
+	// 7 tiles (1 pinned + 6 in strip -> 2 strip columns), all even coordinates.
+	tiles := make([]Tile, 7)
+	tiles[0].Pinned = true
+	rs, _, _ = layoutRects(tiles, 1920, 1080, 0, 0)
+	for i, r := range rs {
+		if r.x%2 != 0 || r.y%2 != 0 || r.w%2 != 0 || r.h%2 != 0 || r.w <= 0 || r.h <= 0 {
+			t.Fatalf("tile %d has odd or empty rect %+v", i, r)
+		}
+	}
+}
+
 // Two decoders feed one grid; it keeps composing, also after one of them stops.
 func TestGridComposesTwoPlayers(t *testing.T) {
 	Init()
@@ -90,8 +120,9 @@ func TestGridComposesTwoPlayers(t *testing.T) {
 	wait(15, pls[:1])
 }
 
-// Clicking a tile's buttons reports the tile's peer and the button; the
-// buttons fade after the pointer rests.
+// Clicking a tile's buttons reports the tile's feed ID and the button (eye,
+// pop-out, pin, mute, volume; compact 3-button bar on self); the buttons fade
+// after the pointer rests.
 func TestGridControls(t *testing.T) {
 	Init()
 	var pls []*Player
@@ -103,15 +134,21 @@ func TestGridControls(t *testing.T) {
 		defer pl.Stop()
 		pls = append(pls, pl)
 	}
+	selfCh := NewPreviewChannel()
 	type click struct {
 		id string
 		c  Control
 		v  float64
 	}
-	got := make(chan click, 8)
+	got := make(chan click, 16)
 	g, err := StartGrid(GridConfig{
-		Tiles: []Tile{{Channel: pls[0].Channel, Label: "alice", ID: "a", Volume: 1}, {Channel: pls[1].Channel, Label: "bob", ID: "b", Volume: 1}},
-		View:  ViewCount, Width: 1280, Height: 720,
+		Tiles: []Tile{
+			{Channel: pls[0].Channel, Label: "alice", ID: "a", Volume: 1},
+			{Channel: pls[1].Channel, Label: "bob", ID: "b", Volume: 1, PoppedOut: true},
+			{Channel: selfCh, Label: "You", ID: "self", Self: true},
+		},
+		View:  ViewCount,
+		Width: 1280, Height: 720,
 		OnControl: func(id string, c Control, v float64) { got <- click{id, c, v} },
 	})
 	if err != nil {
@@ -122,12 +159,17 @@ func TestGridControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Where tile i's controls are: the mute and pause button centres and
-	// the slider at fraction f.
 	at := func(i int, what string, f float64) (float64, float64) {
 		o := g.ctl.ov[i]
-		u := map[string]float64{"mute": barMuteX, "pause": barPauseX, "slider": barSliderX0 + f*(barSliderX1-barSliderX0)}[what]
-		return float64(o.barX) + u*float64(o.barH), float64(o.barY) + float64(o.barH)/2
+		scale := float64(o.barH)
+		u := map[string]float64{
+			"eye":    barEyeX,
+			"pop":    barPopX,
+			"pin":    barPinX,
+			"mute":   barMuteX,
+			"slider": barSliderX0 + f*(barSliderX1-barSliderX0),
+		}[what]
+		return float64(o.barX) + u*scale, float64(o.barY) + float64(o.barH)/2
 	}
 	expect := func(want click) {
 		t.Helper()
@@ -140,29 +182,41 @@ func TestGridControls(t *testing.T) {
 			t.Fatalf("no %+v", want)
 		}
 	}
-	x, y := at(1, "mute", 0)
-	sink.SendMouse(false, x, y)
-	sink.SendMouse(true, x, y)
-	expect(click{"b", ControlMute, 0})
-	x, y = at(0, "pause", 0)
-	sink.SendMouse(false, x, y)
-	sink.SendMouse(true, x, y)
-	expect(click{"a", ControlPause, 0})
-	// drag alice's slider to 75%: 1.5
-	x, y = at(0, "slider", 0.2)
+
+	for _, tc := range []struct {
+		tile int
+		what string
+		want click
+	}{
+		{0, "eye", click{"a", ControlEye, 0}},
+		{0, "pop", click{"a", ControlPopOut, 0}},
+		{0, "pin", click{"a", ControlPin, 0}},
+		{1, "mute", click{"b", ControlMute, 0}},
+		{2, "eye", click{"self", ControlEye, 0}},
+		{2, "pop", click{"self", ControlPopOut, 0}},
+		{2, "pin", click{"self", ControlPin, 0}},
+	} {
+		x, y := at(tc.tile, tc.what, 0)
+		sink.SendMouse(false, x, y)
+		sink.SendMouse(true, x, y)
+		expect(tc.want)
+	}
+
+	// Drag alice's slider to 75%: 1.5.
+	x, y := at(0, "slider", 0.2)
 	sink.SendPress(x, y)
 	expect(click{"a", ControlVolume, 0.4})
 	x, _ = at(0, "slider", 0.75)
 	sink.SendMouse(false, x, y)
 	expect(click{"a", ControlVolume, 1.5})
 	sink.SendMouse(true, x, y)
-	sink.SendMouse(true, 320, 200) // the picture, not a control
+	sink.SendMouse(true, 100, 100) // the picture, not a control
 	select {
 	case k := <-got:
 		t.Fatalf("a click on the picture gave %+v", k)
 	case <-time.After(300 * time.Millisecond):
 	}
-	sink.SendMouse(false, 320, 200)
+	sink.SendMouse(false, 100, 100)
 	time.Sleep(3 * controlTick)
 	g.ctl.Lock()
 	shown, alpha := g.ctl.shown, g.ctl.alpha
@@ -177,12 +231,12 @@ func TestGridControls(t *testing.T) {
 	if alpha > 0.01 {
 		t.Fatalf("controls at opacity %.2f after the pointer rested, want faded out", alpha)
 	}
-	g.SetState("a", true, true, 0.5)
+	g.SetState("a", true, 0.5, true, false)
 	g.SetWaiting("b", true)
 	g.ctl.Lock()
 	st, spin := g.ctl.tiles[0], g.ctl.ov[1].spinShown
 	g.ctl.Unlock()
-	if !st.Muted || !st.Paused || st.Volume != 0.5 || !spin {
+	if !st.Muted || !st.Pinned || st.Volume != 0.5 || !spin {
 		t.Fatalf("state not kept: %+v, spinner %v", st, spin)
 	}
 	if g.Frames() < 10 {
@@ -190,22 +244,33 @@ func TestGridControls(t *testing.T) {
 	}
 }
 
-// A window with our preview in its corner and tile buttons starts and
-// composes (build 78 lacked videobox on Windows and every such window failed).
-func TestGridWithPreview(t *testing.T) {
+// A pinned stream composes alongside strip tiles (including our own preview).
+func TestGridPinnedWithPreviewTile(t *testing.T) {
 	Init()
 	pl, err := StartPlayer(ViewGrid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pl.Stop()
-	g, err := StartGrid(GridConfig{Tiles: []Tile{{Channel: pl.Channel, Label: "alice", ID: "a"}}, View: ViewCount,
-		Pip: NewPreviewChannel(), Width: 1280, Height: 720, OnControl: func(string, Control, float64) {}})
+	g, err := StartGrid(GridConfig{
+		Tiles: []Tile{
+			{Channel: pl.Channel, Label: "alice", ID: "a", Pinned: true, Volume: 1},
+			{Channel: NewPreviewChannel(), Label: "You", ID: "self", Self: true},
+		},
+		View:  ViewCount,
+		Width: 1280, Height: 720,
+		OnControl: func(string, Control, float64) {},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer g.Stop()
-	g.SetState("a", true, true, 1.2) // the muted and paused icons
+	if h := g.EffectiveTileHeight("a"); h <= 360 {
+		t.Fatalf("pinned tile effective height = %d, want > 360", h)
+	}
+	if h := g.EffectiveTileHeight("self"); h == 0 || h > 360 {
+		t.Fatalf("strip tile effective height = %d, want 1..360", h)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for g.Frames() < 10 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
@@ -250,7 +315,7 @@ func TestGridStoppedTile(t *testing.T) {
 	if g.ctl.ov[1].bar != nil {
 		t.Fatal("a stopped tile has controls")
 	}
-	g.SetState("b", true, false, 1) // no controls to update: nothing breaks
+	g.SetState("b", true, 1, false, false) // no controls to update: nothing breaks
 	g.Fade("b", 300*time.Millisecond)
 	time.Sleep(100 * time.Millisecond)
 	g.ctl.Lock()
@@ -273,8 +338,7 @@ func TestGridLabelText(t *testing.T) {
 	}{
 		{Tile{Label: "Bob"}, "Bob"},
 		{Tile{Label: "Bob", Muted: true}, "Bob  " + i18n.L("(muted)")},
-		{Tile{Label: "Bob", Paused: true}, "Bob  " + i18n.L("(video paused)")},
-		{Tile{Label: "Bob", Muted: true, Paused: true}, "Bob  " + i18n.L("(muted, video paused)")},
+		{Tile{Label: "You", Self: true, Muted: true}, "You"},
 		{Tile{Label: "Bob", Stopped: true, Muted: true}, i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": "Bob"})},
 	} {
 		if got := tileText(c.t); got != c.want {
@@ -283,5 +347,55 @@ func TestGridLabelText(t *testing.T) {
 	}
 	if got := launchQuote(`a "b" \ c`); got != `"a \"b\" \\ c"` {
 		t.Error(got)
+	}
+}
+
+type noopWindow struct{ closed chan struct{} }
+
+func (w *noopWindow) Handle() uintptr                 { return 0 }
+func (w *noopWindow) Closed() <-chan struct{}         { return w.closed }
+func (w *noopWindow) SetInterceptClose(bool)          {}
+func (w *noopWindow) CloseRequested() <-chan struct{} { return nil }
+func (w *noopWindow) SetTitle(string)                 {}
+func (w *noopWindow) PointerInside() bool             { return true }
+func (w *noopWindow) Minimized() bool                 { return false }
+func (w *noopWindow) Destroy()                        {}
+
+// TestStartGridViewCountWindowNoRace verifies g.win is initialized before the
+// tick goroutine starts in ViewCount mode (M12.7).
+func TestStartGridViewCountWindowNoRace(t *testing.T) {
+	Init()
+	origTick := controlTick
+	_ = origTick
+	w := &noopWindow{closed: make(chan struct{})}
+	for range 6 {
+		g, err := StartGrid(GridConfig{
+			Tiles:     []Tile{{Channel: NewPreviewChannel(), Label: "You", ID: "self", Self: true}},
+			View:      ViewCount,
+			Window:    w,
+			Width:     640,
+			Height:    360,
+			OnControl: func(string, Control, float64) {},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !g.InWindow() {
+			g.Stop()
+			t.Fatal("expected InWindow() == true in ViewCount with cfg.Window")
+		}
+		select {
+		case <-g.Done():
+			g.Stop()
+			t.Fatal("g.Done() closed before Stop")
+		default:
+		}
+		time.Sleep(70 * time.Millisecond)
+		g.Stop()
+		select {
+		case <-g.Done():
+		default:
+			t.Fatal("g.Done() not closed after Stop")
+		}
 	}
 }

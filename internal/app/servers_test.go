@@ -17,13 +17,14 @@ import (
 	"blite/internal/session"
 )
 
-// No test reads or writes the user's real server list.
+// No test reads or writes the user's real server or recent-room list.
 func TestMain(m *testing.M) {
 	d, err := os.MkdirTemp("", "blite-servers")
 	if err != nil {
 		panic(err)
 	}
 	serversPath = func() (string, error) { return filepath.Join(d, "blite", "servers.json"), nil }
+	recentPath = func() (string, error) { return filepath.Join(d, "blite", "recent.json"), nil }
 	code := m.Run()
 	os.RemoveAll(d)
 	os.Exit(code)

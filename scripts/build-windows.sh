@@ -31,9 +31,13 @@ go build -trimpath -ldflags "$LDFLAGS" -o "$out/blite/bin/blite.exe" ./cmd/blite
 # The crash guard is pure Go and has no console window.
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -H windowsgui" -o "$out/blite/blite-guard.exe" ./cmd/blite-guard
 
+# Cameras: jpeg (jpegdec, needs jpeg8.dll), videofilter (videoflip for the
+# mirrored self-view), directshow (OBS Virtual Camera and other DirectShow-only
+# cameras; Media Foundation lists the rest).
 plugins="coreelements app videoconvertscale videorate videotestsrc audiotestsrc audioconvert
 audioresample audiomixer opus x264 openh264 videoparsersbad d3d11 nvcodec qsv amfcodec
-mediafoundation wasapi2 playback typefindfunctions autodetect libav volume pango inter compositor videobox"
+mediafoundation wasapi2 playback typefindfunctions autodetect libav volume pango inter compositor videobox
+jpeg videofilter directshow"
 for p in $plugins; do cp "$gst/lib/gstreamer-1.0/gst$p.dll" "$out/blite/lib/gstreamer-1.0/"; done
 
 # Copy every DLL the exe and plugins import (transitively) from the runtime bin.

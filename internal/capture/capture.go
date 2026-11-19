@@ -4,6 +4,7 @@ package capture
 
 import (
 	"fmt"
+	"image"
 	"strconv"
 	"strings"
 )
@@ -13,8 +14,52 @@ type Target struct {
 	Kind   string `json:"kind"`   // monitor | window
 	Name   string `json:"name"`   // monitor name and size, or window title
 	Source string `json:"source"` // media source kind, e.g. "window:0x3a00007"
+	// App is the program that owns a window (exe name, or X11 class).
+	App string `json:"app,omitempty"`
 	// Primary marks the primary monitor (the one with the taskbar or panel).
 	Primary bool `json:"primary,omitempty"`
+}
+
+// Label is what to call the target for people: its name, else its app.
+// Never the handle in Source.
+func (t Target) Label() string {
+	if n := strings.TrimSpace(t.Name); n != "" {
+		return n
+	}
+	return strings.TrimSpace(t.App)
+}
+
+// SourceName is the label of the monitor or window a source string shares,
+// or "" when it can't tell (the window is gone, or another kind of source).
+func SourceName(source string) string {
+	ts, _ := List()
+	for _, t := range ts {
+		if t.Source == source {
+			return t.Label()
+		}
+	}
+	if arg, ok := strings.CutPrefix(source, "window:"); ok { // untitled, so not listed
+		if id, err := ParseWindow(arg); err == nil {
+			return windowApp(id)
+		}
+	}
+	return ""
+}
+
+// Icons returns the app icons of the windows among ts, by Source; windows
+// without one (and monitors) are left out. Icons are cached, so asking again
+// is cheap.
+func Icons(ts []Target) map[string]image.Image {
+	var ws []Target
+	for _, t := range ts {
+		if t.Kind == "window" {
+			ws = append(ws, t)
+		}
+	}
+	if len(ws) == 0 {
+		return map[string]image.Image{}
+	}
+	return icons(ws)
 }
 
 // PrimarySource is the source for the primary monitor, or "screen" (all of

@@ -2,15 +2,18 @@ package nui
 
 import (
 	"fmt"
+	"image/color"
+	"net/url"
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"blite/internal/app"
+	"blite/internal/feeds"
 	"blite/internal/i18n"
 	"blite/internal/session"
 )
@@ -77,7 +80,7 @@ func (n *notices) set(u *UI, st app.UIState) {
 		show(n.updBtn, up.CanApply)
 		show(n.update, true)
 	case st.Session != nil && st.Session.UpdateRecommended:
-		n.updText.SetText(i18n.L("A newer Bellion Share is available. Please update when you can (Help > Check for updates)."))
+		n.updText.SetText(i18n.L("A newer Bellion Share is available. Please update when you can (Settings > Check for updates)."))
 		n.updText.Importance = widget.WarningImportance
 		n.updBtn.Hide()
 		show(n.update, true)
@@ -89,58 +92,84 @@ func (n *notices) set(u *UI, st app.UIState) {
 	if st.Reach != nil {
 		n.reach.SetText(i18n.Msg(st.Reach.Text))
 	}
+	show(n.box, n.err.Visible() || n.update.Visible() || n.reach.Visible())
 }
 
-// lobbyView: not in a session. One click to go live, one to watch.
+// lobbyView: not in a session. Share card, Join card, Discord banner, and
+// Recent rooms.
 type lobbyView struct {
-	u        *UI
-	root     fyne.CanvasObject
-	who      *widget.Label
-	notes    *notices
-	live     *widget.Button
-	liveWin  *widget.Button
-	needPw   *widget.Check
-	pw       *widget.Entry
-	e2ee     *widget.Check
-	link     *widget.Entry
-	join     *widget.Button
-	clipJoin *widget.Button
-	clipLink string
-	dc       *fyne.Container // the Discord voice channel row
-	dcText   *widget.Label
-	dcBtn    *widget.Button
-	dcAct    func()
-	server   *serverPicker // bottom right, once the user added a server
+	u           *UI
+	root        fyne.CanvasObject
+	who         *widget.Label
+	gear        *iconDotButton
+	help        *iconDotButton
+	notes       *notices
+	tileScreen  *sourceTile
+	tileWindow  *sourceTile
+	presets     *presetBar
+	chipAudio   *chipButton
+	chipSource  *chipButton
+	chipSec     *chipButton
+	chipsBox    *fyne.Container
+	noWinAudio  *widget.Label // the shared window's app audio can't be shared
+	live        *widget.Button
+	link        *widget.Entry
+	join        *widget.Button
+	clipJoin    *widget.Button
+	clipLink    string
+	dc          *fyne.Container // the Discord voice channel banner
+	dcAvatars   *fyne.Container
+	dcTitle     *widget.Label
+	dcSub       *widget.Label
+	dcPrimary   *widget.Button
+	dcSecondary *widget.Button
+	dcPriAct    func()
+	dcSecAct    func()
+	recent      *recentSection
+	server      *serverPicker // bottom right, once the user added a server
+}
+
+func resDisplay(res string) string {
+	if res == "2160p" {
+		return "4K"
+	}
+	if res == "" {
+		return "720p"
+	}
+	return res
 }
 
 func newLobby(u *UI) *lobbyView {
 	v := &lobbyView{u: u, who: widget.NewLabel(""), notes: newNotices(u)}
 	v.who.TextStyle.Bold = true
-	v.pw = widget.NewEntry()
-	v.pw.SetPlaceHolder(i18n.L("Password"))
-	v.pw.Hide()
-	v.needPw = widget.NewCheck(i18n.L("Require a password"), func(on bool) {
-		if on {
-			v.pw.Show()
-		} else {
-			v.pw.Hide()
-		}
+	var chrome *fyne.Container
+	v.gear, v.help, chrome = u.newChromeButtons()
+
+	v.tileScreen = newSourceTile(screenWhiteRes, screenAccentRes, i18n.L("Entire screen"), true, func() {
+		u.do(func() error { return u.a.SetSource("primary") })
 	})
-	v.e2ee = widget.NewCheck("", nil)
-	v.e2ee.SetChecked(true)
-	golive := func(pick bool) func() {
-		return func() {
-			pw := ""
-			if v.needPw.Checked {
-				pw = strings.TrimSpace(v.pw.Text)
-			}
-			u.goLive(pw, v.e2ee.Checked, pick)
+	v.tileWindow = newSourceTile(windowWhiteRes, windowAccentRes, i18n.L("A window"), false, u.sourceDialog)
+
+	v.presets = newPresetBar(u.applyPreset, u.removePreset, func() { u.presetDialog(u.applyPreset) })
+	v.chipAudio = newChip(soundOffRes, "", u.showShareSheet)
+	v.chipSource = newChip(nil, "", func() { u.openShareSheetAt(true, false) }) // Advanced has these sources
+	v.chipSource.Hide()
+	v.chipSec = newChip(lockClosedRes, "", u.showShareSheet)
+	v.chipSec.Hide()
+	v.noWinAudio = caption(i18n.L("This window's app audio isn't available."))
+	v.noWinAudio.Hide()
+	v.chipsBox = container.New(&flowWrapLayout{hGap: 8, vGap: 6},
+		v.chipSource, v.chipAudio, v.chipSec)
+
+	v.live = widget.NewButtonWithIcon(i18n.L("Go live and copy link"), theme.MediaRecordIcon(), func() {
+		sh := normalizeShareState(u.st)
+		pw := ""
+		if sh.RequirePassword {
+			pw = strings.TrimSpace(sh.RoomPassword)
 		}
-	}
-	v.live = widget.NewButtonWithIcon(i18n.L("Go live: main monitor"), theme.MediaRecordIcon(), golive(false))
+		u.goLive(pw, sh.E2EE, false)
+	})
 	v.live.Importance = widget.HighImportance
-	v.liveWin = widget.NewButton(i18n.L("Share a window instead..."), golive(true))
-	v.liveWin.Importance = widget.LowImportance
 
 	v.clipJoin = widget.NewButtonWithIcon("", theme.LoginIcon(), func() {
 		l := v.clipLink
@@ -149,49 +178,88 @@ func newLobby(u *UI) *lobbyView {
 	v.clipJoin.Importance = widget.HighImportance
 	v.clipJoin.Hide()
 	v.link = widget.NewEntry()
-	v.link.SetPlaceHolder(i18n.L("Paste a share link"))
+	v.link.SetPlaceHolder(i18n.L("Share link or room code (e.g. K7PQ-2M4X)"))
 	v.join = widget.NewButtonWithIcon(i18n.L("Watch"), theme.VisibilityIcon(), func() {
-		l := strings.TrimSpace(v.link.Text)
-		u.busyDo(v.join, func() error { return u.a.JoinLink(ctx(), l) })
+		v.joinInput(u)
 	})
 	v.link.OnSubmitted = func(string) { v.join.OnTapped() }
 
-	servers := widget.NewButton(i18n.L("Servers..."), u.serversDialog)
-	servers.Importance = widget.LowImportance
-	e2ee := checkText(v.e2ee, i18n.L("Encrypt end to end (everyone needs build 72 or newer)"))
-	opts := widget.NewAccordion(widget.NewAccordionItem(i18n.L("Options"), container.NewVBox(v.needPw, v.pw, e2ee, container.NewHBox(servers))))
-	// The cards' subtitles in wrapping labels: Card's own don't wrap, and
-	// translations are longer.
-	start := widget.NewCard(i18n.L("Share your screen"), "",
-		container.NewVBox(label(i18n.L("Starts a session, shares your screen and copies the link to send.")), container.NewHBox(v.live), container.NewHBox(v.liveWin), opts))
-	watch := widget.NewCard(i18n.L("Watch someone"), "",
-		container.NewVBox(label(i18n.L("Click a share link in Discord, or paste it here.")), v.clipJoin, container.NewBorder(nil, nil, nil, v.join, v.link)))
+	tilesGrid := container.NewGridWithColumns(2, v.tileScreen, v.tileWindow)
+	start := newCard(i18n.L("Share your screen"),
+		container.NewVBox(
+			tilesGrid,
+			v.presets.root,
+			v.chipsBox,
+			v.noWinAudio,
+			v.live,
+		))
+	watch := newCard(i18n.L("Watch someone"),
+		container.NewVBox(
+			label(i18n.L("Paste a share link or enter a room code.")),
+			v.clipJoin,
+			container.NewBorder(nil, nil, nil, v.join, v.link),
+		))
 	change := widget.NewButton(i18n.L("Change name..."), u.nameDialog)
-	head := container.NewHBox(v.who, change)
-	v.dcText = label("")
-	v.dcText.TextStyle.Bold = true
-	v.dcBtn = widget.NewButtonWithIcon("", theme.MediaRecordIcon(), func() {
-		if v.dcAct != nil {
-			v.dcAct()
+	head := container.NewBorder(nil, nil, container.NewHBox(v.who, change), chrome)
+
+	v.dcAvatars = container.NewHBox()
+	v.dcAvatars.Hide()
+	v.dcTitle = label("")
+	v.dcTitle.TextStyle.Bold = true
+	v.dcSub = caption("")
+	v.dcSub.Hide()
+	v.dcPrimary = widget.NewButtonWithIcon("", theme.LoginIcon(), func() {
+		if v.dcPriAct != nil {
+			v.dcPriAct()
 		}
 	})
-	v.dcBtn.Importance = widget.HighImportance
-	v.dc = container.NewVBox(widget.NewCard("", "", container.NewBorder(nil, nil, nil, v.dcBtn, v.dcText)))
+	v.dcPrimary.Importance = widget.HighImportance
+	v.dcSecondary = widget.NewButtonWithIcon("", theme.MediaRecordIcon(), func() {
+		if v.dcSecAct != nil {
+			v.dcSecAct()
+		}
+	})
+	v.dcSecondary.Hide()
+	dcLeft := container.NewBorder(nil, nil, v.dcAvatars, nil, container.NewVBox(v.dcTitle, v.dcSub))
+	dcBtns := container.NewHBox(v.dcPrimary, v.dcSecondary)
+	v.dc = container.NewVBox(newCard("", container.NewBorder(nil, nil, nil, dcBtns, dcLeft)))
 	v.dc.Hide()
+
+	v.recent = newRecentSection(u)
 	v.server = newServerPicker(u)
-	v.root = container.NewPadded(container.NewBorder(nil, v.server.box, nil, nil,
-		container.NewVBox(head, v.notes.box, v.dc, container.NewGridWithColumns(2, start, watch))))
+	bodyScroll := container.NewVScroll(container.NewVBox(
+		v.dc,
+		container.NewGridWithColumns(2, start, watch),
+		v.recent.root,
+	))
+	top := container.NewVBox(head, v.notes.box)
+	v.root = container.NewPadded(container.NewBorder(top, v.server.box, nil, nil, bodyScroll))
 	v.checkClipboard(u)
 	return v
 }
 
-// checkText is c with text that wraps (a Check's own doesn't); tapping the
-// text toggles it too.
-func checkText(c *widget.Check, text string) fyne.CanvasObject {
-	l := &tapLabel{tap: func() { c.SetChecked(!c.Checked) }}
-	l.Text, l.Wrapping = text, fyne.TextWrapWord
-	l.ExtendBaseWidget(l)
-	return container.NewBorder(nil, nil, c, nil, l)
+func (v *lobbyView) joinInput(u *UI) {
+	raw := strings.TrimSpace(v.link.Text)
+	v.join.Disable()
+	u.bg.Add(1)
+	go func() {
+		err := u.a.JoinLink(ctx(), raw)
+		u.laterDone(func() {
+			v.join.Enable()
+			if err == nil {
+				return
+			}
+			if !strings.Contains(raw, "#") && err.Error() == "wrong password for that room" {
+				u.passwordDialog(func(pw string) {
+					u.busyDo(v.join, func() error {
+						return u.a.JoinLink(ctx(), raw+"#"+url.PathEscape(pw))
+					})
+				})
+				return
+			}
+			u.showErr(err)
+		})
+	}()
 }
 
 // tapLabel is a label that runs tap when tapped.
@@ -218,56 +286,131 @@ func (v *lobbyView) checkClipboard(u *UI) {
 
 func (v *lobbyView) update(st app.UIState) {
 	v.who.SetText(i18n.L("You are {{.Name}}", i18n.D{"Name": displayName(st.Name, st.Tag)}))
+	v.gear.SetDot(updateWaiting(st))
 	v.notes.set(v.u, st)
 	v.server.update(st)
+	v.updateShareCard(st)
 	v.updateDiscord(v.u, st.Discord)
-	if st.Update != nil && st.Update.Mandatory {
+	v.recent.update(st)
+	mandatory := st.Update != nil && st.Update.Mandatory
+	v.tileScreen.SetDisabled(mandatory)
+	v.tileWindow.SetDisabled(mandatory)
+	if mandatory {
 		v.live.Disable()
-		v.liveWin.Disable()
 		v.join.Disable()
 		v.clipJoin.Disable()
+		v.dcPrimary.Disable()
+		v.dcSecondary.Disable()
+	} else {
+		v.live.Enable()
+		v.join.Enable()
+		v.clipJoin.Enable()
 	}
 }
 
-// callView: the room on top, the people below.
+func (v *lobbyView) updateShareCard(st app.UIState) {
+	sh := normalizeShareState(st)
+	isWindowPick := strings.HasPrefix(sh.Source, "window:") || strings.HasPrefix(sh.Source, "monitor:")
+	v.tileScreen.SetActive(sh.Source == "primary")
+	v.tileWindow.SetActive(isWindowPick)
+	if isWindowPick {
+		v.tileWindow.SetSubtitle(sh.SourceName) // the title, never the handle
+	} else {
+		v.tileWindow.SetSubtitle("")
+	}
+
+	v.presets.update(sh)
+
+	if sh.NoWindowAudio && (sh.Audio.Mode == "" || sh.Audio.Mode == "none") {
+		v.noWinAudio.Show()
+	} else {
+		v.noWinAudio.Hide()
+	}
+	if sh.Audio.Mode == "" || sh.Audio.Mode == "none" {
+		v.chipAudio.SetContent(soundOffRes, i18n.L("No audio"), colButton, colCardBorder, colTextDim)
+	} else {
+		v.chipAudio.SetContent(soundOnRes, i18n.L("With sound"), colButton, colCardBorder, colText)
+	}
+
+	switch sh.Source {
+	case "screen":
+		v.chipSource.SetContent(screenAccentRes, i18n.L("All screens combined"), colAccentFill, colAccent, colText)
+		v.chipSource.Show()
+	case "test":
+		v.chipSource.SetContent(nil, i18n.L("Test pattern"), colAccentFill, colAccent, colText)
+		v.chipSource.Show()
+	case "none":
+		v.chipSource.SetContent(nil, i18n.L("Nothing (watch only)"), colAccentFill, colAccent, colText)
+		v.chipSource.Show()
+	default:
+		v.chipSource.Hide()
+	}
+
+	switch {
+	case !sh.E2EE:
+		v.chipSec.SetContent(lockOpenRes, i18n.L("Unencrypted"), colWarningBg, colWarning, colWarning)
+		v.chipSec.Show()
+	case sh.RequirePassword:
+		v.chipSec.SetContent(lockClosedRes, i18n.L("Password"), colSuccessBg, colSuccess, colText)
+		v.chipSec.Show()
+	default:
+		v.chipSec.Hide()
+	}
+	v.chipsBox.Refresh()
+}
+
+// callView: the room header and share controls on top, the People list (plus
+// optional person side panel) below.
 type callView struct {
-	u       *UI
-	root    fyne.CanvasObject
-	notes   *notices
-	room    *widget.Label
-	enc     *widget.Label
-	safety  *widget.Label
-	warn    *widget.Label   // our share or the mesh needs attention
-	closed  *fyne.Container // the user closed a video window: show it again
-	relay   *widget.Label
-	alone   *widget.Label
-	rows    *fyne.Container
-	people  map[string]*peerRow
-	cols    *columns // the People table's, shared by its header and rows
-	order   string
-	share   *widget.Button
-	pick    *widget.Button
-	sharing bool
+	u          *UI
+	root       fyne.CanvasObject
+	notes      *notices
+	room       *widget.Label
+	lockBadge  *chipButton
+	gear       *iconDotButton
+	help       *iconDotButton
+	warn       *widget.Label
+	share      *widget.Button
+	pick       *widget.Button
+	opts       *widget.Button
+	sharing    bool
+	self       *selfRow
+	alone      *widget.Label
+	rows       *fyne.Container
+	people     map[string]*peerRow
+	order      string
+	selectedID string
+	panel      *personPanel
+	split      *fyne.Container
+	relay      *widget.Label
+	relaySw    *toggleSwitch
+	relayLbl   *tapLabel
+	relayOn    bool
 }
 
 func newCall(u *UI) *callView {
-	v := &callView{u: u, notes: newNotices(u), people: map[string]*peerRow{}, cols: newColumns(1.4, 1.1, 1, 1.6, 0.9, 1.3, 0.5)}
+	v := &callView{u: u, notes: newNotices(u), people: map[string]*peerRow{}}
 	v.room = widget.NewLabel("")
 	v.room.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
 	v.room.SizeName = theme.SizeNameHeadingText
-	v.enc = widget.NewLabel("")
-	v.safety = label("")
+
+	v.lockBadge = newChip(lockClosedRes, "", func() {
+		if s := u.st.Session; s != nil && s.Encrypted {
+			u.safetyDialog()
+		}
+	})
+
+	var chrome *fyne.Container
+	v.gear, v.help, chrome = u.newChromeButtons()
+	copyBtn := widget.NewButtonWithIcon(i18n.L("Copy link"), theme.ContentCopyIcon(), u.copyLink)
+	leave := widget.NewButtonWithIcon(i18n.L("Leave"), theme.LogoutIcon(), u.leave)
+	header := container.NewBorder(nil, nil,
+		container.NewHBox(v.room, v.lockBadge),
+		container.NewHBox(copyBtn, leave, chrome))
+
 	v.warn = label("")
 	v.warn.Importance = widget.WarningImportance
-	v.relay = caption("")
-	closedText := label(i18n.L("You closed a video window. Show video reopens all of them."))
-	closedText.Importance = widget.WarningImportance
-	// Border, not HBox: a wrapping label in an HBox gets no width and the
-	// button covers it.
-	v.closed = container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon(i18n.L("Show video"), theme.VisibilityIcon(), u.showVideo), closedText)
-	v.closed.Hide()
-	v.alone = label(i18n.L("Nobody else yet. Send them the share link (Room > Copy share link)."))
-	copyBtn := widget.NewButtonWithIcon(i18n.L("Copy share link"), theme.ContentCopyIcon(), u.copyLink)
+
 	v.share = widget.NewButtonWithIcon(i18n.L("Go live: main monitor"), theme.MediaRecordIcon(), func() {
 		if v.sharing {
 			u.do(func() error { return u.a.SetSource("none") })
@@ -276,37 +419,89 @@ func newCall(u *UI) *callView {
 		}
 	})
 	v.pick = widget.NewButton(i18n.L("Share a window..."), u.sourceDialog)
-	leave := widget.NewButtonWithIcon(i18n.L("Leave"), theme.LogoutIcon(), u.leave)
+	v.opts = widget.NewButtonWithIcon(i18n.L("Share options..."), theme.SettingsIcon(), u.showShareSheet)
+	shareBar := newCard("", container.NewHBox(v.share, v.pick, v.opts))
 
-	roomLine := container.NewBorder(nil, nil,
-		container.NewHBox(widget.NewLabel(i18n.L("Room")), v.room),
-		container.NewHBox(v.share, v.pick, copyBtn, leave))
-	// The encryption line under the room: translations make the buttons
-	// above wide.
-	header := container.NewVBox(roomLine, container.NewBorder(nil, nil, v.enc, nil, v.safety))
-
+	v.self = newSelfRow(u)
+	v.alone = caption(i18n.L("Nobody else yet. Copy the link above to invite friends."))
 	v.rows = container.NewVBox()
-	head := v.cols.row(bold(i18n.L("Name")), bold(i18n.L("Status")), bold(i18n.L("You send")), bold(i18n.L("Connection")), bold(i18n.L("Their video")), bold(i18n.L("Volume")), widget.NewLabel(""))
-	people := widget.NewCard(i18n.L("People"), "", container.NewBorder(container.NewVBox(head, widget.NewSeparator()), v.relay, nil, nil,
-		container.NewVScroll(container.NewVBox(v.alone, v.rows))))
-	v.root = container.NewPadded(container.NewBorder(container.NewVBox(v.notes.box, header, v.warn, v.closed), nil, nil, nil, people))
+
+	v.relay = caption("")
+	toggleRelay := func(wantOn bool) {
+		u.do(func() error { return u.a.Volunteer(wantOn) })
+	}
+	v.relaySw = newToggleSwitch(toggleRelay)
+	v.relayLbl = &tapLabel{tap: func() {
+		if !v.relaySw.disabled {
+			want := !v.relayOn
+			v.relaySw.SetChecked(want)
+			toggleRelay(want)
+		}
+	}}
+	v.relayLbl.Text = i18n.L("Volunteer as relay")
+	v.relayLbl.Wrapping = fyne.TextWrapWord
+	v.relayLbl.ExtendBaseWidget(v.relayLbl)
+
+	aboutRelays := widget.NewButton(i18n.L("About relays"), u.relayDialog)
+	aboutRelays.Importance = widget.LowImportance
+	relayFooter := container.NewVBox(
+		widget.NewSeparator(),
+		v.relay,
+		container.NewBorder(nil, nil, container.NewHBox(v.relaySw, v.relayLbl), aboutRelays),
+	)
+
+	peopleList := container.NewVScroll(container.NewVBox(v.self.root, widget.NewSeparator(), v.alone, v.rows))
+	peopleCard := newCard(i18n.L("People"), container.NewBorder(nil, relayFooter, nil, nil, peopleList))
+
+	v.panel = newPersonPanel(u, func() {
+		v.selectPeer("")
+	})
+	v.panel.root.Hide()
+	v.split = container.New(sideSplitLayout{}, peopleCard, v.panel.root)
+
+	top := container.NewVBox(v.notes.box, header, v.warn, shareBar)
+	v.root = container.NewPadded(container.NewBorder(top, nil, nil, nil, v.split))
 	return v
 }
 
-// bold is a column header: it wraps, so translations don't widen the table.
+func (v *callView) selectPeer(id string) {
+	if v.selectedID == id {
+		v.selectedID = ""
+	} else {
+		v.selectedID = id
+	}
+	for pid, r := range v.people {
+		r.setSelected(pid == v.selectedID)
+	}
+	if v.selectedID == "" || v.u.st.Session == nil {
+		v.panel.root.Hide()
+		v.split.Refresh()
+		return
+	}
+	s := v.u.st.Session
+	for _, m := range s.Members {
+		if m.ID == v.selectedID {
+			v.panel.update(m, s.IsOwner)
+			v.panel.root.Show()
+			v.split.Refresh()
+			return
+		}
+	}
+	v.selectedID = ""
+	v.panel.root.Hide()
+	v.split.Refresh()
+}
+
+// bold is a section header that wraps so translations don't widen the panel.
 func bold(t string) *widget.Label {
 	l := label(t)
 	l.TextStyle.Bold = true
 	return l
 }
 
-// row lays cells out in the table's columns.
-func (c *columns) row(cells ...fyne.CanvasObject) *fyne.Container {
-	return container.New(c, cells...)
-}
-
 func (v *callView) update(st app.UIState) {
 	s := st.Session
+	v.gear.SetDot(updateWaiting(st))
 	v.notes.set(v.u, st)
 	v.room.SetText(s.Room)
 	v.sharing = s.Source != "" && s.Source != "none"
@@ -322,34 +517,27 @@ func (v *callView) update(st app.UIState) {
 		v.pick.SetText(i18n.L("Share a window..."))
 	}
 	v.share.Refresh()
+
 	if s.Encrypted {
-		v.enc.SetText(i18n.L("End-to-end encrypted"))
+		v.lockBadge.SetContent(lockClosedRes, i18n.L("End-to-end encrypted"), colSuccessBg, colSuccess, colSuccess)
 	} else {
-		v.enc.SetText(i18n.L("Not end-to-end encrypted"))
+		v.lockBadge.SetContent(lockOpenRes, i18n.L("Not end-to-end encrypted"), colWarningBg, colWarning, colWarning)
 	}
-	connected := 0
-	for _, m := range s.Members {
-		if m.State == "connected" {
-			connected++
-		}
-	}
-	if connected > 0 && s.Safety != "" {
-		v.safety.SetText(i18n.L("Safety code {{.Code}} (everyone should see the same; Room > Safety code explains)", i18n.D{"Code": s.Safety}))
-		v.safety.Show()
-	} else {
-		v.safety.Hide()
-	}
+
 	var warns []string
 	if s.Reconnecting {
 		warns = append(warns, i18n.L("Reconnecting to the server... the call continues meanwhile."))
 	}
 	if s.SourceNote != "" {
 		warns = append(warns, i18n.Msg(s.SourceNote))
-	} else if s.Source == "" || s.Source == "none" {
+	} else if !v.sharing {
 		warns = append(warns, i18n.L("You're watching. Press Go live to share your main monitor."))
 	}
 	if s.ResolutionNote != "" {
 		warns = append(warns, i18n.Msg(s.ResolutionNote))
+	}
+	if s.ShareNotice != "" {
+		warns = append(warns, i18n.Msg(s.ShareNotice))
 	}
 	var bad []string
 	for _, m := range s.Members {
@@ -362,7 +550,7 @@ func (v *callView) update(st app.UIState) {
 	}
 	people := len(s.Members) + 1
 	if len(s.Relay) == 0 && people > s.MeshComfortPeers && s.MeshComfortPeers > 0 {
-		warns = append(warns, i18n.N("{{.Count}} people in a full mesh: everyone who shares uploads their screen to each of the others. Expect lower quality, or have someone with a fast upload volunteer as relay (People menu).", people))
+		warns = append(warns, i18n.N("{{.Count}} people in a full mesh: everyone who shares uploads their screen to each of the others. Expect lower quality, or have someone with a fast upload volunteer as relay below.", people))
 	}
 	if s.RelayRefused {
 		warns = append(warns, i18n.L("Relay mode needs everyone in the room on Bellion Share build 31 or newer."))
@@ -373,39 +561,75 @@ func (v *callView) update(st app.UIState) {
 	} else {
 		v.warn.Hide()
 	}
-	if anyClosed(s) {
-		v.closed.Show()
-	} else {
-		v.closed.Hide()
-	}
-	v.relay.SetText(relayText(s))
 
-	// Rows: rebuild only when people come or go, so a slider being
-	// dragged survives the stats updates.
+	v.self.update(st, s)
+
+	// Relay footer state.
+	v.relay.SetText(relayText(s))
+	meRelay, meWaiting := false, false
+	for _, e := range s.Relay {
+		meRelay = meRelay || e.Me
+	}
+	for _, e := range s.RelayWaiting {
+		meWaiting = meWaiting || e.Me
+	}
+	v.relayOn = meRelay || meWaiting
+	v.relaySw.SetChecked(v.relayOn)
+	switch {
+	case meRelay:
+		v.relayLbl.SetText(i18n.L("Stop relaying"))
+	case meWaiting:
+		v.relayLbl.SetText(i18n.L("Leave the relay queue"))
+	default:
+		v.relayLbl.SetText(i18n.L("Volunteer as relay"))
+	}
+
+	// Rows: rebuild only when people come or go.
 	var ids []string
 	for _, m := range s.Members {
 		ids = append(ids, m.ID)
 	}
 	if order := strings.Join(ids, ","); order != v.order {
 		v.order = order
-		v.cols.reset()
 		next := map[string]*peerRow{}
 		var objs []fyne.CanvasObject
 		for _, m := range s.Members {
-			r := v.people[m.ID]
+			id := m.ID
+			r := v.people[id]
 			if r == nil {
-				r = newPeerRow(v.u, m.ID, v.cols)
+				r = newPeerRow(v.u, id, func() { v.selectPeer(id) })
 			}
-			next[m.ID] = r
-			objs = append(objs, r.root, widget.NewSeparator())
+			r.setSelected(id == v.selectedID)
+			next[id] = r
+			objs = append(objs, r.root)
 		}
 		v.people = next
 		v.rows.Objects = objs
 		v.rows.Refresh()
 	}
-	for _, m := range s.Members {
-		v.people[m.ID].update(m, s.IsOwner)
+
+	var selectedMember *session.Member
+	for i := range s.Members {
+		m := s.Members[i]
+		v.people[m.ID].update(m)
+		if m.ID == v.selectedID {
+			selectedMember = &m
+		}
 	}
+	if v.selectedID != "" {
+		if selectedMember != nil {
+			v.panel.update(*selectedMember, s.IsOwner)
+			if !v.panel.root.Visible() {
+				v.panel.root.Show()
+				v.split.Refresh()
+			}
+		} else {
+			v.selectedID = ""
+			v.panel.root.Hide()
+			v.split.Refresh()
+		}
+	}
+
 	if len(s.Members) == 0 {
 		v.alone.Show()
 	} else {
@@ -413,25 +637,12 @@ func (v *callView) update(st app.UIState) {
 	}
 }
 
-// anyClosed reports whether the user closed a video window: the grid, a
-// person's or our preview.
-func anyClosed(s *session.State) bool {
-	if s == nil {
-		return false
-	}
-	closed := s.GridClosed || s.PreviewClosed
-	for _, m := range s.Members {
-		closed = closed || m.WindowClosed
-	}
-	return closed
-}
-
 func relayText(s *session.State) string {
 	if s.RelayPaused {
 		return i18n.N("Relay mode is paused: someone runs an older Bellion Share whose relay mode serves up to {{.Count}} people. Everyone sends to everyone until the room is smaller or everyone has updated.", s.RelayMaxPeers)
 	}
 	if len(s.Relay) == 0 {
-		return i18n.L("Everyone sends their video to everyone (full mesh). People > Volunteer as relay if you have a fast upload.")
+		return i18n.L("Everyone sends their video to everyone (full mesh).")
 	}
 	var parts []string
 	for _, e := range s.Relay {
@@ -451,143 +662,197 @@ func relayText(s *session.State) string {
 	return i18n.L("Relays: {{.List}}.", i18n.D{"List": strings.Join(parts, "; ")})
 }
 
-// peerRow is one person in the People table.
-type peerRow struct {
-	root     *fyne.Container
-	id       string
-	name     *widget.Label
-	client   *widget.Label
-	notice   *widget.Label
-	status   *widget.Label
-	send     *widget.Label
-	link     *widget.Label
-	linkSub  *widget.Label
-	quality  *widget.Select
-	vol      *widget.Slider
-	mute     *widget.Check
-	more     *widget.Button
-	show     *widget.Button // their window is closed: open it again
-	m        session.Member
-	owner    bool
-	setting  bool // update() is setting widgets: don't send their callbacks
-	dragging bool
+// selfRow is our own row at the top of the People list, with the preview eye.
+type selfRow struct {
+	root   fyne.CanvasObject
+	avatar *avatarCircle
+	ident  *nameTag
+	status *widget.Label
+	eye    *eyeToggle
 }
 
-var qualityValues = []string{"auto", "low", "off"}
-
-// qualityLabels name qualityValues.
-func qualityLabels() []string {
-	return []string{i18n.L("Best"), i18n.L("Low"), i18n.L("Off (audio only)")}
-}
-
-func newPeerRow(u *UI, id string, cols *columns) *peerRow {
-	// Labels wrap: a long translation makes a row taller, not the window
-	// wider.
-	r := &peerRow{id: id, name: label(""), client: label(""), notice: label(""),
-		status: label(""), send: label(""), link: label(""), linkSub: caption("")}
-	r.name.TextStyle.Bold = true
-	r.client.SizeName = theme.SizeNameCaptionText
-	r.notice.Importance = widget.WarningImportance
-	r.notice.SizeName = theme.SizeNameCaptionText
-	set := func() {
-		if r.setting {
-			return
-		}
-		q := r.m.Quality
-		for i, l := range r.quality.Options {
-			if l == r.quality.Selected {
-				q = qualityValues[i]
-			}
-		}
-		vol, muted := r.vol.Value/100, r.mute.Checked
-		u.do(func() error { return u.a.SetPeer(id, q, vol, muted) })
+func newSelfRow(u *UI) *selfRow {
+	r := &selfRow{
+		avatar: newAvatar("?", 34),
+		ident:  newNameTag(),
+		status: caption(""),
+		eye: newEyeToggle(func() {
+			u.do(func() error { return u.a.ToggleWatch(feeds.Self) })
+		}),
 	}
-	r.quality = widget.NewSelect(qualityLabels(), func(string) { set() })
-	r.quality.PlaceHolder = "-" // its width is the select's least: longer choices get "..."
-	r.vol = widget.NewSlider(0, 200)
-	r.vol.Step = 5
-	r.vol.OnChanged = func(float64) { r.dragging = !r.setting }
-	r.vol.OnChangeEnded = func(float64) { r.dragging = false; set() }
-	r.mute = widget.NewCheck(i18n.L("Mute"), func(bool) { set() })
-	r.more = widget.NewButtonWithIcon("", theme.MoreVerticalIcon(), func() {
-		menu := fyne.NewMenu("", u.personItems(r.m, r.owner)...)
-		c := fyne.CurrentApp().Driver().CanvasForObject(r.more)
-		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(r.more)
-		widget.ShowPopUpMenuAtPosition(menu, c, pos.Add(fyne.NewPos(0, r.more.Size().Height)))
-	})
-	r.show = widget.NewButtonWithIcon(i18n.L("Show video"), theme.VisibilityIcon(), func() { u.do(func() error { return u.a.ShowWindow(id) }) })
-	r.show.Hide()
-	r.root = cols.row(container.NewVBox(r.name, r.client, r.notice, container.NewHBox(r.show)), r.status, r.send, container.NewVBox(r.link, r.linkSub),
-		container.NewVBox(layout.NewSpacer(), r.quality, layout.NewSpacer()), container.NewBorder(nil, nil, nil, r.mute, r.vol), container.NewCenter(r.more))
+	info := container.NewVBox(r.ident, r.status)
+	row := container.NewBorder(nil, nil, r.avatar, r.eye, container.New(&insetLayout{pad: 4}, info))
+	r.root = container.New(&insetLayout{pad: 4}, row)
 	return r
 }
 
-func (r *peerRow) update(m session.Member, owner bool) {
-	r.m, r.owner = m, owner
-	r.setting = true
-	defer func() { r.setting = false }()
-	n := displayName(m.Name, m.Tag)
-	if m.Owner {
-		n += "  " + i18n.L("(owner)")
+func (r *selfRow) update(st app.UIState, s *session.State) {
+	name, tag := st.Name, st.Tag
+	if s.Name != "" {
+		name = s.Name
 	}
-	r.name.SetText(n)
-	c := m.Client
-	if m.Recv > 0 {
+	if s.Tag != "" {
+		tag = s.Tag
+	}
+	r.avatar.SetName(name)
+	badge := i18n.L("(you)")
+	if s.IsOwner {
+		badge += " · " + i18n.L("(owner)")
+	}
+	r.ident.Set(name, tag, badge, true)
+	sharing := s.Source != "" && s.Source != "none"
+	if sharing {
+		res := s.Resolution
+		switch res {
+		case "":
+			res = "720p"
+		case "2160p":
+			res = "4K"
+		}
+		if s.SelfEye == feeds.EyeClosed {
+			r.status.SetText(i18n.L("Sharing {{.Resolution}} (preview hidden)", i18n.D{"Resolution": res}))
+		} else {
+			r.status.SetText(i18n.L("Sharing {{.Resolution}}", i18n.D{"Resolution": res}))
+		}
+		r.eye.SetEye(s.SelfEye)
+	} else {
+		r.status.SetText(i18n.L("Watching only"))
+		r.eye.SetEye(feeds.EyeGrey)
+	}
+}
+
+// peerRow is one remote person in the People list.
+type peerRow struct {
+	root     fyne.CanvasObject
+	id       string
+	bg       *canvas.Rectangle
+	avatar   *avatarCircle
+	ident    *nameTag
+	status   *widget.Label
+	eye      *eyeToggle
+	selected bool
+	hovered  bool
+}
+
+func newPeerRow(u *UI, id string, onSelect func()) *peerRow {
+	bg := canvas.NewRectangle(color.Transparent)
+	bg.CornerRadius = 10
+	r := &peerRow{
+		id:     id,
+		bg:     bg,
+		avatar: newAvatar("?", 34),
+		ident:  newNameTag(),
+		status: caption(""),
+		eye: newEyeToggle(func() {
+			u.do(func() error { return u.a.ToggleWatch(id) })
+		}),
+	}
+	mainBody := container.NewBorder(nil, nil, r.avatar, nil, container.New(&insetLayout{pad: 4}, container.NewVBox(r.ident, r.status)))
+	tap := newTapArea(mainBody, onSelect, func(hov bool) {
+		r.hovered = hov
+		r.refreshBg()
+	})
+	inner := container.NewBorder(nil, nil, nil, r.eye, tap)
+	r.root = container.NewStack(r.bg, container.New(&insetLayout{pad: 6}, inner))
+	return r
+}
+
+func (r *peerRow) setSelected(sel bool) {
+	if r.selected == sel {
+		return
+	}
+	r.selected = sel
+	r.refreshBg()
+}
+
+func (r *peerRow) refreshBg() {
+	switch {
+	case r.selected:
+		r.bg.FillColor = colAccentFill
+		r.bg.StrokeColor = colAccent
+		r.bg.StrokeWidth = 1.5
+	case r.hovered:
+		r.bg.FillColor = colRowHover
+		r.bg.StrokeColor = colCardBorder
+		r.bg.StrokeWidth = 1
+	default:
+		r.bg.FillColor = color.Transparent
+		r.bg.StrokeColor = color.Transparent
+		r.bg.StrokeWidth = 0
+	}
+	r.bg.Refresh()
+}
+
+func (r *peerRow) update(m session.Member) {
+	r.avatar.SetName(m.Name)
+	badge := ""
+	if m.Owner {
+		badge = i18n.L("(owner)")
+	}
+	r.ident.Set(m.Name, m.Tag, badge, false)
+	txt, imp := peerStatus(m)
+	r.status.SetText(txt)
+	r.status.Importance = imp
+	r.status.Refresh()
+	eye := m.Eye
+	if eye == "" {
+		switch {
+		case m.Sharing && m.Watching:
+			eye = feeds.EyeOpen
+		case m.Sharing:
+			eye = feeds.EyeClosed
+		default:
+			eye = feeds.EyeGrey
+		}
+	}
+	r.eye.SetEye(eye)
+}
+
+func peerStatus(m session.Member) (string, widget.Importance) {
+	switch m.State {
+	case "untrusted":
+		return upperFirst(stateText(m)), widget.DangerImportance
+	case "unreachable":
+		if m.Hint != "" {
+			return i18n.L("Can't connect: {{.Why}}", i18n.D{"Why": i18n.Msg(m.Hint)}), widget.DangerImportance
+		}
+		return upperFirst(stateText(m)), widget.DangerImportance
+	case "connected":
+	default:
+		return upperFirst(stateText(m)), widget.WarningImportance
+	}
+
+	word, imp := linkQuality(m)
+	var text string
+	switch {
+	case m.Notice != "":
+		text = i18n.Msg(m.Notice)
+		imp = widget.WarningImportance
+	case m.Sharing && (!m.Watching || m.Eye == feeds.EyeClosed):
+		text = i18n.L("{{.Quality}}, not watching", i18n.D{"Quality": word})
+	case m.Sharing && m.Recv > 0:
 		res := fmt.Sprintf("%dp", m.Recv)
 		if m.Recv == 2160 {
 			res = "4K"
 		}
-		c = i18n.L("{{.Client}}, you get {{.Resolution}}", i18n.D{"Client": c, "Resolution": res})
-	}
-	r.client.SetText(c)
-	var notes []string
-	if m.KeyChanged {
-		notes = append(notes, i18n.L("New device or key since you last saw this name."))
-	}
-	if m.Notice != "" {
-		notes = append(notes, i18n.Msg(m.Notice))
-	}
-	if m.Hint != "" {
-		notes = append(notes, i18n.Msg(m.Hint))
-	}
-	r.notice.SetText(strings.Join(notes, " "))
-	if len(notes) > 0 {
-		r.notice.Show()
-	} else {
-		r.notice.Hide()
-	}
-	if m.WindowClosed {
-		r.show.Show()
-	} else {
-		r.show.Hide()
-	}
-	r.status.SetText(stateText(m))
-	switch m.State {
-	case "connected":
-		r.status.Importance = widget.SuccessImportance
-	case "unreachable", "untrusted":
-		r.status.Importance = widget.DangerImportance
-	case "reconnecting", "connecting":
-		r.status.Importance = widget.WarningImportance
-	default:
-		r.status.Importance = widget.MediumImportance
-	}
-	r.status.Refresh()
-	r.send.SetText(sendText(m))
-	word, imp := linkQuality(m)
-	r.link.SetText(word)
-	r.link.Importance = imp
-	r.link.Refresh()
-	r.linkSub.SetText(linkText(m))
-	for i, v := range qualityValues {
-		if v == m.Quality && r.quality.Selected != r.quality.Options[i] {
-			r.quality.SetSelected(r.quality.Options[i])
+		if m.Loss >= 0.05 {
+			text = i18n.L("{{.Quality}}, {{.Resolution}}, dropping frames", i18n.D{"Quality": word, "Resolution": res})
+		} else {
+			text = i18n.L("{{.Quality}}, watching in {{.Resolution}}", i18n.D{"Quality": word, "Resolution": res})
 		}
+	case m.Sharing:
+		text = i18n.L("{{.Quality}}, starting stream", i18n.D{"Quality": word})
+	default:
+		text = word
 	}
-	if !r.dragging {
-		r.vol.SetValue(m.Volume * 100)
+	if m.Muted && m.Sharing && m.Watching {
+		text += " " + i18n.L("(muted)")
 	}
-	r.mute.SetChecked(m.Muted)
+	if m.KeyChanged {
+		text += " · " + i18n.L("New device or key since you last saw this name.")
+		imp = widget.WarningImportance
+	}
+	return text, imp
 }
 
 // caption is small secondary text that stays readable.
@@ -604,21 +869,25 @@ func linkQuality(m session.Member) (string, widget.Importance) {
 	}
 	switch {
 	case m.Loss >= 0.05 || m.RTTms >= 300:
-		return i18n.L("Poor"), widget.DangerImportance
+		return i18n.L("Unstable"), widget.DangerImportance
 	case m.Loss >= 0.01 || m.RTTms >= 150:
 		return i18n.L("Fair"), widget.WarningImportance
 	}
 	return i18n.L("Good"), widget.SuccessImportance
 }
 
-// updateDiscord shows one click to watch or go live in the user's Discord
-// voice channel.
+// updateDiscord shows the Discord voice channel banner: Join (without sharing)
+// and Share when nobody is sharing yet, or "NAME is sharing their screen" with
+// member avatars and Watch when someone is sharing.
 func (v *lobbyView) updateDiscord(u *UI, d *app.Discord) {
 	dc, ok := u.a.(discordBackend)
 	if ok && d != nil && d.Status == "off" {
 		v.dc.Show()
-		v.dcText.SetText(i18n.L("Discord isn't running on this computer (or not found). Start it to watch or go live in your voice channel."))
-		v.dcBtn.Hide()
+		v.dcAvatars.Hide()
+		v.dcTitle.SetText(i18n.L("Discord isn't running on this computer (or not found). Start it to watch or go live in your voice channel."))
+		v.dcSub.Hide()
+		v.dcPrimary.Hide()
+		v.dcSecondary.Hide()
 		if v.live.Importance != widget.HighImportance {
 			v.live.Importance = widget.HighImportance
 			v.live.Refresh()
@@ -633,67 +902,150 @@ func (v *lobbyView) updateDiscord(u *UI, d *app.Discord) {
 		}
 		return
 	}
+
 	v.dc.Show()
-	v.dcBtn.Show()
-	v.dcBtn.Enable()
-	// One blue button at a time: the Discord action leads when it's the
-	// likely one, the lobby's Go live otherwise.
+	v.dcSub.Hide()
+	v.dcPrimary.Show()
+	v.dcPrimary.Enable()
+	v.dcSecondary.Hide()
+	v.dcSecondary.Enable()
+	v.syncDiscordAvatars(nil)
+
 	lead := d.Status == "ready" && d.ChannelID != ""
-	v.dcBtn.Importance = widget.MediumImportance
+	v.dcPrimary.Importance = widget.MediumImportance
+	v.dcSecondary.Importance = widget.MediumImportance
 	v.live.Importance = widget.HighImportance
 	if lead {
-		v.dcBtn.Importance = widget.HighImportance
+		v.dcPrimary.Importance = widget.HighImportance
 		v.live.Importance = widget.MediumImportance
 	}
-	defer v.dcBtn.Refresh()
+	defer v.dcPrimary.Refresh()
+	defer v.dcSecondary.Refresh()
 	defer v.live.Refresh()
+
 	where := "#" + d.Channel
 	if d.Guild != "" {
 		where += " (" + d.Guild + ")"
 	}
+
+	someoneSharing := len(d.Sharers) > 0 || (d.Room != "" && len(d.Sharers) == 0 && len(d.Members) == 0)
+
 	switch {
 	case d.Status == "login":
-		t := i18n.L("Use your Discord voice channel: watch or go live there in one click.")
+		v.dcTitle.SetText(i18n.L("Use your Discord voice channel: watch or go live there in one click."))
 		if d.Error != "" {
-			t += "\n" + i18n.L("Last try: {{.Err}}", i18n.D{"Err": i18n.Msg(d.Error)})
+			v.dcSub.SetText(i18n.L("Last try: {{.Err}}", i18n.D{"Err": i18n.Msg(d.Error)}))
+			v.dcSub.Show()
 		}
-		v.dcText.SetText(t)
-		v.dcBtn.SetText(i18n.L("Connect Discord"))
-		v.dcBtn.SetIcon(theme.LoginIcon())
-		v.dcAct = dc.DiscordLogin
+		v.dcPrimary.SetText(i18n.L("Connect Discord"))
+		v.dcPrimary.SetIcon(theme.LoginIcon())
+		v.dcPriAct = dc.DiscordLogin
 	case d.Status == "waiting":
-		v.dcText.SetText(i18n.L("Approve Bellion in the Discord window that just opened."))
-		v.dcBtn.Hide()
+		v.dcTitle.SetText(i18n.L("Approve Bellion in the Discord window that just opened."))
+		v.dcPrimary.Hide()
 	case d.ChannelID == "":
-		v.dcText.SetText(i18n.L("Join a Discord voice channel to watch or go live there in one click."))
-		v.dcBtn.Hide()
-	case d.Room != "":
-		v.dcText.SetText(i18n.N("Someone is sharing in {{.Where}} ({{.Count}} people).", d.People, i18n.D{"Where": where}))
-		v.dcBtn.SetText(i18n.L("Watch"))
-		v.dcBtn.SetIcon(theme.VisibilityIcon())
+		v.dcTitle.SetText(i18n.L("Join a Discord voice channel to watch or go live there in one click."))
+		v.dcPrimary.Hide()
+	case someoneSharing:
+		v.syncDiscordAvatars(d.Members)
+		switch {
+		case len(d.Sharers) == 1:
+			v.dcTitle.SetText(i18n.L("{{.Name}} is sharing their screen", i18n.D{"Name": d.Sharers[0]}))
+			v.dcSub.SetText(where)
+			v.dcSub.Show()
+		case len(d.Sharers) > 1:
+			v.dcTitle.SetText(i18n.N("{{.Name}} and {{.Count}} others are sharing", len(d.Sharers)-1, i18n.D{"Name": d.Sharers[0]}))
+			v.dcSub.SetText(where)
+			v.dcSub.Show()
+		default:
+			v.dcTitle.SetText(i18n.N("Someone is sharing in {{.Where}} ({{.Count}} people).", d.People, i18n.D{"Where": where}))
+		}
+		v.dcPrimary.SetText(i18n.L("Watch"))
+		v.dcPrimary.SetIcon(theme.VisibilityIcon())
 		open := d.Open
-		v.dcAct = func() {
+		v.dcPriAct = func() {
 			if open {
-				u.busyDo(v.dcBtn, func() error { return dc.JoinChannel(ctx(), "") })
+				u.busyDo(v.dcPrimary, func() error { return dc.JoinChannel(ctx(), "") })
 				return
 			}
-			u.passwordDialog(func(pw string) { u.busyDo(v.dcBtn, func() error { return dc.JoinChannel(ctx(), pw) }) })
+			u.passwordDialog(func(pw string) {
+				u.busyDo(v.dcPrimary, func() error { return dc.JoinChannel(ctx(), pw) })
+			})
 		}
 	default:
-		v.dcText.SetText(i18n.L("You're in {{.Where}} on Discord.", i18n.D{"Where": where}))
-		v.dcBtn.SetText(i18n.L("Go live in #{{.Channel}}", i18n.D{"Channel": d.Channel}))
-		v.dcBtn.SetIcon(theme.MediaRecordIcon())
-		v.dcAct = func() {
-			pw, e := "", v.e2ee.Checked
-			if v.needPw.Checked {
-				pw = strings.TrimSpace(v.pw.Text)
+		v.syncDiscordAvatars(d.Members)
+		v.dcTitle.SetText(i18n.L("You're in {{.Where}} on Discord.", i18n.D{"Where": where}))
+		if d.Room != "" && len(d.Members) > 0 {
+			v.dcSub.SetText(i18n.N("{{.Count}} people in the room", len(d.Members)))
+			v.dcSub.Show()
+		}
+		hasRoom, open := d.Room != "", d.Open
+
+		v.dcPrimary.SetText(i18n.L("Join"))
+		v.dcPrimary.SetIcon(theme.LoginIcon())
+		v.dcPriAct = func() {
+			if hasRoom && !open {
+				u.passwordDialog(func(pw string) {
+					u.busyDo(v.dcPrimary, func() error { return dc.EnterChannel(ctx(), pw, true) })
+				})
+				return
 			}
-			u.goLiveWith(func() error { return dc.GoLiveInChannel(ctx(), pw, e) }, false)
+			sh := normalizeShareState(u.st)
+			pw := ""
+			if !hasRoom && sh.RequirePassword {
+				pw = strings.TrimSpace(sh.RoomPassword)
+			}
+			u.busyDo(v.dcPrimary, func() error { return dc.EnterChannel(ctx(), pw, sh.E2EE) })
+		}
+
+		v.dcSecondary.SetText(i18n.L("Share"))
+		v.dcSecondary.SetIcon(theme.MediaRecordIcon())
+		v.dcSecondary.Show()
+		v.dcSecAct = func() {
+			sh := normalizeShareState(u.st)
+			if hasRoom && !open {
+				u.passwordDialog(func(pw string) {
+					u.goLiveWith(func() error { return dc.GoLiveInChannel(ctx(), pw, sh.E2EE) }, false)
+				})
+				return
+			}
+			pw := ""
+			if !hasRoom && sh.RequirePassword {
+				pw = strings.TrimSpace(sh.RoomPassword)
+			}
+			u.goLiveWith(func() error { return dc.GoLiveInChannel(ctx(), pw, sh.E2EE) }, false)
 		}
 	}
+
 	if note := discordServerNote(u.st.Servers); note != "" && d.Status == "ready" && d.ChannelID != "" {
-		v.dcText.SetText(v.dcText.Text + " " + note)
-		v.dcBtn.Disable()
-		v.dcBtn.Importance, v.live.Importance = widget.MediumImportance, widget.HighImportance
+		if v.dcSub.Visible() {
+			v.dcSub.SetText(v.dcSub.Text + " · " + note)
+		} else {
+			v.dcSub.SetText(note)
+			v.dcSub.Show()
+		}
+		v.dcPrimary.Disable()
+		v.dcSecondary.Disable()
+		v.dcPrimary.Importance, v.live.Importance = widget.MediumImportance, widget.HighImportance
 	}
+}
+
+func (v *lobbyView) syncDiscordAvatars(members []string) {
+	if len(members) == 0 {
+		v.dcAvatars.Objects = nil
+		v.dcAvatars.Hide()
+		return
+	}
+	const maxCircles = 5
+	limit := min(len(members), maxCircles)
+	objs := make([]fyne.CanvasObject, 0, limit+1)
+	for i := 0; i < limit; i++ {
+		objs = append(objs, newAvatar(members[i], 28))
+	}
+	if extra := len(members) - limit; extra > 0 {
+		objs = append(objs, newChip(nil, fmt.Sprintf("+%d", extra), nil))
+	}
+	v.dcAvatars.Objects = objs
+	v.dcAvatars.Show()
+	v.dcAvatars.Refresh()
 }

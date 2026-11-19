@@ -4,25 +4,81 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+// d3d11videosink draws into a child window of ours and follows its size.
+var videoWindowSinks = []string{"d3d11videosink"}
+
 var (
-	procSetWindowTextW  = user32.NewProc("SetWindowTextW")
-	procGetCursorPos    = user32.NewProc("GetCursorPos")
-	procWindowFromPoint = user32.NewProc("WindowFromPoint")
-	procGetAncestor     = user32.NewProc("GetAncestor")
-	procIsIconic        = user32.NewProc("IsIconic")
+	user32               = windows.NewLazySystemDLL("user32.dll")
+	gdi32                = windows.NewLazySystemDLL("gdi32.dll")
+	procRegisterClassExW = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW  = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW   = user32.NewProc("DefWindowProcW")
+	procDestroyWindow    = user32.NewProc("DestroyWindow")
+	procShowWindow       = user32.NewProc("ShowWindow")
+	procGetMessageW      = user32.NewProc("GetMessageW")
+	procTranslateMessage = user32.NewProc("TranslateMessage")
+	procDispatchMessageW = user32.NewProc("DispatchMessageW")
+	procPostMessageW     = user32.NewProc("PostMessageW")
+	procPostQuitMessage  = user32.NewProc("PostQuitMessage")
+	procAdjustWindowRect = user32.NewProc("AdjustWindowRectEx")
+	procLoadCursorW      = user32.NewProc("LoadCursorW")
+	procGetStockObject   = gdi32.NewProc("GetStockObject")
+	procSetWindowTextW   = user32.NewProc("SetWindowTextW")
+	procGetCursorPos     = user32.NewProc("GetCursorPos")
+	procWindowFromPoint  = user32.NewProc("WindowFromPoint")
+	procGetAncestor      = user32.NewProc("GetAncestor")
+	procIsIconic         = user32.NewProc("IsIconic")
 )
 
 const (
-	wsOverlappedWindow = 0x00CF0000
+	wmDestroy          = 0x0002
+	wmClose            = 0x0010
+	wmApp              = 0x8000
 	wmQuitVideo        = wmApp + 2
+	wsOverlappedWindow = 0x00CF0000
+	cwUseDefault       = ^uintptr(0x7FFFFFFF) // (int)0x80000000
+	swHide             = 0
+	swShowNA           = 8
+	idcArrow           = 32512
+	blackBrush         = 4
 	gaRoot             = 2
 )
+
+type wndClassEx struct {
+	Size       uint32
+	Style      uint32
+	WndProc    uintptr
+	ClsExtra   int32
+	WndExtra   int32
+	Instance   windows.Handle
+	Icon       windows.Handle
+	Cursor     windows.Handle
+	Background windows.Handle
+	MenuName   *uint16
+	ClassName  *uint16
+	IconSm     windows.Handle
+}
+
+type point struct{ X, Y int32 }
+
+type winRect struct{ Left, Top, Right, Bottom int32 }
+
+type msg struct {
+	Hwnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      point
+	Private uint32
+}
 
 var (
 	videoClassOnce sync.Once
@@ -48,11 +104,19 @@ func registerVideoClass() error {
 
 func videoProc(hwnd, m, wp, lp uintptr) uintptr {
 	switch m {
-	case wmClose: // the user closed it: hide now, the owner destroys it
-		procShowWindow.Call(hwnd, swHide)
+	case wmClose:
 		videoWinsMu.Lock()
 		w := videoWins[hwnd]
 		videoWinsMu.Unlock()
+		if w != nil && w.intercept.Load() {
+			select {
+			case w.closeReq <- struct{}{}:
+			default:
+			}
+			return 0
+		}
+		// Non-intercepted (pop-out): hide now, the owner destroys it.
+		procShowWindow.Call(hwnd, swHide)
 		if w != nil {
 			w.closeOnce.Do(func() { close(w.closed) })
 		}
@@ -71,6 +135,8 @@ func videoProc(hwnd, m, wp, lp uintptr) uintptr {
 type winVideo struct {
 	hwnd      uintptr
 	closed    chan struct{}
+	closeReq  chan struct{}
+	intercept atomic.Bool
 	closeOnce sync.Once
 	gone      chan struct{}
 	destroy   sync.Once
@@ -80,7 +146,7 @@ func openVideoWindow(title string, cw, ch int) (Window, error) {
 	if err := registerVideoClass(); err != nil {
 		return nil, err
 	}
-	w := &winVideo{closed: make(chan struct{}), gone: make(chan struct{})}
+	w := &winVideo{closed: make(chan struct{}), closeReq: make(chan struct{}, 1), gone: make(chan struct{})}
 	ready := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
@@ -119,8 +185,10 @@ func openVideoWindow(title string, cw, ch int) (Window, error) {
 	return w, nil
 }
 
-func (w *winVideo) Handle() uintptr         { return w.hwnd }
-func (w *winVideo) Closed() <-chan struct{} { return w.closed }
+func (w *winVideo) Handle() uintptr                 { return w.hwnd }
+func (w *winVideo) Closed() <-chan struct{}         { return w.closed }
+func (w *winVideo) SetInterceptClose(on bool)       { w.intercept.Store(on) }
+func (w *winVideo) CloseRequested() <-chan struct{} { return w.closeReq }
 
 func (w *winVideo) SetTitle(title string) {
 	procSetWindowTextW.Call(w.hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(title))))

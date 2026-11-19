@@ -47,13 +47,13 @@ the relay sends it on to whoever watches it.
 ## 1. Volunteer from the app
 
 1. Join the call.
-2. Open the **People** menu and choose **Volunteer as relay**.
-3. The line under the People table should say *Relays: You relay for 4 people.*
+2. At the bottom of the People list, switch on **Volunteer as relay**.
+3. The line just above it should say *Relays: You relay for 4 people.*
    (how many people you serve), or *You are standing by* if the room doesn't need
    you yet.
 
-To stop, choose **Stop relaying** (or **Leave the relay queue** while
-standing by). Volunteer when you have a fast, stable upload (wired helps) and
+To stop, switch it off again (it reads **Stop relaying**, or **Leave the
+relay queue** while standing by). Volunteer when you have a fast, stable upload (wired helps) and
 a computer that isn't busy with a demanding game.
 
 ## 2. A dedicated relay machine for your group
@@ -69,7 +69,7 @@ hardware encoder or a few free cores help.
 plugins). Windows 10/11: unzip the download; the program is `bin\blite.exe`
 in the `blite` folder.
 
-**Get the link.** In the app on your own PC: *Room > Copy share link*
+**Get the link.** In the app on your own PC: **Copy link** at the top of the call window
 (`https://bellion.app/j/CODE#password`). It contains the room password; keep
 it private.
 
@@ -88,8 +88,8 @@ bin\blite.exe -headless -link "https://bellion.app/j/CODE#password" -volunteer -
 ```
 
 It prints `room CODE link ...`, then `volunteered as relay`, and a status
-line per member every 5 seconds. In the app, the line under the People table
-says *Relays: Group relay relays for N people.* Ctrl+C leaves the room cleanly.
+line per member every 5 seconds. In the app, the line at the bottom of the People
+list says *Relays: Group relay relays for N people.* Ctrl+C leaves the room cleanly.
 
 | Flag | What it does |
 |---|---|
@@ -98,7 +98,7 @@ says *Relays: Group relay relays for N people.* Ctrl+C leaves the room cleanly.
 | `-volunteer` | Volunteer as relay as soon as it's in |
 | `-source none` | Share nothing. Required: otherwise it tries to share its screen and, without a display, stops right away |
 | `-view none` | Show and play nothing (no windows, no decoding) |
-| `-name NAME` | Its name in the People table (default: the computer's name) |
+| `-name NAME` | Its name in the People list (default: the computer's name) |
 | `-relay-upload-kbps N` | Its upload in kbit/s: decides how many members it serves; it never sends faster than this |
 | `-udp-port N` | UDP port for all connections (default 30471, or the next free one) |
 
@@ -107,8 +107,9 @@ only reachable through TURN is never picked as a relay.
 
 **Keep it running.** The relay keeps the room open while it's in it: everyone
 else can leave and the same link still works later. It rides out network
-drops of up to about a minute; after a longer outage or a server restart it
-exits, so let the system restart it.
+drops of up to about a minute, and server restarts too: bellion.app keeps
+rooms across restarts, and members reconnect into their places. After a
+longer outage it exits, so let the system restart it.
 
 Linux, systemd: put the link in `/etc/bellion-relay.env` (`chmod 600`):
 
@@ -153,9 +154,10 @@ new versions from time to time.
 - The room's creator leaves: the room carries on. Ownership passes to whoever
   has been in it longest, which can be the relay, and a relay can't
   disconnect or ban anyone. Owners: hand ownership to a person first
-  (*People > their name > Make owner...*).
+  (click them in the People list, then *Make owner...*).
 - The link stops working: a room ends 5 minutes after the last person (relay
-  included) leaves, and when the server restarts. Start a new session and give
+  included) leaves. A server restart doesn't end it on bellion.app; on your
+  own server, only with `BLITE_STATE_FILE` set. Start a new session and give
   the relay its link.
 - The relay is a room member with the room's keys. Its name tag changes each
   time it restarts, and the safety code includes it.
@@ -171,13 +173,13 @@ out. On bellion.app, use a dedicated relay machine instead.
 1. Set up your server ([SELF_HOSTING.md](SELF_HOSTING.md)) with
    `BLITE_HOST_KEY` set to a long random secret.
 2. Write `rooms.json` (codes: 4 to 12 letters and digits, no U (O counts as 0, I and L as 1);
-   passwords: at least 4 characters; `owners`: identity keys from *Room > Your
-   identity key...* of the people who own the room while they're in it):
+   passwords: at least 4 characters; `owners`: identity keys from *Your identity
+   key...* in the gear menu of the people who own the room while they're in it):
 
    ```json
    [
      {"code": "7K3Q-X9MD", "password": "a-room-password", "name": "Our relay",
-      "owners": ["<identity key from Room > Your identity key...>"]}
+      "owners": ["<identity key from Your identity key...>"]}
    ]
    ```
 3. Run it with good upload and host networking:
@@ -211,10 +213,10 @@ Up to 4 relays share a room: four 100 Mbit/s relays carry about 60 people.
 
 ## How to tell it's working
 
-- The line under the People table: *Relays: Group relay relays for 6 people; Sam
+- The line at the bottom of the People list: *Relays: Group relay relays for 6 people; Sam
   relays for 4 people; Alex is standing by.* Without a relay: *Everyone sends their
   video to everyone (full mesh).*
-- *People > their name > Network path* says *via* the relay's name.
+- Click a member in the People list: *Network path* says *via* the relay's name.
 - A dedicated relay logs `volunteered as relay`, `plan ... relays=[...]` and
   per member `upKbps` (what it sends them).
 

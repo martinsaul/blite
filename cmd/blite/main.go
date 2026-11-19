@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	molt "moltclient"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 
 	"blite/internal/app"
 	"blite/internal/audio"
+	"blite/internal/camera"
 	"blite/internal/capture"
 	"blite/internal/diag"
 	"blite/internal/identity"
@@ -44,6 +46,7 @@ import (
 	"blite/internal/nui"
 	"blite/internal/portmap"
 	"blite/internal/proto"
+	"blite/internal/redact"
 	"blite/internal/register"
 	"blite/internal/rtc"
 	"blite/internal/session"
@@ -74,37 +77,36 @@ func clientMeta() *proto.ClientMeta {
 
 func main() {
 	var (
-		server     = flag.String("server", envOr("BLITE_SERVER", defaultServer), "signaling URL")
-		headless   = flag.Bool("headless", false, "no tray or UI; run one session from flags")
-		create     = flag.Bool("create", false, "headless: create a new room")
-		join       = flag.String("join", "", "headless: room code to join")
-		link       = flag.String("link", "", "share link (https://HOST/j/CODE#password or bshare://join/CODE?server=HOST#password); joins on the link's server")
-		password   = flag.String("password", "", "room password (create: generated if empty)")
-		name       = flag.String("name", hostname(), "display name")
-		source     = flag.String("source", "", "video source: screen | test | none | a monitor:/window: source from -sources (default: screen with -headless; none in the app, where the user starts sharing)")
-		sources    = flag.Bool("sources", false, "list shareable monitors and windows and exit")
-		showVer    = flag.Bool("version", false, "print the version and exit")
-		channel    = flag.String("channel", envOr("BLITE_CHANNEL", defaultChannel), "update channel: stable | beta")
-		pinned     = flag.String("pin-channel", "", "update channel chosen by hand, kept across self-updates (set by the updater)")
-		view       = flag.String("view", "window", "remote video: window | count | none")
-		audioArg   = flag.String("audio", "none", "headless: shared audio: none | test | system | app:<name>")
-		encoder    = flag.String("encoder", os.Getenv("BLITE_ENCODER"), "force an encoder factory (e.g. x264enc)")
-		relay      = flag.Bool("relay", false, "force TURN relay (ICE transport policy relay)")
-		dur        = flag.Duration("for", 0, "headless: leave after this long (0 = until Ctrl-C)")
-		volunteer  = flag.Bool("volunteer", false, "headless: volunteer as the room's relay (relay mode)")
-		resArg     = flag.String("resolution", "720p", "what we share at: 720p | 1080p | 2160p (4K)")
-		modeArg    = flag.String("mode", "desktop", "what the share is tuned for: desktop (30 fps, sharp text) | game (60 fps)")
-		layoutArg  = flag.String("layout", "windows", "headless: how received streams show: windows | grid")
-		previewArg = flag.String("preview", "", "headless: preview our own stream: window | grid (empty = off)")
-		hostFile   = flag.String("host", "", "hosted relay: keep the rooms in this JSON file open and relay them (needs BLITE_HOST_KEY)")
-		uiPort     = flag.Int("ui-port", 0, "local UI port (0 = random)")
-		reg        = flag.Bool("register", false, "register this binary as the bshare:// (and blite://) link handler and exit")
-		unreg      = flag.Bool("unregister", false, "remove the link handler and the sign-in start entry and exit (uninstall)")
-		bg         = flag.Bool("background", false, "start in the tray without opening the window (used at sign-in)")
-		jsonLog    = flag.Bool("json", false, "JSON logs")
-		upKbps     = flag.Int("relay-upload-kbps", 0, "relay: our upload capacity; transcoded renditions must fit in 80% of it (0 = no cap)")
-		e2eeFlag   = flag.Bool("e2ee", true, "headless -create: encrypt the room's media end to end")
-		udpPort    = flag.Int("udp-port", portmap.DefaultPort, "UDP port for all peer connections, opened on the router by UPnP, NAT-PMP or PCP (0 = a random port per connection, no router mapping)")
+		server    = flag.String("server", envOr("BLITE_SERVER", defaultServer), "signaling URL")
+		headless  = flag.Bool("headless", false, "no tray or UI; run one session from flags")
+		create    = flag.Bool("create", false, "headless: create a new room")
+		join      = flag.String("join", "", "headless: room code to join")
+		link      = flag.String("link", "", "share link (https://HOST/j/CODE#password or bshare://join/CODE?server=HOST#password); joins on the link's server")
+		password  = flag.String("password", "", "room password (create: generated if empty)")
+		name      = flag.String("name", hostname(), "display name")
+		source    = flag.String("source", "", "video source: screen | test | none | a monitor:/window: source from -sources (default: screen with -headless; none in the app, where the user starts sharing)")
+		sources   = flag.Bool("sources", false, "list shareable monitors and windows and exit")
+		cameras   = flag.Bool("cameras", false, "list cameras, their modes and the mode each quality would use, and exit")
+		showVer   = flag.Bool("version", false, "print the version and exit")
+		channel   = flag.String("channel", envOr("BLITE_CHANNEL", defaultChannel), "update channel: stable | beta")
+		pinned    = flag.String("pin-channel", "", "update channel chosen by hand, kept across self-updates (set by the updater)")
+		view      = flag.String("view", "window", "remote video: window | count | none")
+		audioArg  = flag.String("audio", "none", "headless: shared audio: none | test | system | app:<name>")
+		encoder   = flag.String("encoder", os.Getenv("BLITE_ENCODER"), "force an encoder factory (e.g. x264enc)")
+		relay     = flag.Bool("relay", false, "force TURN relay (ICE transport policy relay)")
+		dur       = flag.Duration("for", 0, "headless: leave after this long (0 = until Ctrl-C)")
+		volunteer = flag.Bool("volunteer", false, "headless: volunteer as the room's relay (relay mode)")
+		resArg    = flag.String("resolution", "720p", "what we share at: 720p | 1080p | 2160p (4K)")
+		modeArg   = flag.String("mode", "desktop", "what the share is tuned for: desktop (30 fps, sharp text) | game (60 fps)")
+		hostFile  = flag.String("host", "", "hosted relay: keep the rooms in this JSON file open and relay them (needs BLITE_HOST_KEY)")
+		uiPort    = flag.Int("ui-port", 0, "local UI port (0 = random)")
+		reg       = flag.Bool("register", false, "register this binary as the bshare:// (and blite://) link handler and exit")
+		unreg     = flag.Bool("unregister", false, "remove the link handler and the sign-in start entry and exit (uninstall)")
+		bg        = flag.Bool("background", false, "start in the tray without opening the window (used at sign-in)")
+		jsonLog   = flag.Bool("json", false, "JSON logs")
+		upKbps    = flag.Int("relay-upload-kbps", 0, "relay: our upload capacity; transcoded renditions must fit in 80% of it (0 = no cap)")
+		e2eeFlag  = flag.Bool("e2ee", true, "headless -create: encrypt the room's media end to end")
+		udpPort   = flag.Int("udp-port", portmap.DefaultPort, "UDP port for all peer connections, opened on the router by UPnP, NAT-PMP or PCP (0 = a random port per connection, no router mapping)")
 	)
 	flag.Parse()
 	for _, h := range strings.Split(defaultServerAliases, ",") {
@@ -114,11 +116,9 @@ func main() {
 	}
 	ch, pin := updateChannel(*channel, *pinned, flagSet("channel"), molt.UpdateResult() != "")
 
-	var h slog.Handler = slog.NewTextHandler(stderr{}, nil)
-	if *jsonLog {
-		h = slog.NewJSONHandler(stderr{}, nil)
-	}
-	log := slog.New(h).With("version", clientMeta().Label())
+	log, logOut := newLogger(stderr{}, *jsonLog, clientMeta().Label())
+	defer logOut.Flush()
+	slog.SetDefault(log)
 	media.Log = log
 	if addr := os.Getenv("BLITE_PPROF"); addr != "" { // e.g. 127.0.0.1:6060 (memory investigations)
 		go func() { log.Warn("pprof", "err", http.ListenAndServe(addr, nil)) }()
@@ -147,6 +147,13 @@ func main() {
 		fmt.Printf("Bellion Share %s, built %s, %s\n", c.Label(), c.BuildDate, c.OSVersion)
 		return
 	}
+	if *cameras {
+		if camera.Report(os.Stdout) != 0 {
+			logOut.Flush()
+			os.Exit(1)
+		}
+		return
+	}
 	if *sources {
 		ts, err := capture.List()
 		if err != nil {
@@ -162,18 +169,22 @@ func main() {
 		*link = flag.Arg(0)
 	}
 
-	cfg := session.Config{Server: *server, Name: *name, Client: clientMeta(), View: media.ViewKind(*view), Encoder: *encoder, Relay: *relay, UploadKbps: *upKbps, E2EE: *e2eeFlag, Log: log}
+	srv, err := normalizeServerFlag(*server)
+	if err != nil {
+		fatal(log, "server", err)
+	}
+	cfg := session.Config{Server: srv, Name: *name, Client: clientMeta(), View: media.ViewKind(*view), Encoder: *encoder, Relay: *relay, UploadKbps: *upKbps, E2EE: *e2eeFlag, Log: log}
 	cfg.Name = orDefault(identity.CleanName(cfg.Name), "Bellion Share user") // '#' is reserved for the tag
-	// openPort opens our UDP port on the router (nil = off); Close removes
-	// the mapping.
-	openPort := func() *rtc.Port {
+	// openPort opens our UDP port (nil = off); when mapRouter is true it also
+	// maps the port on the router until Close.
+	openPort := func(mapRouter bool) *rtc.Port {
 		if *udpPort <= 0 {
 			return nil
 		}
-		return rtc.NewPort(*udpPort, log)
+		return rtc.NewPortOpts(*udpPort, mapRouter, log)
 	}
 	if *hostFile != "" {
-		if cfg.Port = openPort(); cfg.Port != nil {
+		if cfg.Port = openPort(true); cfg.Port != nil {
 			defer cfg.Port.Close()
 		}
 		key, err := identity.LoadOrCreate() // a stable identity, so members don't see a new key
@@ -185,16 +196,18 @@ func main() {
 		return
 	}
 	if *headless {
-		if cfg.Port = openPort(); cfg.Port != nil {
+		if cfg.Port = openPort(true); cfg.Port != nil {
 			defer cfg.Port.Close()
 		}
-		runHeadless(cfg, log, *create, *join, *link, *password, media.SourceKind(orDefault(*source, "screen")), *audioArg, *dur, *volunteer, media.Resolution(*resArg), media.ContentMode(*modeArg), session.Layout{Mode: *layoutArg, Preview: *previewArg})
+		runHeadless(cfg, log, *create, *join, *link, *password, media.SourceKind(orDefault(*source, "screen")), *audioArg, *dur, *volunteer, media.Resolution(*resArg), media.ContentMode(*modeArg))
 		return
 	}
 	if relaunchGuarded(log) {
 		return
 	}
-	runTray(cfg, log, *link, media.SourceKind(orDefault(*source, "none")), *uiPort, ch, pin, *bg, openPort)
+	runTray(cfg, log, *link, media.SourceKind(orDefault(*source, "none")), *uiPort, ch, pin, *bg, func() *rtc.Port {
+		return openPort(app.LoadPortMap())
+	})
 }
 
 // relaunchGuarded starts the tray app through the Windows crash guard
@@ -241,6 +254,20 @@ var unguarded string
 type stderr struct{}
 
 func (stderr) Write(b []byte) (int, error) { return os.Stderr.Write(b) }
+
+func newLogger(dst io.Writer, jsonLog bool, ver string) (*slog.Logger, *redact.Writer) {
+	rw := redact.NewWriter(dst)
+	opts := &slog.HandlerOptions{ReplaceAttr: redact.ReplaceAttr}
+	var h slog.Handler = slog.NewTextHandler(rw, opts)
+	if jsonLog {
+		h = slog.NewJSONHandler(rw, opts)
+	}
+	return slog.New(h).With("version", ver), rw
+}
+
+func normalizeServerFlag(raw string) (string, error) {
+	return session.NormalizeServer(raw)
+}
 
 // guardedAfterUpdate (Windows) is whether this run, which molt-swap started
 // to health-check a new build and so runs without the guard, should hand
@@ -435,7 +462,7 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	}
 }
 
-func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, password string, src media.SourceKind, audioArg string, dur time.Duration, volunteer bool, res media.Resolution, mode media.ContentMode, layout session.Layout) {
+func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, password string, src media.SourceKind, audioArg string, dur time.Duration, volunteer bool, res media.Resolution, mode media.ContentMode) {
 	if link != "" {
 		server, code, pw, err := session.ParseLinkServer(link)
 		if err != nil {
@@ -473,9 +500,6 @@ func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, 
 		fatal(log, "signaling", err)
 	}
 	defer s.Close()
-	if err := s.SetLayout(layout); err != nil {
-		fatal(log, "layout", err)
-	}
 	st := s.State()
 	fmt.Printf("room %s  link %s\n", st.Room, st.Link)
 	if src != "none" {
