@@ -107,6 +107,41 @@ func TestOpusLoopback(t *testing.T) {
 	t.Logf("decoded %d buffers from %d Opus frames", pl.Buffers(), n)
 }
 
+// The test tone beeps at about -12 dBFS; silence meters as -96. Any sink
+// counts decoded buffers.
+func TestAudioLevel(t *testing.T) {
+	Init()
+	pl, err := StartAudioPlayer("fakesink sync=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pl.Stop()
+	for _, c := range []struct {
+		src      string
+		min, max float64
+	}{
+		{TestAudio, -13, -11},
+		{"audiotestsrc is-live=true wave=silence", -96, -96},
+	} {
+		src, err := StartAudioSource(c.src, func(f []byte, _ time.Duration) { pl.Push(f) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1500 * time.Millisecond) // a beep at least
+		l, ok := src.Level()
+		src.Stop()
+		if !ok || l.PeakDB < c.min || l.PeakDB > c.max || l.RMSDB > l.PeakDB {
+			t.Errorf("%s: level %+v (%v), want peak in [%v, %v]", c.src, l, ok, c.min, c.max)
+		}
+		if _, ok := src.Level(); ok {
+			t.Errorf("%s: a level after Stop", c.src)
+		}
+	}
+	if pl.Buffers() < 25 {
+		t.Errorf("decoded %d buffers, want the ones played", pl.Buffers())
+	}
+}
+
 // SetHighFPS thins HIGH and leaves LOW alone; game mode runs HIGH at 60.
 func TestHighFPS(t *testing.T) {
 	Init()

@@ -22,6 +22,7 @@ var (
 	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
 	procGetWindowLongPtrW   = user32.NewProc("GetWindowLongPtrW")
 	procGetWindow           = user32.NewProc("GetWindow")
+	procGetClassNameW       = user32.NewProc("GetClassNameW")
 	procIsWindow            = user32.NewProc("IsWindow")
 	procGetWindowThreadPID  = user32.NewProc("GetWindowThreadProcessId")
 	procSendMessageTimeoutW = user32.NewProc("SendMessageTimeoutW")
@@ -109,6 +110,9 @@ func appWindowTitle(h uintptr) string {
 	if ex&wsExToolWindow != 0 {
 		return ""
 	}
+	if shellWindowClass(windowClassName(h)) {
+		return ""
+	}
 	var cloaked uint32
 	procDwmGetWindowAttr.Call(h, dwmwaCloaked, uintptr(unsafe.Pointer(&cloaked)), 4)
 	if cloaked != 0 { // other virtual desktop, suspended UWP app
@@ -116,6 +120,13 @@ func appWindowTitle(h uintptr) string {
 	}
 	buf := make([]uint16, 256)
 	l, _, _ := procGetWindowTextW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return windows.UTF16ToString(buf[:l])
+}
+
+// windowClassName is a window's class ("Progman"), or "".
+func windowClassName(h uintptr) string {
+	buf := make([]uint16, 256)
+	l, _, _ := procGetClassNameW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	return windows.UTF16ToString(buf[:l])
 }
 

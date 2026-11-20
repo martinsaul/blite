@@ -3,6 +3,8 @@ package room
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	"blite/internal/proto"
@@ -62,6 +64,9 @@ func (m *Manager) Snapshot() ([]byte, error) {
 	defer m.mu.Unlock() // snap shares the rooms' maps and slices
 	s := snapshot{V: snapshotVersion, At: m.now(), Rooms: make([]snapRoom, 0, len(m.rooms)), Channels: m.channels}
 	for _, r := range m.rooms {
+		if r.ephemeral {
+			continue
+		}
 		s.Rooms = append(s.Rooms, r.snap())
 	}
 	return json.Marshal(s)
@@ -93,23 +98,40 @@ var ErrSnapshot = errors.New("room: bad snapshot")
 // that already exists here is replaced only if it came from an earlier
 // Restore and nobody has joined or resumed it since; a room this server
 // has served is newer than any file. It returns the number of rooms loaded.
+// Only a file that isn't a snapshot fails it; a bad room is skipped or
+// repaired (RestoreReport says which).
 func (m *Manager) Restore(data []byte) (int, error) {
+	n, _, err := m.RestoreReport(data)
+	return n, err
+}
+
+// RestoreReport is Restore, also returning what it had to skip or repair,
+// one line per problem (for the log). One bad room never costs the others:
+// a server that starts empty fails every resume.
+func (m *Manager) RestoreReport(data []byte) (int, []string, error) {
 	var s snapshot
 	if err := json.Unmarshal(data, &s); err != nil || s.V != snapshotVersion {
-		return 0, ErrSnapshot
+		return 0, nil, ErrSnapshot
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rooms := make([]*Room, 0, len(s.Rooms)) // all or nothing
+	var problems []string
+	note := func(code, what string) { problems = append(problems, "room "+code+": "+what) }
+	rooms := make([]*Room, 0, len(s.Rooms))
 	seen := map[string]bool{}
 	for _, sr := range s.Rooms {
-		if sr.Code == "" || NormalizeCode(sr.Code) != sr.Code || seen[sr.Code] {
-			return 0, ErrSnapshot
+		if sr.Code == "" || NormalizeCode(sr.Code) != sr.Code {
+			note(fmt.Sprintf("%q", sr.Code), "skipped: bad code")
+			continue
+		}
+		if seen[sr.Code] {
+			note(sr.Code, "skipped: listed twice")
+			continue
 		}
 		seen[sr.Code] = true
-		r, err := m.restoreRoom(sr)
-		if err != nil {
-			return 0, err
+		r := m.restoreRoom(sr, func(what string) { note(sr.Code, what) })
+		if r == nil {
+			continue
 		}
 		rooms = append(rooms, r)
 	}
@@ -132,47 +154,91 @@ func (m *Manager) Restore(data []byte) (int, error) {
 			m.channels[id] = code
 		}
 	}
-	return len(loaded), nil
+	return len(loaded), problems, nil
 }
 
-func (m *Manager) restoreRoom(sr snapRoom) (*Room, error) {
+// restoreRoom rebuilds one room, dropping unreadable members and repairing
+// references to peers that aren't members (note says what it did). It
+// returns nil if the room can't be used.
+func (m *Manager) restoreRoom(sr snapRoom, note func(string)) *Room {
 	now := m.now()
 	r := &Room{
 		Code: sr.Code, pw: passwordHash{salt: sr.Salt, key: sr.Key}, peers: map[string]*Peer{}, restored: true,
 		relayQ: sr.RelayQ, paused: sr.Paused, plan: sr.Plan, e2ee: sr.E2EE, channel: sr.Channel,
 		owner: sr.Owner, host: sr.Host, allowed: sr.Allowed, banned: sr.Banned, emptyAt: sr.EmptyAt,
 	}
+	if (len(r.pw.key) == 0) != (len(r.pw.salt) == 0) {
+		note("skipped: half a password hash")
+		return nil
+	}
 	if sr.Hold != nil {
 		r.hold = &ownerHold{idKey: sr.Hold.IDKey, until: sr.Hold.Until}
 	}
 	for _, sp := range sr.Peers {
 		if sp.ID == "" || r.peers[sp.ID] != nil || len(sp.Resume) != len(tokenHash{}) {
-			return nil, ErrSnapshot
+			note(fmt.Sprintf("dropped unreadable member %q", sp.ID))
+			continue
 		}
 		p := &Peer{ID: sp.ID, Name: sp.Name, IDKey: sp.IDKey, Ver: sp.Ver, Build: sp.Build, caps: sp.Caps, lostAt: sp.LostAt}
 		copy(p.resume[:], sp.Resume)
-		if p.lostAt.IsZero() {
+		r.peers[p.ID] = p
+		r.order = append(r.order, p.ID)
+	}
+	r.repair(note)
+	for _, id := range r.order {
+		if p := r.peers[id]; p.lostAt.IsZero() {
 			p.lostAt = now
 			if p.ID == r.owner && r.hold == nil {
 				m.holdLocked(r, p)
 			}
 		}
-		r.peers[p.ID] = p
-		r.order = append(r.order, p.ID)
 	}
 	if len(r.peers) == 0 && r.emptyAt.IsZero() {
 		r.emptyAt = now
 	}
-	if !r.consistent() {
-		return nil, ErrSnapshot
+	if !r.consistent() { // repair covers everything consistent checks
+		note("skipped: inconsistent after repair")
+		return nil
 	}
-	return r, nil
+	return r
 }
 
-// consistent: every peer ID the room refers to is a member of it.
+// repair clears or drops every reference to a peer that isn't a member.
+// An owner held for its identity may name a gone slot (see Room.hold).
+func (r *Room) repair(note func(string)) {
+	member := func(id string) bool { return id != "" && r.peers[id] != nil }
+	if r.owner != "" && !member(r.owner) && r.hold == nil {
+		note("cleared owner: not a member")
+		r.owner = ""
+	}
+	if r.host != "" && !member(r.host) {
+		note("cleared host: not a member")
+		r.host = ""
+	}
+	if q := slices.DeleteFunc(slices.Clone(r.relayQ), func(id string) bool { return !member(id) }); len(q) != len(r.relayQ) {
+		note("dropped relay queue entries that aren't members")
+		r.relayQ = q
+	}
+	ok := true
+	for _, id := range r.plan.Relays {
+		ok = ok && member(id)
+	}
+	for id, home := range r.plan.Home {
+		ok = ok && member(id) && member(home)
+	}
+	if !ok {
+		// The next change in the room computes a fresh plan with a
+		// higher epoch, so members never go back to an older one.
+		note("reset the relay plan: it names peers that aren't members")
+		r.plan = proto.Plan{Epoch: r.plan.Epoch}
+	}
+}
+
+// consistent: every peer ID the room refers to is a member of it, except
+// an owner the room is held for.
 func (r *Room) consistent() bool {
 	member := func(id string) bool { return id == "" || r.peers[id] != nil }
-	ok := member(r.owner) && member(r.host)
+	ok := (member(r.owner) || r.hold != nil) && member(r.host)
 	for _, id := range r.relayQ {
 		ok = ok && id != "" && member(id)
 	}

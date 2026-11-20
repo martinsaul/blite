@@ -326,9 +326,12 @@ func (v *lobbyView) updateShareCard(st app.UIState) {
 	} else {
 		v.noWinAudio.Hide()
 	}
-	if sh.Audio.Mode == "" || sh.Audio.Mode == "none" {
+	switch sh.Audio.Mode {
+	case "", "none":
 		v.chipAudio.SetContent(soundOffRes, i18n.L("No audio"), colButton, colCardBorder, colTextDim)
-	} else {
+	case "test": // never mistaken for real sound
+		v.chipAudio.SetContent(soundOnRes, i18n.L("Test tone"), colAccentFill, colAccent, colText)
+	default:
 		v.chipAudio.SetContent(soundOnRes, i18n.L("With sound"), colButton, colCardBorder, colText)
 	}
 
@@ -718,6 +721,9 @@ func (r *selfRow) update(st app.UIState, s *session.State) {
 	} else {
 		r.status.SetText(i18n.L("Watching only"))
 		r.eye.SetEye(feeds.EyeGrey)
+	}
+	if s.Audio.Mode == "test" { // so it isn't left on unnoticed
+		r.status.SetText(r.status.Text + " · " + i18n.L("Test tone"))
 	}
 }
 

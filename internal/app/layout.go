@@ -22,6 +22,11 @@ type appSettings struct {
 	SmallerCopy *bool  `json:"smallerCopy,omitempty"`
 	UploadKbps  *int   `json:"uploadKbps,omitempty"`
 	E2EE        *bool  `json:"e2ee,omitempty"`
+	// UIScale is the window's interface size in percent ("" = follow the
+	// desktop). Read once at startup (uiscale.Apply), so it applies on restart.
+	UIScale string `json:"uiScale,omitempty"`
+	// SelfView is how our own preview shows in a call (session.SelfView*).
+	SelfView string `json:"selfView,omitempty"`
 	// Presets are the user's own quality presets (BuiltinPresets aren't kept).
 	Presets []QualityPreset `json:"presets,omitempty"`
 }
@@ -162,6 +167,23 @@ func writeSettings(st appSettings) error {
 	return err
 }
 
+func saveSelfView(v string) error {
+	return updateSettings(func(st *appSettings) {
+		st.SelfView = v
+	})
+}
+
+// keepSelfView is the sessions' Config.OnSelfView: the user changed how
+// their preview shows, so the next session starts the same way.
+func (a *App) keepSelfView(v string) {
+	if err := saveSelfView(v); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
+	a.mu.Lock()
+	a.cfg.SelfView = v
+	a.mu.Unlock()
+}
+
 func saveAutoWatch(on bool) error {
 	return updateSettings(func(st *appSettings) {
 		st.AutoWatch = &on
@@ -210,6 +232,16 @@ func loadPresets() []QualityPreset { return cleanPresets(loadSettings().Presets)
 func savePresets(ps []QualityPreset) error {
 	return updateSettings(func(st *appSettings) {
 		st.Presets = ps
+	})
+}
+
+// LoadUIScale is the saved interface size ("" = automatic).
+func LoadUIScale() string { return loadSettings().UIScale }
+
+// SaveUIScale keeps the interface size for the next start.
+func SaveUIScale(pref string) error {
+	return updateSettings(func(st *appSettings) {
+		st.UIScale = pref
 	})
 }
 

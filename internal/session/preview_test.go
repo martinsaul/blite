@@ -116,3 +116,111 @@ func TestSelfPreview(t *testing.T) {
 		t.Fatalf("preview open after sharing stopped: frames=%d eye=%s state=%s", s.PreviewFrames(), st.SelfEye, st.SelfState)
 	}
 }
+
+// Our own preview shows as a corner picture by default (filling the main
+// window while alone, from the big preview), can become a tile and pop out,
+// and each change is handed to Config.OnSelfView; the next session starts
+// the way it was left.
+func TestSelfView(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	kept := make(chan string, 8)
+	start := func(view string) (*Session, *[2]int) {
+		t.Helper()
+		s, err := Create(context.Background(), Config{Server: ws, Name: "alice", View: media.ViewGrid, Log: quiet,
+			SelfView: view, OnSelfView: func(v string) { kept <- v }}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(s.Close)
+		var size [2]int
+		s.gridMu.Lock()
+		s.gridView = media.ViewCount
+		s.openWindow = func(title string, w, h int) (media.Window, error) {
+			size = [2]int{w, h}
+			return newFakeWindow(title), nil
+		}
+		s.gridMu.Unlock()
+		if err := s.SetSource(media.SourceTest); err != nil {
+			t.Fatal(err)
+		}
+		return s, &size
+	}
+	selfTile := func(s *Session, k string) media.Tile {
+		t.Helper()
+		s.gridMu.Lock()
+		defer s.gridMu.Unlock()
+		g := s.grids[k]
+		if g == nil {
+			t.Fatalf("no window %q", k)
+		}
+		for _, tl := range g.Tiles() {
+			if tl.Self {
+				return tl
+			}
+		}
+		t.Fatalf("no preview in window %q", k)
+		return media.Tile{}
+	}
+	keep := func(want string) {
+		t.Helper()
+		select {
+		case v := <-kept:
+			if v != want {
+				t.Fatalf("kept %q, want %q", v, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%q not kept", want)
+		}
+	}
+
+	s, size := start("")
+	if tl := selfTile(s, ""); !tl.PiP || tl.Channel != media.PreviewBigChannel(s.selfCh) {
+		t.Fatalf("default: %+v, want the corner picture, big while alone", tl)
+	}
+	if v := s.SelfView(); v != SelfViewCorner {
+		t.Fatalf("SelfView %q", v)
+	}
+	s.control(feeds.Self, media.ControlExpand, 0)
+	keep(SelfViewTile)
+	if tl := selfTile(s, ""); tl.PiP || tl.Channel != media.PreviewBigChannel(s.selfCh) {
+		t.Fatalf("expanded: %+v, want a big tile", tl)
+	}
+	s.control(feeds.Self, media.ControlPin, 0)
+	s.control(feeds.Self, media.ControlExpand, 0) // back to the corner, unpinned
+	keep(SelfViewCorner)
+	if st := s.State().SelfState; st != feeds.InMain {
+		t.Fatalf("back in the corner: %s", st)
+	}
+	s.control(feeds.Self, media.ControlPopOut, 0)
+	keep(SelfViewWindow)
+	if tl := selfTile(s, feeds.Self); tl.Channel != media.PreviewBigChannel(s.selfCh) || *size != [2]int{selfWindowW, selfWindowH} {
+		t.Fatalf("popped out: %+v in a %v window", tl, *size)
+	}
+	s.control(feeds.Self, media.ControlEye, 0)
+	keep(SelfViewHidden)
+	s.Close()
+
+	for _, c := range []struct {
+		view string
+		want feeds.State
+	}{{SelfViewWindow, feeds.PoppedOut}, {SelfViewHidden, feeds.NotWatched}, {SelfViewTile, feeds.InMain}} {
+		s, _ := start(c.view)
+		if st := s.State().SelfState; st != c.want {
+			t.Fatalf("started with %q: %s, want %s", c.view, st, c.want)
+		}
+		if c.view == SelfViewTile {
+			if tl := selfTile(s, ""); tl.PiP {
+				t.Fatalf("started as a tile: %+v", tl)
+			}
+		}
+		select {
+		case v := <-kept:
+			t.Fatalf("starting kept %q", v)
+		default:
+		}
+		s.Close()
+	}
+}

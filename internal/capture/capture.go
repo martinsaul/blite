@@ -29,6 +29,14 @@ func (t Target) Label() string {
 	return strings.TrimSpace(t.App)
 }
 
+// shellWindowClass reports whether a Windows window class is the desktop
+// (the icons layer) rather than an app: "Program Manager" (Progman) passes
+// every other test of a window Alt-Tab lists. WorkerW (the wallpaper) has
+// no title, so it never got listed.
+func shellWindowClass(class string) bool {
+	return strings.EqualFold(class, "Progman") || strings.EqualFold(class, "WorkerW")
+}
+
 // SourceName is the label of the monitor or window a source string shares,
 // or "" when it can't tell (the window is gone, or another kind of source).
 func SourceName(source string) string {

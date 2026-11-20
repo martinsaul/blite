@@ -37,3 +37,11 @@ func TestLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestShellWindowClass(t *testing.T) {
+	for c, want := range map[string]bool{"Progman": true, "WorkerW": true, "progman": true, "Chrome_WidgetWin_1": false, "": false} {
+		if got := shellWindowClass(c); got != want {
+			t.Errorf("shellWindowClass(%q) = %v, want %v", c, got, want)
+		}
+	}
+}

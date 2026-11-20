@@ -7,6 +7,7 @@ import (
 
 	"blite/internal/app"
 	"blite/internal/i18n"
+	"blite/internal/uiscale"
 )
 
 func check(label string, on bool, f func()) *fyne.MenuItem {
@@ -76,11 +77,12 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 		u.do(func() error { return u.a.SetAutoWatch(on) })
 	})
 
-	return []*fyne.MenuItem{
+	return nonNil(
 		fyne.NewMenuItem(i18n.L("Your name..."), u.nameDialog),
 		fyne.NewMenuItem(i18n.L("Your identity key..."), u.idKeyDialog),
 		fyne.NewMenuItem(i18n.L("Servers..."), u.serversDialog),
 		u.languageMenu(),
+		u.uiScaleMenu(),
 		fyne.NewMenuItemSeparator(),
 		autostart,
 		sounds,
@@ -88,7 +90,18 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 		fyne.NewMenuItemSeparator(),
 		checkUp,
 		install,
+	)
+}
+
+// nonNil drops absent (nil) items: Fyne crashes on a nil menu item.
+func nonNil(items ...*fyne.MenuItem) []*fyne.MenuItem {
+	out := items[:0]
+	for _, i := range items {
+		if i != nil {
+			out = append(out, i)
+		}
 	}
+	return out
 }
 
 // helpMenuItems builds the "?" button's popup menu.
@@ -107,6 +120,33 @@ func (u *UI) helpMenuItems() []*fyne.MenuItem {
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(i18n.L("About Bellion Share"), u.aboutDialog),
 	}
+}
+
+// uiScaleMenu picks the interface size (X11 only): automatic (the
+// desktop's scale) or a fixed one. Applies on the next start.
+func (u *UI) uiScaleMenu() *fyne.MenuItem {
+	if !uiscale.ManualSupported() {
+		return nil
+	}
+	pref := app.LoadUIScale()
+	var items []*fyne.MenuItem
+	for _, p := range uiscale.Prefs {
+		label := uiscale.Label(p) // the percentage Fyne applies
+		if label == "" {
+			label = i18n.L("Automatic (follow the desktop)")
+		}
+		items = append(items, check(label, uiscale.Same(pref, p), func() {
+			if err := app.SaveUIScale(p); err != nil {
+				u.info(i18n.L("Interface size"), err.Error(), nil)
+				return
+			}
+			u.info(i18n.L("Interface size"), i18n.L("The new size applies when you restart Bellion Share."), nil)
+		}))
+		if p == "" {
+			items = append(items, fyne.NewMenuItemSeparator())
+		}
+	}
+	return sub(i18n.L("Interface size"), items...)
 }
 
 // languageMenu picks the app's language: the system's, or one by hand.

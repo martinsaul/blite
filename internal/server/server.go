@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +79,16 @@ type Config struct {
 	// memory only.
 	StateFile  string
 	StateEvery time.Duration
+	// DeferState starts the server deferred (bluegreen.go): no LoadState
+	// and no SaveState until Adopt. main sets it from ShouldDefer.
+	DeferState bool
+	// Standby makes this server the warm standby (standby.go): /ws
+	// through the Worker only on a failover or once ActiveFile exists;
+	// LiveFile exists while it serves sessions of its own. Both default
+	// to files next to StateFile ("active", StateFile+".live").
+	Standby    bool
+	ActiveFile string
+	LiveFile   string
 	Log        *slog.Logger
 }
 
@@ -93,7 +105,9 @@ type Server struct {
 	releases      *releases // the download page (nil = off)
 	discordPubKey ed25519.PublicKey
 	started       time.Time
-	saveMu        sync.Mutex // one SaveState at a time
+	saveMu        sync.Mutex // one SaveState at a time; guards blueGreen's mode changes
+	standbyState
+	blueGreen
 }
 
 // New returns a Server. Call Run to start background sweeps.
@@ -110,6 +124,17 @@ func New(cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.Standby && cfg.StateFile != "" {
+		if cfg.ActiveFile == "" {
+			cfg.ActiveFile = filepath.Join(filepath.Dir(cfg.StateFile), "active")
+		}
+		if cfg.LiveFile == "" {
+			cfg.LiveFile = cfg.StateFile + ".live"
+		}
+	}
+	if !cfg.Standby {
+		cfg.ActiveFile, cfg.LiveFile = "", ""
+	}
 	s := &Server{
 		cfg:      cfg,
 		rooms:    room.NewManager(cfg.ResumeGrace),
@@ -122,6 +147,9 @@ func New(cfg Config) *Server {
 		started:  time.Now(),
 	}
 	s.rooms.MaxPeers = cfg.MaxPeers
+	if cfg.DeferState {
+		s.mode.Store(persistDeferred)
+	}
 	s.mux.HandleFunc("GET /ws", s.handleWS)
 	s.mux.HandleFunc("GET /j/{code}", s.handleJoinPage)
 	s.mux.HandleFunc("GET /static/join.js", func(w http.ResponseWriter, _ *http.Request) {
@@ -184,6 +212,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	if s.cfg.LiveFile != "" {
+		// Kept across a restart (statesync must not overwrite the state
+		// saved at shutdown meanwhile); the first sweep removes it if
+		// nobody is back.
+		_, err := os.Stat(s.cfg.LiveFile)
+		s.live.Store(err == nil)
+	}
 	if s.cfg.StateFile != "" {
 		go func() {
 			st := time.NewTicker(s.cfg.StateEvery)
@@ -218,6 +253,7 @@ func (s *Server) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			s.rooms.Sweep()
+			s.syncLiveFile()
 			s.failIP.Sweep()
 			s.failRoom.Sweep()
 			s.createIP.Sweep()
@@ -340,6 +376,14 @@ func (c *conn) pingLoop(ctx context.Context) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		s.refuseDrained(w)
+		return
+	}
+	if s.standbyRefuses(r) {
+		s.refuseStandby(w)
+		return
+	}
 	ws, err := websocket.Accept(w, r, nil) // default Origin check: same host or no Origin (native client)
 	if err != nil {
 		return
@@ -388,7 +432,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if seat.PeerID == "" {
+			// Upgraded before a drain, first message after it: refuse
+			// (the client retries, by then on the new instance) rather
+			// than seat it after the final save (bluegreen.go).
+			s.enterMu.RLock()
+			if s.draining.Load() {
+				s.enterMu.RUnlock()
+				c.close(websocket.StatusTryAgainLater, "draining: try again")
+				return
+			}
 			seat = s.enter(env.T, data, ip, c)
+			s.enterMu.RUnlock()
 			continue
 		}
 		switch env.T {

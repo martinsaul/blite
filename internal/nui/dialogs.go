@@ -2,6 +2,7 @@ package nui
 
 import (
 	"image"
+	"image/color"
 	"strconv"
 	"strings"
 
@@ -9,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"blite/internal/audio"
@@ -165,79 +168,132 @@ func (u *UI) safetyDialog() {
 		i18n.L("Read it aloud once: everyone should see the same numbers. If someone's differs, the connection is being intercepted."), nil)
 }
 
-// sourceDialog picks a monitor or window to share. Windows show their app's
-// icon (a generic one when they have none), monitors a monitor.
+// listTargets and targetIcons are what the source picker lists (blite-uidemo
+// and tests show made-up ones).
+var (
+	listTargets = capture.List
+	targetIcons = capture.Icons
+)
+
+// sourceDialog picks a monitor or window to share: the displays, then the
+// windows, under a header each. Windows show their app's icon (a generic one
+// when they have none), displays a monitor.
 func (u *UI) sourceDialog() {
-	var targets []capture.Target
-	icons := map[string]image.Image{}
-	list := widget.NewList(func() int { return len(targets) },
-		func() fyne.CanvasObject {
-			img := canvas.NewImageFromResource(windowWhiteRes)
-			img.FillMode = canvas.ImageFillContain
-			img.SetMinSize(fyne.NewSize(20, 20))
-			return container.NewBorder(nil, nil, img, nil, widget.NewLabel(""))
-		},
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			t := targets[i]
-			row := o.(*fyne.Container)
-			var img *canvas.Image
-			var lbl *widget.Label
-			for _, c := range row.Objects {
-				switch c := c.(type) {
-				case *canvas.Image:
-					img = c
-				case *widget.Label:
-					lbl = c
-				}
-			}
-			text := i18n.L("Window: {{.Name}}", i18n.D{"Name": t.Label()})
-			var res fyne.Resource = windowWhiteRes
-			var pic image.Image
-			if t.Kind == "monitor" {
-				text = i18n.L("Monitor: {{.Name}}", i18n.D{"Name": t.Label()})
-				res = screenWhiteRes
-			} else if pic = icons[t.Source]; pic != nil {
-				res = nil
-			}
-			lbl.SetText(text)
-			if img.Resource != res || img.Image != pic {
-				img.Resource, img.Image = res, pic
-				img.Refresh()
-			}
-		})
+	var d dialog.Dialog
+	rows := map[string]*pickRow{} // by Source, for the icons
+	box := container.NewVBox()
 	status := widget.NewLabel(i18n.L("Loading..."))
+	pick := func(src string) {
+		u.do(func() error { return u.a.SetSource(src) })
+		d.Hide()
+	}
+	show := func(ts []capture.Target) {
+		rows = map[string]*pickRow{}
+		box.RemoveAll()
+		for _, sec := range []struct {
+			kind, title string
+			icon        fyne.Resource
+		}{
+			{"monitor", i18n.L("Displays"), screenWhiteRes},
+			{"window", i18n.L("Windows"), windowWhiteRes},
+		} {
+			first := true
+			for _, t := range ts {
+				if t.Kind != sec.kind {
+					continue
+				}
+				if first {
+					box.Add(pickHeader(sec.title))
+					first = false
+				}
+				src := t.Source
+				r := newPickRow(sec.icon, t.Label(), func() { pick(src) })
+				rows[src] = r
+				box.Add(r)
+			}
+		}
+	}
 	load := func() {
 		go func() {
-			ts, err := capture.List()
+			ts, err := listTargets()
 			u.later(func() {
-				targets = ts
+				show(ts)
 				status.SetText("")
 				if err != nil {
 					status.SetText(i18n.Msg(err.Error()))
 				} else if len(ts) == 0 {
 					status.SetText(i18n.L("No monitors or windows found."))
 				}
-				list.Refresh()
 			})
 			// The icons after the list: a slow app doesn't hold it up.
-			imgs := capture.Icons(ts)
+			imgs := targetIcons(ts)
 			u.later(func() {
-				icons = imgs
-				list.Refresh()
+				for src, img := range imgs {
+					if r := rows[src]; r != nil {
+						r.SetImage(img)
+					}
+				}
 			})
 		}()
 	}
-	var d dialog.Dialog
-	list.OnSelected = func(i widget.ListItemID) {
-		src := targets[i].Source
-		u.do(func() error { return u.a.SetSource(src) })
-		d.Hide()
-	}
-	body := container.NewBorder(nil, container.NewHBox(widget.NewButton(i18n.L("Refresh"), load), status), nil, nil, list)
+	body := container.NewBorder(nil, container.NewHBox(widget.NewButton(i18n.L("Refresh"), load), status), nil, nil, container.NewVScroll(box))
 	d = dialog.NewCustom(i18n.L("Share a monitor or window"), i18n.L("Cancel"), body, u.win)
 	d.Resize(fyne.NewSize(620, 460))
 	load()
 	d.Show()
+}
+
+// pickHeader heads a section of the source picker.
+func pickHeader(text string) fyne.CanvasObject {
+	t := canvas.NewText(text, colTextDim)
+	t.TextSize = theme.CaptionTextSize()
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	return container.New(&insetLayout{pad: 6}, t)
+}
+
+// pickRow is one display or window in the source picker: its icon and
+// name, lit under the pointer, picked with a click.
+type pickRow struct {
+	widget.BaseWidget
+	bg    *canvas.Rectangle
+	img   *canvas.Image
+	text  *widget.Label
+	onTap func()
+}
+
+func newPickRow(icon fyne.Resource, text string, onTap func()) *pickRow {
+	r := &pickRow{bg: canvas.NewRectangle(color.Transparent), img: canvas.NewImageFromResource(icon), text: widget.NewLabel(text), onTap: onTap}
+	r.bg.CornerRadius = 6
+	r.img.FillMode = canvas.ImageFillContain
+	r.img.SetMinSize(fyne.NewSize(20, 20))
+	r.text.Truncation = fyne.TextTruncateEllipsis
+	r.ExtendBaseWidget(r)
+	return r
+}
+
+// SetImage shows the app's icon instead of the generic one.
+func (r *pickRow) SetImage(img image.Image) {
+	r.img.Resource, r.img.Image = nil, img
+	r.img.Refresh()
+}
+
+func (r *pickRow) Tapped(*fyne.PointEvent)        { r.onTap() }
+func (r *pickRow) Cursor() desktop.Cursor         { return desktop.PointerCursor }
+func (r *pickRow) MouseMoved(*desktop.MouseEvent) {}
+
+func (r *pickRow) MouseIn(*desktop.MouseEvent) {
+	r.bg.FillColor = colRowHover
+	r.bg.Refresh()
+}
+
+func (r *pickRow) MouseOut() {
+	r.bg.FillColor = color.Transparent
+	r.bg.Refresh()
+}
+
+func (r *pickRow) CreateRenderer() fyne.WidgetRenderer {
+	row := container.NewBorder(nil, nil, container.New(&insetLayout{pad: 6}, r.img), nil, r.text)
+	return widget.NewSimpleRenderer(container.NewStack(r.bg, row))
 }
 
 // audioDialog picks the apps whose audio we share.

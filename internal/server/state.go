@@ -11,32 +11,50 @@ import (
 // Rooms this server has served since its last load are kept as they are
 // (see room.Manager.Restore). A missing file is not an error.
 func (s *Server) LoadState() error {
+	_, err := s.loadState()
+	return err
+}
+
+// loadState is LoadState, returning the number of rooms loaded.
+func (s *Server) loadState() (int, error) {
 	if s.cfg.StateFile == "" {
-		return nil
+		return 0, nil
 	}
 	data, err := os.ReadFile(s.cfg.StateFile)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return 0, nil
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
-	n, err := s.rooms.Restore(data)
+	n, problems, err := s.rooms.RestoreReport(data)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	s.cfg.Log.Info("state loaded", "rooms", n)
-	return nil
+	for _, p := range problems {
+		s.cfg.Log.Warn("state: bad room", "problem", p)
+	}
+	s.cfg.Log.Info("state loaded", "rooms", n, "problems", len(problems))
+	return n, nil
 }
 
 // SaveState writes the rooms to Config.StateFile (owner-only, replaced
-// atomically).
+// atomically). While deferred (until Adopt) or drained it writes nothing
+// (bluegreen.go).
 func (s *Server) SaveState() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if !s.writes() {
+		return nil
+	}
+	return s.saveLocked()
+}
+
+// saveLocked is SaveState under saveMu, whatever the mode.
+func (s *Server) saveLocked() error {
 	if s.cfg.StateFile == "" {
 		return nil
 	}
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
 	data, err := s.rooms.Snapshot()
 	if err != nil {
 		return err

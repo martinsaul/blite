@@ -15,7 +15,7 @@ type quitSpy struct {
 
 func (q *quitSpy) Quit() { q.quits++ }
 
-// the tray's Quit must be the app's Quit. With a nil Action,
+// The tray's Quit must be the app's Quit. With a nil Action,
 // Fyne fills in the driver's Quit, which terminates GLFW while the settings
 // watcher and windows live on.
 func TestQuitItemQuitsTheApp(t *testing.T) {

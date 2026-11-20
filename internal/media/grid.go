@@ -35,6 +35,9 @@ type Tile struct {
 	Volume    float64 // playback gain 0..2 (remote tiles)
 	Pinned    bool    // takes the primary area of the main window
 	PoppedOut bool    // shown in its own pop-out window
+	// PiP shows the tile small in a corner, over the others, instead of
+	// in the grid (our own preview). A PiP tile alone fills the window.
+	PiP bool
 	// Stopped: they stopped sharing. The tile says so on black instead of
 	// their last frame (Channel unused) and has no controls.
 	Stopped bool
@@ -50,6 +53,9 @@ const (
 	ControlMute   Control = "mute"    // toggle their audio
 	// ControlVolume sets their playback volume (0..2) from the slider.
 	ControlVolume Control = "volume"
+	// ControlExpand turns our preview from a corner picture (PiP) into a
+	// tile, or back.
+	ControlExpand Control = "expand"
 )
 
 // GridConfig describes a grid or pop-out window.
@@ -100,9 +106,40 @@ func GridSize(n, rows, cols int) (int, int) {
 
 // layoutRects places tiles on a cw x ch canvas. When one of 2+ tiles is
 // Pinned (and rows/cols are auto), the pinned tile gets the primary 4/5 of
-// the width and the others stack in a strip on the right. All coordinates and
-// sizes are even for YUV / videoscale.
+// the width and the others stack in a strip on the right. A PiP tile with
+// others to show sits small in the top right corner of the grid (of the
+// pinned tile, with a strip) over them. All coordinates and sizes are even
+// for YUV / videoscale.
 func layoutRects(tiles []Tile, cw, ch, rows, cols int) (rects []rect, outW, outH int) {
+	pip := slices.IndexFunc(tiles, func(t Tile) bool { return t.PiP })
+	if pip < 0 || len(tiles) < 2 {
+		return gridRects(tiles, cw, ch, rows, cols)
+	}
+	rest := slices.Delete(slices.Clone(tiles), pip, pip+1)
+	rr, outW, outH := gridRects(rest, cw, ch, rows, cols)
+	area := rect{0, 0, outW, outH}
+	if i := slices.IndexFunc(rest, func(t Tile) bool { return t.Pinned }); i >= 0 && len(rest) >= 2 && rows == 0 && cols == 0 {
+		area = rr[i]
+	}
+	rects = slices.Insert(rr, pip, pipRect(area))
+	return rects, outW, outH
+}
+
+// pipRect is the corner picture's place in area: a fifth of its width (at
+// least 240 pixels), 16:9, a little in from its top right corner.
+func pipRect(area rect) rect {
+	w := min(max(area.w/5, 240), area.w/2) &^ 1
+	h := (w * 9 / 16) &^ 1
+	if h > area.h/2 {
+		h = (area.h / 2) &^ 1
+		w = (h * 16 / 9) &^ 1
+	}
+	m := max(area.w/80, 8) &^ 1
+	return rect{area.x + area.w - w - m, area.y + m, w, h}
+}
+
+// gridRects is layoutRects without a PiP tile.
+func gridRects(tiles []Tile, cw, ch, rows, cols int) (rects []rect, outW, outH int) {
 	rects = make([]rect, len(tiles))
 	pinIdx := slices.IndexFunc(tiles, func(t Tile) bool { return t.Pinned })
 	if pinIdx >= 0 && len(tiles) >= 2 && rows == 0 && cols == 0 {
@@ -135,6 +172,15 @@ func layoutRects(tiles []Tile, cw, ch, rows, cols int) (rects []rect, outW, outH
 	return rects, tw * c, th * r
 }
 
+// The corner picture's frame: pipFrame pixels of pipFrameColor (ARGB) round it.
+const (
+	pipFrame      = 2
+	pipFrameColor = 0xff5a6378
+)
+
+// overPiP reports whether tile i is a corner picture drawn over others.
+func overPiP(tiles []Tile, i int) bool { return tiles[i].PiP && len(tiles) >= 2 }
+
 // Grid is one window that shows one or more streams.
 type Grid struct {
 	*Pipeline
@@ -144,6 +190,8 @@ type Grid struct {
 	// Sink is the video sink drawing the window (for the log).
 	Sink string
 	win  Window
+	// dropClicks stops the window handing its clicks to the sink (nil: it doesn't).
+	unclick func()
 	// The controls and spinners; ctl guards them.
 	ctl struct {
 		sync.Mutex
@@ -267,7 +315,7 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		}
 		r := rects[i]
 		o := &ovs[i]
-		o.barW, o.barH = barSize(r.w, r.h, t.Self)
+		o.barW, o.barH = barSize(r.w, r.h, t)
 		o.barX, o.barY = r.x+(r.w-o.barW)/2, r.y+r.h-o.barH-o.barH/3
 		o.spinS = spinnerSize(r.w, r.h)
 		seq := overlaySeq.Add(1)
@@ -291,8 +339,22 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 			}
 		}
 	}
+	// A corner picture goes over the other tiles, on a frame that sets it
+	// apart from them, under the controls.
+	var frame string // the frame's source (none: "")
+	for i, t := range tiles {
+		if !overPiP(tiles, i) || t.Stopped {
+			continue
+		}
+		r := rects[i]
+		pad := fmt.Sprintf("sink_%d", next)
+		next++
+		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d sink_%d::zorder=%d", pad, r.x-pipFrame, pad, r.y-pipFrame, pad, next, i, next+1)
+		frame = fmt.Sprintf(" videotestsrc is-live=true pattern=solid-color foreground-color=%#x ! "+
+			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, gridFPS, pad)
+	}
 	for _, l := range layers {
-		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d %s::alpha=0", l.pad, l.x, l.pad, l.y, l.pad, next+1, l.pad)
+		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d %s::alpha=0", l.pad, l.x, l.pad, l.y, l.pad, next+2, l.pad)
 	}
 	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, gridFPS, sink)
 	for i, t := range tiles {
@@ -313,6 +375,7 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 			"textoverlay name=label%d valignment=top halignment=left font-desc=\"%s\" shaded-background=true ! %smix.sink_%d",
 			t.Channel, interHold, r.w, r.h, i, labelFont(ovs[i].barPad == ""), wait, i)
 	}
+	b.WriteString(frame)
 	for _, l := range layers {
 		// intervideosrc repeats the last frame we drew, like the tiles.
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! mix.%s", l.ch, interHold, l.pad)
@@ -346,6 +409,7 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		}
 	}
 	fail := func(err error) (*Grid, error) {
+		g.dropClicks()
 		if g.Pipeline != nil {
 			g.Pipeline.Stop()
 		}
@@ -390,6 +454,11 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		}
 		if !vs.SetWindow(win.Handle()) {
 			return fail(errors.New("not a video overlay"))
+		}
+		if bw, ok := win.(buttonWindow); ok && controls {
+			// The window takes the clicks the sink doesn't; the sink maps
+			// them to the canvas and sends them up to the nav watch.
+			g.unclick = bw.SetButtonHandler(func(press bool, button int, x, y float64) { vs.SendButton(press, button, x, y) })
 		}
 	}
 	out, err := p.element("out")
@@ -517,7 +586,7 @@ func (g *Grid) pointerLocked(st gst.NavState, now time.Time) {
 			return i, "", 0
 		}
 		o := g.ctl.ov[i]
-		c, v, _ := barHit(x-float64(o.barX), y-float64(o.barY), o.barH, g.ctl.tiles[i].Self)
+		c, v, _ := barHit(x-float64(o.barX), y-float64(o.barY), o.barH, g.ctl.tiles[i])
 		return i, c, v
 	}
 	i, c, _ := hit(st.At.X, st.At.Y)
@@ -543,7 +612,7 @@ func (g *Grid) pointerLocked(st gst.NavState, now time.Time) {
 	for _, k := range st.Clicks {
 		ki, kc, v := hit(k.X, k.Y)
 		switch kc {
-		case ControlEye, ControlPopOut, ControlPin, ControlMute:
+		case ControlEye, ControlPopOut, ControlPin, ControlMute, ControlExpand:
 			id, on := g.ctl.tiles[ki].ID, g.ctl.on
 			go on(id, kc, 0)
 		case ControlVolume:
@@ -569,7 +638,13 @@ func (g *Grid) volumeLocked(i int, v float64) {
 	go on(id, ControlVolume, v)
 }
 
+// tileAtLocked is the tile at x, y: a corner picture over the others first.
 func (g *Grid) tileAtLocked(x, y float64) int {
+	for i, r := range g.ctl.rects {
+		if overPiP(g.ctl.tiles, i) && r.has(x, y) {
+			return i
+		}
+	}
 	for i, r := range g.ctl.rects {
 		if r.has(x, y) {
 			return i
@@ -615,7 +690,7 @@ func (g *Grid) pushBarLocked(i int) {
 	if i == g.ctl.shown {
 		hover = g.ctl.hover
 	}
-	key := fmt.Sprint(t.Self, t.Muted, t.Volume, t.Pinned, t.PoppedOut, hover)
+	key := fmt.Sprint(t.Self, t.Muted, t.Volume, t.Pinned, t.PoppedOut, t.PiP, hover)
 	if key == o.drawn {
 		return
 	}
@@ -759,11 +834,24 @@ func (g *Grid) Stop() {
 	g.ctl.Lock()
 	g.ctl.done = true
 	g.ctl.Unlock()
+	g.dropClicks()
 	g.Pipeline.Stop()
 	if g.feed != nil {
 		g.feed.Stop()
 	}
 	g.free()
+}
+
+// dropClicks stops handing the window's clicks to the sink (before the
+// sink goes).
+func (g *Grid) dropClicks() {
+	g.ctl.Lock()
+	f := g.unclick
+	g.unclick = nil
+	g.ctl.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 func (g *Grid) free() {

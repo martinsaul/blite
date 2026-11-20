@@ -51,6 +51,7 @@ import (
 	"blite/internal/rtc"
 	"blite/internal/session"
 	"blite/internal/ui"
+	"blite/internal/uiscale"
 	"blite/internal/update"
 )
 
@@ -334,6 +335,8 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		fatal(log, "join", err)
 	}
 	logToFiles(log)
+	// Before Fyne starts: on X11 Fyne ignores the desktop's scaling.
+	uiscale.Apply(app.LoadUIScale(), log)
 	if unguarded != "" {
 		log.Warn("running without the crash guard", "why", unguarded)
 	}

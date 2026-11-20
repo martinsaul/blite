@@ -14,16 +14,23 @@
 //	panel         In-call control window with a person's side panel open
 //	gear          Control window with Gear menu open (and update dot)
 //	help          Control window with ? menu open
+//	picker        "Share a monitor or window" with made-up displays and windows
+//	video         The main video window: two streams and our preview in its corner
+//	video-tile    The main video window with our preview expanded to a tile
 package main
 
 import (
 	"context"
 	"flag"
+	"image"
+	"image/color"
+	"math"
 	"slices"
 	"time"
 
 	"blite/internal/app"
 	"blite/internal/audio"
+	"blite/internal/capture"
 	"blite/internal/feeds"
 	"blite/internal/nui"
 	"blite/internal/session"
@@ -328,8 +335,14 @@ func main() {
 	case "help":
 		d.inCall = true
 		scene = "help"
+	case "picker":
+		d.inCall = true
+		scene = "picker"
+	case "video", "video-tile":
+		videoScene(arg == "video-tile", *quitAfter)
+		return
 	}
-	opts := nui.Options{Scene: scene}
+	opts := nui.Options{Scene: scene, Targets: demoTargets, TargetIcons: demoIcons}
 	if *quitAfter > 0 {
 		opts.OnReady = func() {
 			time.Sleep(*quitAfter)
@@ -337,4 +350,46 @@ func main() {
 		}
 	}
 	nui.Run(d, opts)
+}
+
+// demoTargets are made-up displays and windows for the source picker.
+func demoTargets() ([]capture.Target, error) {
+	return []capture.Target{
+		{Kind: "monitor", Name: "DP-1 (5120x2880), primary", Source: "monitor:0,0,5120,2880", Primary: true},
+		{Kind: "monitor", Name: "DP-2 (5120x2880)", Source: "monitor:5120,0,5120,2880"},
+		{Kind: "window", Name: "#general | Game Night - Discord", Source: "window:0x1", App: "discord"},
+		{Kind: "window", Name: "Bellion Share - Mozilla Firefox", Source: "window:0x2", App: "firefox"},
+		{Kind: "window", Name: "~/projects - Terminal", Source: "window:0x3", App: "Gnome-terminal"},
+		{Kind: "window", Name: "notes.txt - Text Editor", Source: "window:0x4", App: "xed"},
+		{Kind: "window", Name: "Untitled Window", Source: "window:0x5", App: "legacy"},
+	}, nil
+}
+
+// demoIcons draws a round app icon for most demo windows; one keeps the
+// generic icon, as an app without one does.
+func demoIcons(ts []capture.Target) map[string]image.Image {
+	cols := map[string]color.NRGBA{
+		"window:0x1": {0x58, 0x65, 0xF2, 0xFF},
+		"window:0x2": {0xFF, 0x71, 0x39, 0xFF},
+		"window:0x3": {0x30, 0x34, 0x3C, 0xFF},
+		"window:0x4": {0x3C, 0xCB, 0x7F, 0xFF},
+	}
+	out := map[string]image.Image{}
+	for _, t := range ts {
+		c, ok := cols[t.Source]
+		if !ok {
+			continue
+		}
+		const s = 48
+		img := image.NewNRGBA(image.Rect(0, 0, s, s))
+		for y := range s {
+			for x := range s {
+				if d := math.Hypot(float64(x)-s/2+0.5, float64(y)-s/2+0.5); d < s/2 {
+					img.SetNRGBA(x, y, c)
+				}
+			}
+		}
+		out[t.Source] = img
+	}
+	return out
 }

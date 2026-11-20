@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"blite/internal/gst"
 )
 
 // ShareSinkName is the virtual sink Blite captures from.
@@ -57,8 +60,10 @@ func dump(ctx context.Context) ([]pwObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	// pw-dump 1.0.x can append a second array of updates after the snapshot;
+	// the first array is the complete graph.
 	var objs []pwObject
-	return objs, json.Unmarshal(out, &objs)
+	return objs, json.NewDecoder(bytes.NewReader(out)).Decode(&objs)
 }
 
 func appKey(name string, pid int) string { return name + "#" + strconv.Itoa(pid) }
@@ -80,11 +85,15 @@ type Sharer struct {
 	ownPID int
 	cancel context.CancelFunc
 	done   chan struct{}
+	log    *slog.Logger
+	logMu  sync.Mutex // sync runs from Select and the loop
+	shown  shareLog
 }
 
 // NewSharer creates the virtual sink (removing a stale one from a crashed run)
-// and starts keeping links in line with the selection.
-func NewSharer() (*Sharer, error) {
+// and starts keeping links in line with the selection. log (nil = none) gets
+// the streams it links.
+func NewSharer(log *slog.Logger) (*Sharer, error) {
 	ctx := context.Background()
 	unloadStale(ctx)
 	// Note: don't set priority.driver=0 here; the sink then never drives the
@@ -96,8 +105,9 @@ func NewSharer() (*Sharer, error) {
 		return nil, fmt.Errorf("create %s sink (is pipewire-pulse running?): %w", ShareSinkName, err)
 	}
 	cctx, cancel := context.WithCancel(ctx)
+	log = orDiscard(log)
 	s := &Sharer{module: strings.TrimSpace(string(out)), sel: Selection{Mode: "none"},
-		ownPID: os.Getpid(), cancel: cancel, done: make(chan struct{})}
+		ownPID: os.Getpid(), cancel: cancel, done: make(chan struct{}), log: log, shown: shareLog{log: log}}
 	go s.loop(cctx)
 	return s, nil
 }
@@ -116,8 +126,17 @@ func unloadStale(ctx context.Context) {
 }
 
 // Capture returns the GStreamer source that records the shared mix.
+//
+// always-copy: once a playing stream is linked in, the sink joins the hardware
+// device's graph, and pipewiresrc (1.0.x) then stalls for good after its 8 pool
+// buffers (~0.5 s of audio) unless it copies them out. The property
+// is deprecated in 1.4, so it is only set where it exists.
 func (s *Sharer) Capture() CaptureSource {
-	return CaptureSource(fmt.Sprintf("pipewiresrc target-object=%s stream-properties=\"props,stream.capture.sink=true,node.dont-reconnect=true\" do-timestamp=true", ShareSinkName))
+	src := fmt.Sprintf("pipewiresrc target-object=%s stream-properties=\"props,stream.capture.sink=true,node.dont-reconnect=true\" do-timestamp=true", ShareSinkName)
+	if gst.HasProperty("pipewiresrc", "always-copy") {
+		src += " always-copy=true"
+	}
+	return CaptureSource(src)
 }
 
 // Select changes what is shared and applies it immediately.
@@ -137,12 +156,20 @@ func (s *Sharer) loop(ctx context.Context) {
 	defer close(s.done)
 	t := time.NewTicker(2 * time.Second) // picks up apps that start or restart their stream
 	defer t.Stop()
+	var last string // the error logged last, so a lasting one is logged once
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.sync(ctx)
+			err := s.sync(ctx)
+			switch {
+			case err == nil:
+				last = ""
+			case err.Error() != last && ctx.Err() == nil:
+				last = err.Error()
+				s.log.Warn("shared audio links", "err", err)
+			}
 		}
 	}
 }
@@ -192,10 +219,22 @@ func (s *Sharer) sync(ctx context.Context) error {
 	ins := map[string]int{} // channel -> input port of blite-share
 	shareIn := map[int]bool{}
 	type outPort struct {
-		id int
-		ch string
+		id, node int
+		ch       string
 	}
 	var outs []outPort
+	matched := map[int]*stream{} // node -> stream
+	var playing []string
+	for id, n := range nodes {
+		if n.str("media.class") != "Stream/Output/Audio" || n.num("application.process.id") == s.ownPID {
+			continue
+		}
+		playing = append(playing, appKey(appName(n), n.num("application.process.id")))
+		if included(n) {
+			matched[id] = &stream{name: appName(n), pid: n.num("application.process.id")}
+		}
+	}
+	sort.Strings(playing)
 	for _, o := range objs {
 		if o.Type != "PipeWire:Interface:Port" {
 			continue
@@ -206,8 +245,8 @@ func (s *Sharer) sync(ctx context.Context) error {
 			ins[o.str("audio.channel")] = o.ID
 			shareIn[o.ID] = true
 		case o.str("port.direction") == "out":
-			if n, ok := nodes[node]; ok && included(n) {
-				outs = append(outs, outPort{o.ID, o.str("audio.channel")})
+			if _, ok := matched[node]; ok {
+				outs = append(outs, outPort{o.ID, node, o.str("audio.channel")})
 			}
 		}
 	}
@@ -227,9 +266,17 @@ func (s *Sharer) sync(ctx context.Context) error {
 		for _, ch := range chans {
 			if in, ok := ins[ch]; ok {
 				wanted[[2]int{p.id, in}] = true
+				matched[p.node].links++
 			}
 		}
 	}
+	var streams []stream
+	for _, m := range matched {
+		streams = append(streams, *m)
+	}
+	s.logMu.Lock()
+	s.shown.note(sel, streams, playing, time.Now())
+	s.logMu.Unlock()
 
 	var firstErr error
 	for l := range wanted {

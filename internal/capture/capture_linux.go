@@ -17,7 +17,8 @@ import (
 func init() { xgb.Logger = log.New(io.Discard, "", 0) } // it reports a missing ~/.Xauthority on every connect
 
 // List returns the X11 monitors (RandR) and the window manager's client
-// windows (_NET_CLIENT_LIST), skipping minimized and untitled ones.
+// windows (_NET_CLIENT_LIST), skipping minimized and untitled ones and the
+// desktop's own (see shellWindow).
 func List() ([]Target, error) {
 	c, err := xgb.NewConn()
 	if err != nil {
@@ -44,7 +45,7 @@ func List() ([]Target, error) {
 		ws = topLevel(c, root) // no EWMH window manager
 	}
 	for _, w := range ws {
-		if hidden(c, w) {
+		if hidden(c, w) || shellWindow(c, w) {
 			continue
 		}
 		title := windowTitle(c, w)
@@ -125,6 +126,32 @@ func hidden(c *xgb.Conn, w xproto.Window) bool {
 	return false
 }
 
+// shellWindow reports whether w is part of the desktop rather than an app:
+// the desktop icons layer (_NET_WM_WINDOW_TYPE_DESKTOP; Cinnamon's
+// "Desktop", nemo-desktop) or a panel (_NET_WM_WINDOW_TYPE_DOCK).
+func shellWindow(c *xgb.Conn, w xproto.Window) bool {
+	if r := prop(c, w, "_NET_WM_WINDOW_TYPE", xproto.AtomAtom); r != nil && r.Format == 32 {
+		desktop, dock := atom(c, "_NET_WM_WINDOW_TYPE_DESKTOP"), atom(c, "_NET_WM_WINDOW_TYPE_DOCK")
+		for i := 0; i+4 <= len(r.Value); i += 4 {
+			if a := xproto.Atom(xgb.Get32(r.Value[i:])); a != xproto.AtomNone && (a == desktop || a == dock) {
+				return true
+			}
+		}
+	}
+	// In case it has no type (yet): the desktop icons of file managers.
+	inst, class := windowClasses(c, w)
+	return shellClass(inst) || shellClass(class)
+}
+
+// shellClass reports whether a WM_CLASS part is a file manager's desktop.
+func shellClass(s string) bool {
+	switch strings.ToLower(s) {
+	case "nemo-desktop", "desktop_window", "xfdesktop", "caja-desktop":
+		return true
+	}
+	return false
+}
+
 func windowTitle(c *xgb.Conn, w xproto.Window) string {
 	if r := prop(c, w, "_NET_WM_NAME", xproto.GetPropertyTypeAny); r != nil && len(r.Value) > 0 {
 		return strings.TrimSpace(string(r.Value))
@@ -137,17 +164,25 @@ func windowTitle(c *xgb.Conn, w xproto.Window) string {
 
 // windowClass is the class half of WM_CLASS ("Firefox"), else its instance.
 func windowClass(c *xgb.Conn, w xproto.Window) string {
+	inst, class := windowClasses(c, w)
+	if class != "" {
+		return class
+	}
+	return inst
+}
+
+// windowClasses is WM_CLASS: the instance ("navigator") and class ("Firefox").
+func windowClasses(c *xgb.Conn, w xproto.Window) (inst, class string) {
 	r := prop(c, w, "WM_CLASS", xproto.AtomString)
 	if r == nil {
-		return ""
+		return "", ""
 	}
-	parts := strings.Split(strings.TrimRight(string(r.Value), "\x00"), "\x00")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if p := strings.TrimSpace(parts[i]); p != "" {
-			return p
-		}
+	parts := strings.Split(string(r.Value), "\x00")
+	inst = strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		class = strings.TrimSpace(parts[1])
 	}
-	return ""
+	return inst, class
 }
 
 func windowApp(id uint64) string {
@@ -203,6 +238,11 @@ func icons(ts []Target) map[string]image.Image {
 				defer c.Close()
 			}
 			img = netWMIcon(c, xproto.Window(id))
+			if img == nil {
+				// No _NET_WM_ICON (Discord, often): the icon its app's
+				// .desktop file names.
+				img = appIcon(windowClasses(c, xproto.Window(id)))
+			}
 			iconMu.Lock()
 			iconCache[id] = cachedIcon{img, time.Now()}
 			iconMu.Unlock()

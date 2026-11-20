@@ -98,6 +98,14 @@ static int blite_has_factory(const char *name) {
 	return 1;
 }
 
+static int blite_has_property(const char *factory, const char *prop) {
+	GstElement *e = gst_element_factory_make(factory, NULL);
+	if (e == NULL) return 0;
+	int ok = g_object_class_find_property(G_OBJECT_GET_CLASS(e), prop) != NULL;
+	gst_object_unref(e);
+	return ok;
+}
+
 // Asks the encoder upstream of a sink for a keyframe as soon as possible.
 static int blite_force_keyframe(GstElement *sink) {
 	GstEvent *ev = gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0);
@@ -162,6 +170,59 @@ static int blite_thin_add(GstElement *e, blite_thin *t) {
 
 static void blite_thin_set(blite_thin *t, gint keep) { g_atomic_int_set(&t->keep, keep); }
 static gint blite_thin_passed(blite_thin *t) { return g_atomic_int_get(&t->passed); }
+
+// The peak and sum of squares of the S16 samples entering an element since
+// the last take (opusenc's input: S16LE, interleaved).
+typedef struct {
+	GMutex m;
+	gint peak;
+	double sum;
+	guint64 n;
+} blite_meter;
+
+static GstPadProbeReturn blite_meter_probe(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
+	blite_meter *mt = d;
+	GstBuffer *b = GST_PAD_PROBE_INFO_BUFFER(info);
+	GstMapInfo mi;
+	if (b == NULL || !gst_buffer_map(b, &mi, GST_MAP_READ)) return GST_PAD_PROBE_OK;
+	const gint16 *s = (const gint16 *)mi.data;
+	gsize n = mi.size / 2;
+	gint peak = 0;
+	double sum = 0;
+	for (gsize i = 0; i < n; i++) {
+		gint v = s[i] < 0 ? -(gint)s[i] : s[i];
+		if (v > peak) peak = v;
+		sum += (double)v * v;
+	}
+	gst_buffer_unmap(b, &mi);
+	g_mutex_lock(&mt->m);
+	if (peak > mt->peak) mt->peak = peak;
+	mt->sum += sum;
+	mt->n += n;
+	g_mutex_unlock(&mt->m);
+	return GST_PAD_PROBE_OK;
+}
+
+static int blite_meter_add(GstElement *e, blite_meter *mt) {
+	GstPad *pad = gst_element_get_static_pad(e, "sink");
+	if (pad == NULL) return 0;
+	g_mutex_init(&mt->m);
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, blite_meter_probe, mt, NULL);
+	gst_object_unref(pad);
+	return 1;
+}
+
+static void blite_meter_take(blite_meter *mt, gint *peak, double *sum, guint64 *n) {
+	g_mutex_lock(&mt->m);
+	*peak = mt->peak; *sum = mt->sum; *n = mt->n;
+	mt->peak = 0; mt->sum = 0; mt->n = 0;
+	g_mutex_unlock(&mt->m);
+}
+
+static void blite_meter_free(blite_meter *mt) {
+	g_mutex_clear(&mt->m);
+	free(mt);
+}
 
 // Pointer events a video sink sends upstream (GstNavigation), collected
 // for polling from Go: the last pointer position, a move counter, and
@@ -255,6 +316,16 @@ static int blite_send_mouse(GstElement *sink, int kind, double x, double y) {
 	return ok;
 }
 
+// Hands a pointer button event on a sink's window to the sink, which maps it
+// from window to video pixels and sends it upstream like the events it gets
+// itself. For the clicks a sink doesn't ask X for (see SendButton).
+static int blite_nav_button(GstElement *e, int press, int button, double x, double y) {
+	if (!GST_IS_NAVIGATION(e)) return 0;
+	const char *ev = button == 0 ? "mouse-move" : press ? "mouse-button-press" : "mouse-button-release";
+	gst_navigation_send_mouse_event(GST_NAVIGATION(e), ev, button, x, y);
+	return 1;
+}
+
 static void blite_unref(GstElement *e) { gst_object_unref(e); }
 static void blite_init(void) { gst_init(NULL, NULL); }
 */
@@ -262,6 +333,7 @@ import "C"
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"time"
 	"unsafe"
@@ -278,6 +350,15 @@ func HasFactory(name string) bool {
 	cs := C.CString(name)
 	defer C.free(unsafe.Pointer(cs))
 	return C.blite_has_factory(cs) == 1
+}
+
+// HasProperty reports whether elements from factory have property prop.
+func HasProperty(factory, prop string) bool {
+	Init()
+	cf, cp := C.CString(factory), C.CString(prop)
+	defer C.free(unsafe.Pointer(cf))
+	defer C.free(unsafe.Pointer(cp))
+	return C.blite_has_property(cf, cp) == 1
 }
 
 // Element is a reference to a GstElement.
@@ -329,6 +410,7 @@ func (e *Element) Release() {
 
 const (
 	stateNull    = 1
+	statePaused  = 3
 	statePlaying = 4
 )
 
@@ -336,6 +418,16 @@ const (
 func (p *Pipeline) Play() error {
 	if C.blite_set_state(p.p, statePlaying) == 0 {
 		return errors.New("pipeline failed to start")
+	}
+	return nil
+}
+
+// Pause pauses the pipeline. Live sources (ximagesrc, d3d11screencapturesrc)
+// stop producing until Play, and the running time doesn't advance meanwhile,
+// so timestamps continue without a gap.
+func (p *Pipeline) Pause() error {
+	if C.blite_set_state(p.p, statePaused) == 0 {
+		return errors.New("pipeline failed to pause")
 	}
 	return nil
 }
@@ -539,6 +631,43 @@ func (t *Thinner) Passed() int { return int(C.blite_thin_passed(t.t)) }
 // Free releases it.
 func (t *Thinner) Free() { C.free(unsafe.Pointer(t.t)) }
 
+// Meter measures the 16-bit audio entering an element.
+type Meter struct{ m *C.blite_meter }
+
+// Meter starts measuring e's input (S16 samples). Free it only once the
+// pipeline is in NULL.
+func (e *Element) Meter() (*Meter, bool) {
+	m := (*C.blite_meter)(C.calloc(1, C.size_t(unsafe.Sizeof(C.blite_meter{}))))
+	if C.blite_meter_add(e.p, m) != 1 {
+		C.free(unsafe.Pointer(m))
+		return nil, false
+	}
+	return &Meter{m: m}, true
+}
+
+// Take returns the peak and RMS level (dBFS, floored at -96) since the
+// previous Take; ok is false when no samples came.
+func (m *Meter) Take() (peakDB, rmsDB float64, ok bool) {
+	var peak C.gint
+	var sum C.double
+	var n C.guint64
+	C.blite_meter_take(m.m, &peak, &sum, &n)
+	if n == 0 {
+		return 0, 0, false
+	}
+	return dBFS(float64(peak) / 32768), dBFS(math.Sqrt(float64(sum)/float64(n)) / 32768), true
+}
+
+func dBFS(v float64) float64 {
+	if v <= 0 {
+		return -96
+	}
+	return max(-96, 20*math.Log10(v))
+}
+
+// Free releases it.
+func (m *Meter) Free() { C.blite_meter_free(m.m) }
+
 // Nav is the pointer state of a video window (see WatchNav).
 type Nav struct{ n *C.blite_nav }
 
@@ -603,4 +732,17 @@ func (e *Element) SendMouse(click bool, x, y float64) bool {
 // SendPress makes sink send a left-button press upstream (tests).
 func (e *Element) SendPress(x, y float64) bool {
 	return C.blite_send_mouse(e.p, 2, C.double(x), C.double(y)) == 1
+}
+
+// SendButton hands a pointer button press or release (button 0: a move) at
+// x, y in the pixels of the sink's window to the sink (a GstNavigation), which sends it upstream
+// in video pixels as if it had seen it. xvimagesink and ximagesink ask X for
+// moves but not for clicks on a window they were given (X lets one client
+// take them), so whoever owns the window passes them on. False if e can't.
+func (e *Element) SendButton(press bool, button int, x, y float64) bool {
+	p := C.int(0)
+	if press {
+		p = 1
+	}
+	return C.blite_nav_button(e.p, p, C.int(button), C.double(x), C.double(y)) == 1
 }

@@ -585,7 +585,7 @@ func crashTestLog(appBytes, similar, distinct int) string {
 	return b.String()
 }
 
-// a crash report keeps the panic, the crashing goroutine, main,
+// A crash report keeps the panic, the crashing goroutine, main,
 // the app's last lines and the guard's, whatever the goroutine count.
 func TestCrashLogSections(t *testing.T) {
 	log := crashTestLog(2<<20, 500, 3000)

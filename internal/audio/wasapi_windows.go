@@ -3,6 +3,7 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -23,11 +25,15 @@ import (
 
 // Sharer holds the selection; the capture description follows it.
 type Sharer struct {
-	mu  sync.Mutex
-	sel Selection
+	mu    sync.Mutex
+	sel   Selection
+	shown shareLog
 }
 
-func NewSharer() (*Sharer, error) { return &Sharer{sel: Selection{Mode: "none"}}, nil }
+// NewSharer: log (nil = none) gets the processes each selection captures.
+func NewSharer(log *slog.Logger) (*Sharer, error) {
+	return &Sharer{sel: Selection{Mode: "none"}, shown: shareLog{log: orDiscard(log)}}, nil
+}
 
 func (s *Sharer) Select(sel Selection) error {
 	switch sel.Mode {
@@ -36,8 +42,41 @@ func (s *Sharer) Select(sel Selection) error {
 		return errors.New("unknown audio mode")
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.sel = sel
-	s.mu.Unlock()
+	// Loopback can't tell whether a process plays anything: log the
+	// processes captured, and a selection whose processes are all gone
+	// (e.g. the app restarted), which captures silence.
+	var matched []stream
+	for _, pid := range targetPIDs(sel) {
+		if name := exeName(uint32(pid)); name != "" {
+			matched = append(matched, stream{name: name, pid: pid, links: 1})
+		}
+	}
+	if sel.Mode != "system" {
+		s.shown.note(sel, matched, nil, time.Now())
+	}
+	return nil
+}
+
+// targetPIDs are the processes an apps or window selection captures.
+func targetPIDs(sel Selection) []int {
+	switch sel.Mode {
+	case "window":
+		if sel.PID > 0 {
+			return []int{sel.PID}
+		}
+	case "apps":
+		var pids []int
+		for _, k := range sel.Apps {
+			if i := strings.LastIndexByte(k, '#'); i >= 0 {
+				if pid, err := strconv.Atoi(k[i+1:]); err == nil && pid > 0 {
+					pids = append(pids, pid)
+				}
+			}
+		}
+		return pids
+	}
 	return nil
 }
 
@@ -58,20 +97,8 @@ func (s *Sharer) Capture() CaptureSource {
 	switch sel.Mode {
 	case "system":
 		return CaptureSource(loopback("exclude-process-tree", os.Getpid()))
-	case "window":
-		if sel.PID > 0 {
-			return CaptureSource(loopback("include-process-tree", sel.PID))
-		}
-		return silence
-	case "apps":
-		var pids []int
-		for _, k := range sel.Apps {
-			if i := strings.LastIndexByte(k, '#'); i >= 0 {
-				if pid, err := strconv.Atoi(k[i+1:]); err == nil && pid > 0 {
-					pids = append(pids, pid)
-				}
-			}
-		}
+	case "window", "apps":
+		pids := targetPIDs(sel)
 		switch len(pids) {
 		case 0:
 			return silence

@@ -13,7 +13,7 @@ import (
 
 // The bar, in units of its height h: eye, pop-out/pop-in and pin on every
 // tile, plus mute and the volume slider (0..maxVolume, a tick at 100%) on
-// remote tiles.
+// remote tiles. Our own preview has its own set (barButtons).
 const (
 	barPad       = 0.3
 	barEyeX      = barPad + 0.5 // button centres
@@ -23,7 +23,6 @@ const (
 	barSliderX0  = barPad + 4.35
 	barSliderX1  = barPad + 7.15
 	barFullUnits = barSliderX1 + 0.4
-	barSelfUnits = barPad + 3.0 + barPad
 	maxVolume    = 2.0
 	barMinH      = 24
 	barMaxH      = 48
@@ -31,16 +30,35 @@ const (
 	spinnerMaxPx = 88
 )
 
-func barUnits(self bool) float64 {
-	if self {
-		return barSelfUnits
+// barButtons are the buttons on tile t's bar, left to right (remote tiles
+// have the volume slider after them). Our preview in the corner: hide,
+// pop out, expand to a tile; as a tile: hide, pop out, pin, back to the
+// corner; popped out: hide, pop back in, pin.
+func barButtons(t Tile) []Control {
+	switch {
+	case !t.Self:
+		return []Control{ControlEye, ControlPopOut, ControlPin, ControlMute}
+	case t.PiP:
+		return []Control{ControlEye, ControlPopOut, ControlExpand}
+	case t.PoppedOut:
+		return []Control{ControlEye, ControlPopOut, ControlPin}
 	}
-	return barFullUnits
+	return []Control{ControlEye, ControlPopOut, ControlPin, ControlExpand}
 }
 
-// barSize is the bar's size on a tile tw x th pixels.
-func barSize(tw, th int, self bool) (w, h int) {
-	u := barUnits(self)
+// barButtonX is the centre of the k-th button.
+func barButtonX(k int) float64 { return barPad + float64(k) + 0.5 }
+
+func barUnits(t Tile) float64 {
+	if !t.Self {
+		return barFullUnits
+	}
+	return barPad + float64(len(barButtons(t))) + barPad
+}
+
+// barSize is tile t's bar size on a tile tw x th pixels.
+func barSize(tw, th int, t Tile) (w, h int) {
+	u := barUnits(t)
 	h = min(max(th/12, barMinH), barMaxH)
 	if maxH := int(float64(max(tw-8, 24)) / u); h > maxH {
 		h = max(maxH, 12)
@@ -56,25 +74,18 @@ func spinnerSize(tw, th int) int {
 	return max(min(max(side/7, spinnerMinPx), min(spinnerMaxPx, side&^1))&^1, 2)
 }
 
-// barHit is what a point x, y of the bar (pixels from its top left) hits:
-// a button, or the slider with the volume there.
-func barHit(x, y float64, h int, self bool) (Control, float64, bool) {
+// barHit is what a point x, y of tile t's bar (pixels from its top left)
+// hits: a button, or the slider with the volume there.
+func barHit(x, y float64, h int, t Tile) (Control, float64, bool) {
 	u, v := x/float64(h), y/float64(h)
-	if v < 0 || v > 1 || u < 0 || u > barUnits(self) {
+	if v < 0 || v > 1 || u < 0 || u > barUnits(t) {
 		return "", 0, false
 	}
-	switch {
-	case u < barPad+1:
-		return ControlEye, 0, true
-	case u < barPad+2:
-		return ControlPopOut, 0, true
-	case u < barPad+3:
-		return ControlPin, 0, true
-	case self:
-		return "", 0, false
-	case u < barPad+4:
-		return ControlMute, 0, true
-	case u >= barSliderX0-0.25:
+	bs := barButtons(t)
+	if k := int(max(u-barPad, 0)); k < len(bs) {
+		return bs[k], 0, true
+	}
+	if !t.Self && u >= barSliderX0-0.25 {
 		return ControlVolume, sliderValue(u), true
 	}
 	return "", 0, false
@@ -174,84 +185,30 @@ var (
 	accentBg = color.NRGBA{108, 123, 255, 190}
 )
 
-// drawBar draws tile t's control bar w x h pixels: eye, pop-out/pop-in, pin,
-// and (for remote tiles) mute and the volume slider.
+// drawBar draws tile t's control bar w x h pixels (barButtons, and the
+// volume slider on remote tiles).
 func drawBar(w, h int, t Tile, hover Control) *image.NRGBA {
-	u := barUnits(t.Self)
+	u := barUnits(t)
 	cv := canvas{image.NewNRGBA(image.Rect(0, 0, w, h)), float64(w) / u}
 	cv.fill(panel, capsule(0.5, 0.5, u-0.5, 0.5, 0.5))
-	if t.Pinned {
-		cv.fill(accentBg, circle(barPinX, 0.5, 0.42))
-	}
-	buttons := []struct {
-		c Control
-		x float64
-	}{
-		{ControlEye, barEyeX},
-		{ControlPopOut, barPopX},
-		{ControlPin, barPinX},
-	}
-	if !t.Self {
-		buttons = append(buttons, struct {
-			c Control
-			x float64
-		}{ControlMute, barMuteX})
-	}
-	for _, b := range buttons {
-		if hover == b.c {
-			cv.fill(hoverBg, circle(b.x, 0.5, 0.42))
+	bs := barButtons(t)
+	for k, c := range bs {
+		if c == ControlPin && t.Pinned {
+			cv.fill(accentBg, circle(barButtonX(k), 0.5, 0.42))
+		}
+		if hover == c {
+			cv.fill(hoverBg, circle(barButtonX(k), 0.5, 0.42))
 		}
 	}
-
-	y, s := 0.5, 0.5
-
-	// eye (watching; clicking stops watching)
-	x := barEyeX
-	cv.fill(white, arc(x, y+0.20*s, 0.44*s, 0.055*s, -2.32, -0.82))
-	cv.fill(white, arc(x, y-0.20*s, 0.44*s, 0.055*s, 0.82, 2.32))
-	cv.fill(white, circle(x, y, 0.13*s))
-
-	// pop out (arrow out of frame) or pop in (arrow back into frame)
-	x = barPopX
-	cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.34*s, y+0.34*s, 0.05*s))
-	cv.fill(white, capsule(x-0.34*s, y+0.34*s, x+0.20*s, y+0.34*s, 0.05*s))
-	cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.06*s, y-0.20*s, 0.05*s))
-	cv.fill(white, capsule(x+0.20*s, y+0.06*s, x+0.20*s, y+0.34*s, 0.05*s))
-	if t.PoppedOut {
-		cv.fill(white, capsule(x+0.34*s, y-0.34*s, x-0.04*s, y+0.04*s, 0.05*s))
-		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.20*s, y+0.04*s, 0.05*s))
-		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x-0.04*s, y-0.20*s, 0.05*s))
-	} else {
-		cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.34*s, y-0.34*s, 0.05*s))
-		cv.fill(white, capsule(x+0.10*s, y-0.34*s, x+0.34*s, y-0.34*s, 0.05*s))
-		cv.fill(white, capsule(x+0.34*s, y-0.34*s, x+0.34*s, y-0.10*s, 0.05*s))
+	for k, c := range bs {
+		cv.drawButton(c, barButtonX(k), t)
 	}
-
-	// pin (pushpin)
-	x = barPinX
-	cv.fill(white, capsule(x-0.18*s, y-0.30*s, x+0.18*s, y-0.30*s, 0.055*s))
-	cv.fill(white, polygon([2]float64{x - 0.14*s, y - 0.28*s}, [2]float64{x + 0.14*s, y - 0.28*s},
-		[2]float64{x + 0.24*s, y + 0.06*s}, [2]float64{x - 0.24*s, y + 0.06*s}))
-	cv.fill(white, capsule(x-0.26*s, y+0.06*s, x+0.26*s, y+0.06*s, 0.05*s))
-	cv.fill(white, capsule(x, y+0.08*s, x, y+0.38*s, 0.045*s))
-
 	if t.Self {
 		return cv.img
 	}
 
-	// speaker: box and cone, then waves or a cross
-	x = barMuteX - 0.06
-	cv.fill(white, polygon([2]float64{x - 0.34*s, y - 0.13*s}, [2]float64{x - 0.12*s, y - 0.13*s}, [2]float64{x + 0.14*s, y - 0.4*s},
-		[2]float64{x + 0.14*s, y + 0.4*s}, [2]float64{x - 0.12*s, y + 0.13*s}, [2]float64{x - 0.34*s, y + 0.13*s}))
-	if t.Muted {
-		cv.fill(white, capsule(x+0.3*s, y-0.17*s, x+0.62*s, y+0.17*s, 0.055*s))
-		cv.fill(white, capsule(x+0.3*s, y+0.17*s, x+0.62*s, y-0.17*s, 0.055*s))
-	} else {
-		cv.fill(white, arc(x+0.14*s, y, 0.26*s, 0.05*s, -0.85, 0.85))
-		cv.fill(white, arc(x+0.14*s, y, 0.46*s, 0.05*s, -0.85, 0.85))
-	}
-
 	// volume slider
+	y := 0.5
 	f := min(max(t.Volume/maxVolume, 0), 1)
 	xv := barSliderX0 + f*(barSliderX1-barSliderX0)
 	fillC := white
@@ -264,6 +221,69 @@ func drawBar(w, h int, t Tile, hover Control) *image.NRGBA {
 	cv.fill(fillC, capsule(barSliderX0, y, xv, y, 0.06))
 	cv.fill(fillC, circle(xv, y, 0.16))
 	return cv.img
+}
+
+// drawButton draws control c's icon centred at x.
+func (cv canvas) drawButton(c Control, x float64, t Tile) {
+	y, s := 0.5, 0.5
+	switch c {
+	case ControlEye: // watching; clicking stops watching
+		cv.fill(white, arc(x, y+0.20*s, 0.44*s, 0.055*s, -2.32, -0.82))
+		cv.fill(white, arc(x, y-0.20*s, 0.44*s, 0.055*s, 0.82, 2.32))
+		cv.fill(white, circle(x, y, 0.13*s))
+
+	case ControlPopOut: // arrow out of the frame, or back into it
+		cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.34*s, y+0.34*s, 0.05*s))
+		cv.fill(white, capsule(x-0.34*s, y+0.34*s, x+0.20*s, y+0.34*s, 0.05*s))
+		cv.fill(white, capsule(x-0.34*s, y-0.20*s, x-0.06*s, y-0.20*s, 0.05*s))
+		cv.fill(white, capsule(x+0.20*s, y+0.06*s, x+0.20*s, y+0.34*s, 0.05*s))
+		if t.PoppedOut {
+			cv.fill(white, capsule(x+0.34*s, y-0.34*s, x-0.04*s, y+0.04*s, 0.05*s))
+			cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.20*s, y+0.04*s, 0.05*s))
+			cv.fill(white, capsule(x-0.04*s, y+0.04*s, x-0.04*s, y-0.20*s, 0.05*s))
+		} else {
+			cv.fill(white, capsule(x-0.04*s, y+0.04*s, x+0.34*s, y-0.34*s, 0.05*s))
+			cv.fill(white, capsule(x+0.10*s, y-0.34*s, x+0.34*s, y-0.34*s, 0.05*s))
+			cv.fill(white, capsule(x+0.34*s, y-0.34*s, x+0.34*s, y-0.10*s, 0.05*s))
+		}
+
+	case ControlPin: // pushpin
+		cv.fill(white, capsule(x-0.18*s, y-0.30*s, x+0.18*s, y-0.30*s, 0.055*s))
+		cv.fill(white, polygon([2]float64{x - 0.14*s, y - 0.28*s}, [2]float64{x + 0.14*s, y - 0.28*s},
+			[2]float64{x + 0.24*s, y + 0.06*s}, [2]float64{x - 0.24*s, y + 0.06*s}))
+		cv.fill(white, capsule(x-0.26*s, y+0.06*s, x+0.26*s, y+0.06*s, 0.05*s))
+		cv.fill(white, capsule(x, y+0.08*s, x, y+0.38*s, 0.045*s))
+
+	case ControlExpand:
+		if t.PiP { // expand: two arrows out to the corners
+			for _, d := range []float64{-1, 1} {
+				tx, ty := x+d*0.36*s, y-d*0.36*s
+				cv.fill(white, capsule(x+d*0.08*s, y-d*0.08*s, tx, ty, 0.05*s))
+				cv.fill(white, capsule(tx, ty, tx-d*0.22*s, ty, 0.05*s))
+				cv.fill(white, capsule(tx, ty, tx, ty+d*0.22*s, 0.05*s))
+			}
+			return
+		}
+		// back to the corner: a frame with a small picture in its corner
+		cv.fill(white, capsule(x-0.40*s, y-0.30*s, x+0.40*s, y-0.30*s, 0.05*s))
+		cv.fill(white, capsule(x+0.40*s, y-0.30*s, x+0.40*s, y+0.30*s, 0.05*s))
+		cv.fill(white, capsule(x+0.40*s, y+0.30*s, x-0.40*s, y+0.30*s, 0.05*s))
+		cv.fill(white, capsule(x-0.40*s, y+0.30*s, x-0.40*s, y-0.30*s, 0.05*s))
+		cv.fill(white, polygon([2]float64{x + 0.02*s, y - 0.20*s}, [2]float64{x + 0.30*s, y - 0.20*s},
+			[2]float64{x + 0.30*s, y + 0.00*s}, [2]float64{x + 0.02*s, y + 0.00*s}))
+
+	case ControlMute: // speaker: box and cone, then waves or a cross
+		x -= 0.06
+		cv.fill(white, polygon([2]float64{x - 0.34*s, y - 0.13*s}, [2]float64{x - 0.12*s, y - 0.13*s}, [2]float64{x + 0.14*s, y - 0.4*s},
+			[2]float64{x + 0.14*s, y + 0.4*s}, [2]float64{x - 0.12*s, y + 0.13*s}, [2]float64{x - 0.34*s, y + 0.13*s}))
+		if t.Muted {
+			cv.fill(white, capsule(x+0.3*s, y-0.17*s, x+0.62*s, y+0.17*s, 0.055*s))
+			cv.fill(white, capsule(x+0.3*s, y+0.17*s, x+0.62*s, y-0.17*s, 0.055*s))
+		} else {
+			cv.fill(white, arc(x+0.14*s, y, 0.26*s, 0.05*s, -0.85, 0.85))
+			cv.fill(white, arc(x+0.14*s, y, 0.46*s, 0.05*s, -0.85, 0.85))
+		}
+	}
 }
 
 // drawSpinner draws the waiting spinner s pixels square at phase 0..1.

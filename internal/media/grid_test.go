@@ -57,6 +57,97 @@ func TestLayoutRectsPinned(t *testing.T) {
 	}
 }
 
+// Our preview as the corner picture takes no grid cell: it sits small in
+// the top right corner over the others (of the pinned tile, with a strip),
+// and fills the window alone.
+func TestLayoutRectsPiP(t *testing.T) {
+	self := Tile{ID: "self", Self: true, PiP: true}
+	rs, w, h := layoutRects([]Tile{self}, 1920, 1080, 0, 0)
+	if rs[0] != (rect{0, 0, 1920, 1080}) || w != 1920 || h != 1080 {
+		t.Fatalf("alone: %+v %dx%d", rs, w, h)
+	}
+	rs, _, _ = layoutRects([]Tile{{ID: "a"}, self, {ID: "b"}}, 1920, 1080, 0, 0)
+	if rs[0] != (rect{0, 0, 960, 1080}) || rs[2] != (rect{960, 0, 960, 1080}) {
+		t.Fatalf("the others take the grid as if it weren't there: %+v", rs)
+	}
+	if rs[1] != (rect{1920 - 384 - 24, 24, 384, 216}) {
+		t.Fatalf("corner picture at %+v, want 384x216 24 px in from the top right", rs[1])
+	}
+	rs, _, _ = layoutRects([]Tile{{ID: "a", Pinned: true}, {ID: "b"}, self}, 1920, 1080, 0, 0)
+	if rs[0] != (rect{0, 0, 1536, 1080}) || rs[1] != (rect{1536, 0, 384, 1080}) {
+		t.Fatalf("pinned and strip: %+v", rs)
+	}
+	if want := (rect{1536 - 306 - 18, 18, 306, 172}); rs[2] != want {
+		t.Fatalf("corner picture at %+v, want %+v (in the pinned tile)", rs[2], want)
+	}
+	for _, r := range rs {
+		if r.x%2 != 0 || r.y%2 != 0 || r.w%2 != 0 || r.h%2 != 0 {
+			t.Fatalf("odd rect %+v", r)
+		}
+	}
+}
+
+// The corner picture takes the pointer over the tile under it, and its bar
+// has hide, pop out and expand.
+func TestGridPiPControls(t *testing.T) {
+	Init()
+	pl, err := StartPlayer(ViewGrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pl.Stop()
+	got := make(chan Control, 8)
+	g, err := StartGrid(GridConfig{
+		Tiles: []Tile{
+			{Channel: pl.Channel, Label: "alice", ID: "a", Volume: 1},
+			{Channel: NewPreviewChannel(), Label: "You", ID: "self", Self: true, PiP: true},
+		},
+		View: ViewCount,
+		OnControl: func(id string, c Control, _ float64) {
+			if id == "self" {
+				got <- c
+			} else {
+				got <- "alice:" + c
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	sink, err := g.element("vsink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.ctl.Lock()
+	o, r := g.ctl.ov[1], g.ctl.rects[1]
+	g.ctl.Unlock()
+	sink.SendMouse(false, float64(r.x+r.w/2), float64(r.y+r.h/4))
+	time.Sleep(3 * controlTick)
+	g.ctl.Lock()
+	shown := g.ctl.shown
+	g.ctl.Unlock()
+	if shown != 1 {
+		t.Fatalf("the pointer over the corner picture shows tile %d's controls", shown)
+	}
+	for k, want := range []Control{ControlEye, ControlPopOut, ControlExpand} {
+		x, y := float64(o.barX)+barButtonX(k)*float64(o.barH), float64(o.barY)+float64(o.barH)/2
+		if !r.has(x, y) {
+			t.Fatalf("%s at %.0f,%.0f is outside the corner picture %+v", want, x, y, r)
+		}
+		sink.SendMouse(false, x, y)
+		sink.SendMouse(true, x, y)
+		select {
+		case c := <-got:
+			if c != want {
+				t.Fatalf("clicked %s, got %s", want, c)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("clicked %s: nothing", want)
+		}
+	}
+}
+
 // Two decoders feed one grid; it keeps composing, also after one of them stops.
 func TestGridComposesTwoPlayers(t *testing.T) {
 	Init()

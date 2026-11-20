@@ -126,7 +126,9 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 	}
 	a.adoptAs(s, r.Source)
 	var errs []error
-	if r.Audio.Mode != "" && r.Audio.Mode != "none" {
+	// Not the test tone: a new build starts without it, in case it was
+	// left on.
+	if r.Audio.Mode != "" && r.Audio.Mode != "none" && r.Audio.Mode != "test" {
 		if err := s.SetAudio(r.Audio); err != nil {
 			errs = append(errs, errors.New("audio: "+err.Error()))
 		}

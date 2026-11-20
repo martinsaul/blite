@@ -162,6 +162,7 @@ type Mesh struct {
 	idKeys map[string]string
 	vers   map[string]string // client build labels
 	done   chan struct{}
+	sigErr error // why signaling ended; set before done is closed
 
 	members       map[string]bool // other members now in the room
 	redials       map[string]int  // connection attempts given up per peer, until one connects
@@ -465,8 +466,38 @@ func (m *Mesh) Layers() map[string]int {
 	return out
 }
 
+// WantsVideo reports whether any peer may want our video now: a forwarder
+// toward it (or our screen-low toward a relay) wants a layer. A new peer's
+// forwarder wants HIGH until the peer says otherwise, so only peers that
+// asked for no video (or congestion turned off) don't count. False with
+// nobody in the room.
+func (m *Mesh) WantsVideo() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.peers {
+		if _, want := r.fwd.layers(); want != layerOff {
+			return true
+		}
+		if r.lowFwd != nil && m.lowWantLocked(r) != layerOff {
+			return true
+		}
+	}
+	return false
+}
+
 // Done is closed when the signaling connection ends.
 func (m *Mesh) Done() <-chan struct{} { return m.done }
+
+// SignalingErr is why the signaling connection ended (nil before Done is
+// closed).
+func (m *Mesh) SignalingErr() error {
+	select {
+	case <-m.done:
+		return m.sigErr
+	default:
+		return nil
+	}
+}
 
 // Close leaves the room and closes every peer connection.
 func (m *Mesh) Close() {
@@ -497,6 +528,7 @@ func (m *Mesh) loop() {
 		switch {
 		case ev.Err != nil:
 			m.opt.Log.Info("signaling closed", "err", ev.Err)
+			m.sigErr = ev.Err
 			return
 		case ev.Joined != nil:
 			m.mu.Lock()

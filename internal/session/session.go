@@ -54,6 +54,12 @@ type Config struct {
 	// PlaySounds controls whether quiet call notification chimes play on the
 	// call's output device (nil defaults to true).
 	PlaySounds *bool
+	// SelfView is how our own preview shows when we start sharing: one of
+	// the SelfView* values ("" = SelfViewCorner).
+	SelfView string
+	// OnSelfView gets the new SelfView when the user changes how our
+	// preview shows (to keep it); nil: nothing.
+	OnSelfView func(view string)
 	// CanEncode overrides the encoder-headroom check (tests).
 	CanEncode func() bool
 	// UploadKbps (relay) caps what transcoded renditions may add to our
@@ -85,7 +91,7 @@ type Member struct {
 	Recv int `json:"recv,omitempty"`
 	// Notice: we can't see their stream, even LOW doesn't fit our link.
 	Notice string  `json:"notice,omitempty"`
-	Audio  int     `json:"audio,omitempty"` // decoded audio buffers (count view)
+	Audio  int     `json:"audio,omitempty"` // audio buffers decoded from them
 	RTTms  int     `json:"rttMs,omitempty"` // round trip on the selected ICE pair
 	Tx     uint64  `json:"tx,omitempty"`    // bytes sent to them
 	Rx     uint64  `json:"rx,omitempty"`    // bytes received from them
@@ -131,6 +137,9 @@ type State struct {
 	Safety            string          `json:"safety"` // compare aloud: same for everyone = nobody in the middle
 	Started           string          `json:"started"`
 	Password          string          `json:"-"`
+	// AudioLevel is our shared audio's level over the last 30 s (nil
+	// when we share none, or before the first 30 s).
+	AudioLevel *media.AudioLevel `json:"audioLevel,omitempty"`
 	// Relay is the active relays (the server's plan); empty = full mesh.
 	Relay []RelayEntry `json:"relay,omitempty"`
 	// RelayWaiting are the volunteers who don't relay now. RelayPaused:
@@ -281,6 +290,7 @@ type Session struct {
 	pw   string
 
 	mu       sync.Mutex
+	idleMu   sync.Mutex // serializes updateCaptureIdle
 	src      *media.VideoSource
 	srcGen   uint64
 	srcKind  media.SourceKind
@@ -299,6 +309,7 @@ type Session struct {
 	relayRefused bool
 	reconnAt     time.Time         // our signaling resume started; zero = connected
 	endReason    string            // why the session ended, for the user ("" = we left)
+	slotLost     bool              // ended because the server no longer had our slot (SlotLost)
 	res          media.Resolution  // what we share at ("" = 720p)
 	mode         media.ContentMode // what the share is tuned for ("" = desktop)
 	shareOpts    ShareOptions      // outgoing FPS, slow-viewer policy, floor, upload limit
@@ -325,6 +336,7 @@ type Session struct {
 	audioMu  sync.Mutex
 	asrc     *media.AudioSource
 	asrcDesc string
+	alevel   *media.AudioLevel // asrc's level over the last 30 s
 	asel     audio.Selection
 	// noWinAudio: sharing a window keeps the audio chosen instead of
 	// sharing its app's (sound turned off, or other audio picked).
@@ -357,7 +369,14 @@ type Session struct {
 	// previewOn opens its valve (mu).
 	selfCh    string
 	previewOn bool
-	rates     rates // (mu)
+	// selfTile: in the main window our preview is a tile, not the corner
+	// picture; selfView is how it showed last (a SelfView* value) (mu).
+	selfTile bool
+	selfView string
+	// previewBig: regrid wants the big preview (see SetPreviewBig), for a
+	// restarted source to start the same (mu).
+	previewBig bool
+	rates      rates // (mu)
 	// Grid tiles are small (tests); every video window is minimized.
 	smallTiles, hiddenWins atomic.Bool
 	// stopped are the peers who stopped sharing (mu): their tile says so
@@ -426,13 +445,19 @@ func newSession(cfg Config, pw string) *Session {
 	}
 	autoWatch := cfg.AutoWatch == nil || *cfg.AutoWatch
 	playSounds := cfg.PlaySounds == nil || *cfg.PlaySounds
+	switch cfg.SelfView {
+	case SelfViewCorner, SelfViewTile, SelfViewWindow, SelfViewHidden:
+	default:
+		cfg.SelfView = SelfViewCorner
+	}
 	opts := DefaultShareOptions()
 	opts.UploadKbps = max(0, cfg.UploadKbps)
 	s := &Session{cfg: cfg, pw: pw, members: map[string]*Member{}, players: map[string]*media.Player{},
 		aplayers: map[string]*media.AudioPlayer{}, feeds: feeds.New(autoWatch),
 		shareOpts: opts, mode: modeForOptions(opts),
 		asel: audio.Selection{Mode: "none"}, stopped: map[string]stopInfo{},
-		done: make(chan struct{}), started: time.Now(), selfCh: media.NewPreviewChannel()}
+		done: make(chan struct{}), started: time.Now(), selfCh: media.NewPreviewChannel(),
+		selfTile: cfg.SelfView == SelfViewTile, selfView: cfg.SelfView}
 	if cfg.View == media.ViewWindow {
 		s.openWindow = media.OpenVideoWindow
 	}
@@ -577,6 +602,14 @@ func (s *Session) start(sig *sigclient.Client) (*Session, error) {
 	s.syncMeshShareConfig()
 	go func() {
 		<-mesh.Done()
+		if sigclient.SlotLost(mesh.SignalingErr()) {
+			s.mu.Lock()
+			s.slotLost = true
+			if s.endReason == "" {
+				s.endReason = "The server lost your place in the room (it restarted). Join again with the link."
+			}
+			s.mu.Unlock()
+		}
 		s.Close()
 	}()
 	go s.watchDecoders()
@@ -1062,8 +1095,24 @@ func (s *Session) viewLocked() media.ViewKind {
 	return s.cfg.View
 }
 
-// Video windows start at this size.
-const windowW, windowH = 1280, 720
+// Video windows start at this size; our own preview's pop-out is smaller.
+const (
+	windowW, windowH         = 1280, 720
+	selfWindowW, selfWindowH = 480, 270
+)
+
+// How our own preview shows (Config.SelfView).
+const (
+	// SelfViewCorner: a small picture in the main window's top right
+	// corner, over the others' streams (it fills the window alone).
+	SelfViewCorner = "corner"
+	// SelfViewTile: a tile like the others', at PreviewBigW x PreviewBigH.
+	SelfViewTile = "tile"
+	// SelfViewWindow: popped out into a small window of its own.
+	SelfViewWindow = "window"
+	// SelfViewHidden: not shown (the eye is closed).
+	SelfViewHidden = "hidden"
+)
 
 // regrid syncs the main streaming window (key "") and any pop-out windows
 // (key feedID) with the per-feed state machine, and opens or closes our
@@ -1078,6 +1127,9 @@ func (s *Session) regrid() {
 	src := s.src
 	preview := src != nil && !s.closed && s.feeds.Watched(feeds.Self) && s.cfg.View != "none" && !s.cfg.NoPlayback
 	s.previewOn = preview
+	selfSt := s.feeds.State(feeds.Self)
+	pip := selfSt == feeds.InMain && !s.selfTile
+	bigPreview := !pip
 	compose := s.cfg.View == media.ViewWindow || s.cfg.View == media.ViewGrid || s.gridView != ""
 
 	var mainTiles []media.Tile
@@ -1089,12 +1141,13 @@ func (s *Session) regrid() {
 					return media.Tile{}, false
 				}
 				return media.Tile{
-					Channel:   s.selfCh,
+					Channel:   s.selfCh, // the big one: see below
 					Label:     i18n.L("You"),
 					ID:        feeds.Self,
 					Self:      true,
 					Pinned:    st == feeds.Pinned,
 					PoppedOut: st == feeds.PoppedOut,
+					PiP:       pip,
 				}, true
 			}
 			m := s.members[id]
@@ -1137,14 +1190,31 @@ func (s *Session) regrid() {
 				popTiles[id] = t
 			}
 		}
+		// The corner picture is small, unless alone (then it fills the
+		// window); as a tile or in its own window our preview is big.
+		if pip && len(mainTiles) == 1 {
+			bigPreview = true
+		}
+		for i := range mainTiles {
+			if mainTiles[i].Self && bigPreview {
+				mainTiles[i].Channel = media.PreviewBigChannel(s.selfCh)
+			}
+		}
+		if t, ok := popTiles[feeds.Self]; ok {
+			t.Channel = media.PreviewBigChannel(s.selfCh)
+			popTiles[feeds.Self] = t
+		}
 		if len(mainTiles) == 0 && hadMain {
 			s.leavePrompt = false
 		}
 	}
+	s.previewBig = bigPreview
 	s.mu.Unlock()
 
 	if src != nil {
+		src.SetPreviewBig(bigPreview)
 		src.SetPreview(preview)
+		s.updateCaptureIdle()
 	}
 	if !compose {
 		return
@@ -1187,10 +1257,15 @@ func (s *Session) regrid() {
 	}
 	// Windows no key wants any more go to keys that lack one; only left-over
 	// ones close (popping in or out reuses an open window when possible).
-	var free []media.Window
+	// Our preview's small window closes rather than become another's.
+	var free, small []media.Window
 	for k, w := range s.wins {
 		if _, ok := want[k]; !ok {
-			free = append(free, w)
+			if k == feeds.Self {
+				small = append(small, w)
+			} else {
+				free = append(free, w)
+			}
 			delete(s.wins, k)
 			changed = true
 		}
@@ -1202,10 +1277,14 @@ func (s *Session) regrid() {
 			continue
 		}
 		title := windowTitle(k, cfg)
+		ww, wh := windowW, windowH
+		if k == feeds.Self {
+			ww, wh = selfWindowW, selfWindowH
+		}
 		if s.wins[k] == nil && s.openWindow != nil {
-			if len(free) > 0 {
+			if len(free) > 0 && k != feeds.Self { // ours opens small, so new
 				s.wins[k], free = free[0], free[1:]
-			} else if w, err := s.openWindow(title, windowW, windowH); err == nil {
+			} else if w, err := s.openWindow(title, ww, wh); err == nil {
 				s.wins[k] = w
 				stop := make(chan struct{})
 				s.winStop[w] = stop
@@ -1234,7 +1313,7 @@ func (s *Session) regrid() {
 			changed = true
 		}
 	}
-	for _, w := range free {
+	for _, w := range append(free, small...) {
 		s.destroyWindowLocked(w)
 	}
 	if changed {
@@ -1320,6 +1399,9 @@ func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 			if !wasOpen {
 				return
 			}
+			if closedKey == feeds.Self { // closing our preview's window puts it back
+				s.selfViewChanged()
+			}
 			if f != nil {
 				go f()
 			}
@@ -1338,12 +1420,13 @@ func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 // regridLocked (re)starts video window k (gridMu held). Returns true if rebuilt.
 func (s *Session) regridLocked(k string, cfg media.GridConfig) bool {
 	type shown struct { // mute/volume/poppedOut update in place via SetState
-		channel, label, id    string
-		self, pinned, stopped bool
+		channel, label, id         string
+		self, pinned, stopped, pip bool
+		selfOut                    bool // our preview's buttons depend on it
 	}
 	var what []shown
 	for _, t := range cfg.Tiles {
-		what = append(what, shown{t.Channel, t.Label, t.ID, t.Self, t.Pinned, t.Stopped})
+		what = append(what, shown{t.Channel, t.Label, t.ID, t.Self, t.Pinned, t.Stopped, t.PiP, t.Self && t.PoppedOut})
 	}
 	key := fmt.Sprint(cfg.Rows, cfg.Cols, what, fmt.Sprintf("%p", cfg.Window))
 	if g := s.grids[k]; g != nil {
@@ -1462,6 +1545,7 @@ func (s *Session) ToggleWatch(id string) error {
 		if tr.Prev == tr.Next {
 			return nil
 		}
+		s.selfViewChanged()
 		s.regrid()
 		s.changed()
 		return nil
@@ -1533,6 +1617,9 @@ func (s *Session) PopOut(id string) error {
 	if tr.Prev == tr.Next {
 		return nil
 	}
+	if id == feeds.Self {
+		s.selfViewChanged()
+	}
 	s.regrid()
 	s.applyAutoQuality()
 	s.changed()
@@ -1547,14 +1634,77 @@ func (s *Session) Pin(id string) error {
 		return fmt.Errorf("no peer %s", id)
 	}
 	tr := s.feeds.Apply(id, feeds.Pin)
+	if id == feeds.Self && tr.Next == feeds.Pinned {
+		s.selfTile = true // pinned, it is a tile; unpinned it stays one
+	}
 	s.mu.Unlock()
 	if tr.Prev == tr.Next {
 		return nil
+	}
+	if id == feeds.Self {
+		s.selfViewChanged()
 	}
 	s.regrid()
 	s.applyAutoQuality()
 	s.changed()
 	return nil
+}
+
+// ToggleSelfTile turns our preview in the main window from the corner
+// picture into a tile like the others' (at PreviewBigW x PreviewBigH), or
+// back (unpinning it).
+func (s *Session) ToggleSelfTile() {
+	s.mu.Lock()
+	st := s.feeds.State(feeds.Self)
+	if st != feeds.InMain && st != feeds.Pinned {
+		s.mu.Unlock()
+		return
+	}
+	if st == feeds.Pinned {
+		s.feeds.Apply(feeds.Self, feeds.Pin)
+		s.selfTile = false
+	} else {
+		s.selfTile = !s.selfTile
+	}
+	s.mu.Unlock()
+	s.selfViewChanged()
+	s.regrid()
+	s.applyAutoQuality()
+	s.changed()
+}
+
+// SelfView is how our own preview shows now (a SelfView* value).
+func (s *Session) SelfView() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selfViewLocked()
+}
+
+func (s *Session) selfViewLocked() string {
+	switch st := s.feeds.State(feeds.Self); {
+	case st == feeds.NotWatched:
+		return SelfViewHidden
+	case st == feeds.PoppedOut:
+		return SelfViewWindow
+	case st == feeds.Gone: // not sharing: as it was set
+		return s.selfView
+	case s.selfTile:
+		return SelfViewTile
+	}
+	return SelfViewCorner
+}
+
+// selfViewChanged keeps how our preview shows after the user changed it.
+func (s *Session) selfViewChanged() {
+	s.mu.Lock()
+	v := s.selfViewLocked()
+	changed := v != s.selfView
+	s.selfView = v
+	f := s.cfg.OnSelfView
+	s.mu.Unlock()
+	if changed && f != nil {
+		f(v)
+	}
 }
 
 // SetAutoWatch updates "Start watching new streams automatically" for
@@ -1723,6 +1873,11 @@ func (s *Session) control(id string, c media.Control, v float64) {
 			s.cfg.Log.Warn("video window button", "peer", id, "button", c, "err", err)
 		}
 		return
+	case media.ControlExpand:
+		if id == feeds.Self {
+			s.ToggleSelfTile()
+		}
+		return
 	}
 	s.mu.Lock()
 	m := s.members[id]
@@ -1801,8 +1956,8 @@ func (s *Session) pushAudio(peer string, frame []byte) {
 	ap.Push(frame)
 }
 
-// SetAudio chooses what audio we share. Mode "test" sends a tone (synthetic
-// peers); "system" and "apps" need PipeWire (Linux) for now.
+// SetAudio chooses what audio we share. Mode "test" sends beeps
+// (media.TestAudio); "system", "apps" and "window" capture apps' audio.
 func (s *Session) SetAudio(sel audio.Selection) error {
 	s.audioMu.Lock()
 	defer s.audioMu.Unlock()
@@ -1835,7 +1990,7 @@ func (s *Session) SetAudio(sel audio.Selection) error {
 	s.mu.Lock()
 	old, oldDesc := s.asrc, s.asrcDesc
 	if oldDesc != desc {
-		s.asrc, s.asrcDesc = nil, ""
+		s.asrc, s.asrcDesc, s.alevel = nil, "", nil
 	}
 	s.mu.Unlock()
 	if oldDesc != desc {
@@ -1849,8 +2004,16 @@ func (s *Session) SetAudio(sel audio.Selection) error {
 		}
 	}
 	s.mu.Lock()
+	prev := s.asel
 	s.asel = sel
 	s.mu.Unlock()
+	if prev.Mode != sel.Mode || sel.Mode == "apps" && !slices.Equal(prev.Apps, sel.Apps) || prev.PID != sel.PID {
+		if sel.Mode == "test" {
+			s.cfg.Log.Info("shared audio", "mode", sel.Mode, "source", "test tone")
+		} else {
+			s.cfg.Log.Info("shared audio", "mode", sel.Mode, "apps", sel.Apps, "pid", sel.PID)
+		}
+	}
 	s.mesh.SetSharingAudio(sel.Mode != "" && sel.Mode != "none")
 	s.changed()
 	return nil
@@ -1863,7 +2026,7 @@ func (s *Session) ensureSharer() (*audio.Sharer, error) {
 	if sharer != nil {
 		return sharer, nil
 	}
-	sharer, err := audio.NewSharer()
+	sharer, err := audio.NewSharer(s.cfg.Log)
 	if err != nil {
 		return nil, err
 	}
@@ -1902,13 +2065,24 @@ func (s *Session) startAudio(desc string) error {
 			s.cfg.Log.Error("audio source stopped", "err", err)
 		}
 	}()
-	// Opus in-band FEC follows the loss peers report.
+	// Opus in-band FEC follows the loss peers report; the level shows in
+	// the stats log (silence vs sound).
 	go func() {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
-		for range t.C {
+		for i := 1; ; i++ {
+			<-t.C
+			var l *media.AudioLevel
+			if i%15 == 0 {
+				if v, ok := src.Level(); ok {
+					l = &v
+				}
+			}
 			s.mu.Lock()
 			current := s.asrc == src && !s.closed
+			if current && i%15 == 0 {
+				s.alevel = l
+			}
 			s.mu.Unlock()
 			if !current {
 				return
@@ -2227,6 +2401,14 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 	s.mu.Lock()
 	wasSharing := s.feeds.Sharing(feeds.Self)
 	s.feeds.Apply(feeds.Self, feeds.ShareStart)
+	if !wasSharing { // our preview shows the way it did last
+		switch s.selfView {
+		case SelfViewWindow:
+			s.feeds.Apply(feeds.Self, feeds.PopOut)
+		case SelfViewHidden:
+			s.feeds.Apply(feeds.Self, feeds.EyeToggle)
+		}
+	}
 	newKind := s.srcKind != kind
 	if newKind {
 		s.rends = nil // a new source starts with HIGH and LOW only
@@ -2414,8 +2596,16 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 	gen = s.srcGen
 	preview := s.feeds.Watched(feeds.Self) && s.cfg.View != "none" && !s.cfg.NoPlayback
 	s.previewOn = preview
+	// As regrid last chose: a restart (setRenditions) has no regrid after
+	// it, and the corner picture alone shows the big preview.
+	big := s.previewBig
+	if s.feeds.State(feeds.Self) == feeds.PoppedOut || s.selfTile {
+		big = true
+	}
 	s.mu.Unlock()
+	src.SetPreviewBig(big)
 	src.SetPreview(preview) // a restart (new resolution) keeps the preview
+	s.updateCaptureIdle()
 	s.cfg.Log.Info("sharing", "source", kind, "resolution", orRes(res), "fps", opts.FPS, "encoder", enc)
 	src.SetBitrate(media.Low, s.mesh.LowKbps())
 	if opts.UploadKbps > 0 {
@@ -2443,6 +2633,8 @@ const shareStatsEvery = 30 * time.Second
 func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res media.Resolution, enc string, encoded *atomic.Int64) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
+	idleT := time.NewTicker(idleCheckEvery)
+	defer idleT.Stop()
 	var note string
 	lastAt, lastOut, lastIn := time.Now(), encoded.Load(), src.OfferedFrames()
 	for note == "" {
@@ -2457,6 +2649,8 @@ func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res
 			} else {
 				note = "Sharing stopped: Bellion Share lost what you were sharing. Pick it again, or something else. If it keeps happening, send your logs."
 			}
+		case <-idleT.C:
+			s.updateCaptureIdle()
 		case <-t.C:
 			s.mu.Lock()
 			current := s.src == src
@@ -2475,7 +2669,7 @@ func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res
 				s.cfg.Log.Info("share stats", "source", kind, "res", res, "encoder", enc,
 					"offeredFPS", fmt.Sprintf("%.1f", float64(in-lastIn)/dt.Seconds()),
 					"encodedFPS", fmt.Sprintf("%.1f", float64(out-lastOut)/dt.Seconds()),
-					"cpuBusy", fmt.Sprintf("%.0f", busy), "lowKbps", s.mesh.LowKbps(), "highFPS", s.HighFPS())
+					"cpuBusy", fmt.Sprintf("%.0f", busy), "lowKbps", s.mesh.LowKbps(), "highFPS", s.HighFPS(), "idle", src.Idle())
 				lastAt, lastOut, lastIn = time.Now(), out, in
 			}
 		case <-s.done:
@@ -2493,6 +2687,26 @@ func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res
 	s.srcNote = note
 	s.mu.Unlock()
 	s.changed()
+}
+
+// idleCheckEvery is how often a share looks for viewers coming or going,
+// so a viewer waits at most this long (plus a keyframe) for a paused capture.
+const idleCheckEvery = 200 * time.Millisecond
+
+// updateCaptureIdle pauses our capture while nobody can see it (no peer
+// wants our video and our self-preview is hidden) and resumes it when
+// someone can (a 5K screen grabbed and converted 30 times a
+// second for nobody made the whole app sluggish).
+func (s *Session) updateCaptureIdle() {
+	s.idleMu.Lock() // a stale look must not undo a newer one
+	defer s.idleMu.Unlock()
+	s.mu.Lock()
+	src, preview, closed := s.src, s.previewOn, s.closed
+	s.mu.Unlock()
+	if src == nil || closed {
+		return
+	}
+	src.SetIdle(!preview && !s.mesh.WantsVideo())
 }
 
 // windowClosed reports whether kind is a window that no longer exists.
@@ -2820,6 +3034,15 @@ func (s *Session) Kick(id string, ban bool) error {
 	return s.mesh.Kick(id, ban)
 }
 
+// SlotLost reports whether the session ended because, after a signaling
+// drop, the server no longer had our slot (resume_failed): the
+// room is likely still there, and a fresh join (Rejoin) gets back in.
+func (s *Session) SlotLost() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.slotLost
+}
+
 // EndReason is why the session ended, if not by our leaving (e.g. kicked).
 func (s *Session) EndReason() string {
 	s.mu.Lock()
@@ -2882,6 +3105,7 @@ func (s *Session) State() State {
 		LowKbps:           s.mesh.LowKbps(),
 		UpdateRecommended: s.sig.Welcome.UpdateRecommended,
 		Audio:             s.asel,
+		AudioLevel:        s.alevel,
 		Output:            s.output,
 		Safety:            s.mesh.SafetyCode(),
 		Started:           s.started.UTC().Format(time.RFC3339),

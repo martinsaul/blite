@@ -11,7 +11,7 @@ JSIGN_SHA256="6cf58aa080e7ff82656f320cff8d4a3bff30408df8766806dcba3740dd839fa5"
 JSIGN_URL="https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
 
 SIGN_ENDPOINT=${SIGN_ENDPOINT:-eus.codesigning.azure.net}
-SIGN_ALIAS=${SIGN_ALIAS:?set SIGN_ALIAS to your Trusted Signing account/profile}
+SIGN_ALIAS=${SIGN_ALIAS:-ZenithNetwork/ZenithNetwork}
 SIGN_TSAURL=${SIGN_TSAURL:-http://timestamp.acs.microsoft.com}
 
 if [ "$#" -lt 2 ]; then

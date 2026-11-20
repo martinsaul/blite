@@ -78,3 +78,58 @@ func TestSignalingDropResumes(t *testing.T) {
 	defer c.Close()
 	waitFor(t, "carol connects to resumed alice", 15*time.Second, func() bool { _, st := frames(c, "alice"); return st == "connected" })
 }
+
+// A resume the server refuses (it no longer has our slot: it restarted
+// without it, or swept it while we were on another server) ends the
+// session as SlotLost, with what a fresh join needs in Rejoin.
+func TestSlotLost(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(server.Config{Log: quiet})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	cfg := func(n string) Config { return Config{Server: ws, Name: n, View: media.ViewCount, Log: quiet} }
+	ctx := context.Background()
+
+	a, err := Create(ctx, cfg("alice"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Join(ctx, cfg("bob"), a.sig.Welcome.Room, a.pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	// A plain drop resumes: not lost.
+	a.sig.Drop()
+	time.Sleep(time.Second)
+	select {
+	case <-a.Done():
+		t.Fatal("alice's session ended on a signaling drop")
+	default:
+	}
+
+	srv.Rooms().Leave(b.sig.Welcome.Room, b.sig.Welcome.PeerID) // the server forgets bob
+	b.sig.Drop()
+	select {
+	case <-b.Done():
+	case <-time.After(15 * time.Second):
+		t.Fatal("bob's session survived a refused resume")
+	}
+	if !b.SlotLost() || b.EndReason() == "" {
+		t.Fatalf("bob: SlotLost %v, reason %q", b.SlotLost(), b.EndReason())
+	}
+	if rj := b.Rejoin(); rj.Room != a.sig.Welcome.Room || rj.Password != a.pw || rj.Server != ws {
+		t.Fatalf("rejoin data: %+v", rj)
+	}
+	if a.SlotLost() {
+		t.Fatal("alice lost her slot")
+	}
+	a.Close()
+	<-a.Done()
+	if a.SlotLost() {
+		t.Fatal("leaving counted as a lost slot")
+	}
+}

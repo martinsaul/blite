@@ -319,6 +319,32 @@ func targetElements(kind, arg string) (string, error) {
 	return "", fmt.Errorf("unknown source kind %q", kind)
 }
 
+// captureChain is src, capped at fps when it is ximagesrc, then scaled to
+// the size downstream asks for and converted to its format.
+//
+// ximagesrc grabs on its own clock at the frame rate it negotiated (25 fps
+// unless asked), so the framerate caps right after it are what bound its
+// XGetImage calls; a videorate after it would only drop frames already
+// grabbed. The scaling comes before (or with) the conversion: a 5K screen
+// converted at full size to I420 and scaled after cost ~6x the CPU per
+// frame of videoconvertscale doing both at once.
+func captureChain(src string, fps int) string {
+	if strings.HasPrefix(src, "ximagesrc ") {
+		src += fmt.Sprintf(" ! video/x-raw,framerate=%d/1", fps)
+	}
+	return src + " ! " + convertScale()
+}
+
+// convertScale scales then converts in one element where GStreamer has it
+// (1.22+: videoconvertscale, which videoconvert and videoscale are made
+// of), else scales in the source's format before converting.
+func convertScale() string {
+	if gst.HasFactory("videoconvertscale") {
+		return "videoconvertscale"
+	}
+	return "videoscale ! videoconvert"
+}
+
 // ValidSource reports whether k is a source kind StartVideoSource accepts.
 func ValidSource(k SourceKind) bool {
 	switch k {
@@ -529,16 +555,25 @@ func (p *Pipeline) stopped() bool {
 // VideoSource is a running capture with one encoder per layer.
 type VideoSource struct {
 	*Pipeline
-	sinks     []*gst.Element
-	encs      []*gst.Element
-	preview   *gst.Element // the self-preview valve (nil without a preview channel)
-	previewed *gst.Counter // frames through the valve (nil if unknown)
-	offered   *gst.Counter // frames the capture gave the encoders (nil if unknown)
-	thin      *gst.Thinner // HIGH's frame rate step (nil if unknown)
-	life      sync.RWMutex
-	lastKey   []time.Time
-	keyMu     sync.Mutex
-	live      sync.Once // counted out of liveSources once
+	sinks   []*gst.Element
+	encs    []*gst.Element
+	preview *gst.Element // the self-preview valve (nil without a preview channel)
+	// previewBig is the valve of the big preview (PreviewBigChannel); the
+	// preview state is previewMu's.
+	previewBig   *gst.Element
+	previewMu    sync.Mutex
+	previewOn    bool
+	previewLarge bool
+	previewed    *gst.Counter // frames through the valves (nil if unknown)
+	previewedBig *gst.Counter
+	offered      *gst.Counter // frames the capture gave the encoders (nil if unknown)
+	thin         *gst.Thinner // HIGH's frame rate step (nil if unknown)
+	life         sync.RWMutex
+	lastKey      []time.Time
+	keyMu        sync.Mutex
+	live         sync.Once // counted out of liveSources once
+	idleMu       sync.Mutex
+	idle         bool // paused by SetIdle (idleMu)
 }
 
 // liveSources counts started, not yet stopped, video sources (tests).
@@ -587,9 +622,9 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 		return nil, err
 	}
 	hi := layers[High]
-	branches := []string{fmt.Sprintf("%s ! videoconvert ! videoscale ! videorate ! "+
+	branches := []string{fmt.Sprintf("%s ! videorate ! "+
 		"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! identity name=offered ! tee name=t",
-		src, enc.format(), hi.Width, hi.Height, hi.FPS)}
+		captureChain(src, hi.FPS), enc.format(), hi.Width, hi.Height, hi.FPS)}
 	for i, l := range layers {
 		if l.Height == 0 {
 			continue
@@ -604,12 +639,20 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 			"appsink name=out%d sync=false max-buffers=4 drop=true", scale, enc.launch(i, l), i))
 	}
 	if preview != "" {
-		// The valve drops everything until SetPreview opens it, so a
-		// preview nobody looks at costs nothing.
-		pfps := min(PreviewFPS, hi.FPS)
-		branches = append(branches, fmt.Sprintf("t. ! queue max-size-buffers=1 leaky=downstream ! valve name=preview drop=true ! "+
-			"videoscale ! videorate drop-only=true ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=previewed ! intervideosink channel=%s sync=false async=false",
-			PreviewW, PreviewH, pfps, preview))
+		// The valves drop everything until SetPreview opens one, so a
+		// preview nobody looks at costs nothing. Two sizes on two
+		// channels, not one capsfilter changed while running: frames of
+		// the old size still on their way then broke videoconvert's
+		// mapping (gst_video_frame_map_id criticals).
+		for _, big := range []bool{false, true} {
+			name, ch := "preview", preview
+			if big {
+				name, ch = "previewbig", PreviewBigChannel(preview)
+			}
+			branches = append(branches, fmt.Sprintf("t. ! queue max-size-buffers=1 leaky=downstream ! valve name=%s drop=true ! "+
+				"videoscale ! videorate drop-only=true ! %s ! identity name=%sed ! intervideosink channel=%s sync=false async=false",
+				name, previewCaps(big, hi.Width, hi.Height, hi.FPS), name, ch))
+		}
 	}
 	p, err := launch(strings.Join(branches, "  "))
 	if err != nil {
@@ -660,8 +703,15 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 			p.Stop()
 			return nil, err
 		}
+		if vs.previewBig, err = p.element("previewbig"); err != nil {
+			p.Stop()
+			return nil, err
+		}
 		if e, err := p.element("previewed"); err == nil {
 			vs.previewed, _ = e.CountBuffers()
+		}
+		if e, err := p.element("previewbiged"); err == nil {
+			vs.previewedBig, _ = e.CountBuffers()
 		}
 	}
 	if err := p.start(); err != nil {
@@ -722,26 +772,104 @@ func (vs *VideoSource) SetHighFPS(fps int) {
 	}
 }
 
+// SetIdle pauses (idle) or resumes the capture. Nobody watching and no
+// self-preview: a paused live source grabs nothing (no XGetImage, no
+// conversion, no encoding) instead of feeding valves that drop it. Resuming
+// asks every encoder for a keyframe, so viewers see a picture at once; the
+// running time stood still while paused, so timestamps go on without a gap.
+func (vs *VideoSource) SetIdle(idle bool) {
+	vs.idleMu.Lock()
+	defer vs.idleMu.Unlock()
+	if vs.idle == idle {
+		return
+	}
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.stopped() {
+		return
+	}
+	if idle {
+		if err := vs.g.Pause(); err != nil {
+			Log.Warn("capture: pause failed", "err", err)
+			return
+		}
+		vs.idle = true
+		Log.Info("capture idle: nobody watching")
+		return
+	}
+	if err := vs.g.Play(); err != nil {
+		Log.Warn("capture: resume failed", "err", err)
+		return
+	}
+	vs.idle = false
+	Log.Info("capture resumed")
+	now := time.Now()
+	vs.keyMu.Lock()
+	for i := range vs.lastKey {
+		vs.lastKey[i] = now // ForceKeyframe's throttle counts these
+	}
+	vs.keyMu.Unlock()
+	for _, s := range vs.sinks {
+		if s != nil {
+			s.ForceKeyframe()
+		}
+	}
+}
+
+// Idle reports whether SetIdle paused the capture.
+func (vs *VideoSource) Idle() bool {
+	vs.idleMu.Lock()
+	defer vs.idleMu.Unlock()
+	return vs.idle
+}
+
 // SetPreview starts (on) or stops feeding the preview channel.
 func (vs *VideoSource) SetPreview(on bool) {
+	vs.previewMu.Lock()
+	defer vs.previewMu.Unlock()
+	vs.previewOn = on
+	vs.setPreviewValvesLocked()
+}
+
+// SetPreviewBig feeds PreviewBigChannel at PreviewBigW x PreviewBigH
+// instead of the preview channel at PreviewW x PreviewH (big: our preview
+// shows as a tile or in its own window, not as the corner picture). Never
+// more than the size we send.
+func (vs *VideoSource) SetPreviewBig(big bool) {
+	vs.previewMu.Lock()
+	defer vs.previewMu.Unlock()
+	vs.previewLarge = big
+	vs.setPreviewValvesLocked()
+}
+
+func (vs *VideoSource) setPreviewValvesLocked() {
 	if vs.preview == nil {
 		return
 	}
 	vs.life.RLock()
 	defer vs.life.RUnlock()
 	if !vs.stopped() {
-		vs.preview.SetBool("drop", !on)
+		vs.preview.SetBool("drop", !vs.previewOn || vs.previewLarge)
+		vs.previewBig.SetBool("drop", !vs.previewOn || !vs.previewLarge)
 	}
 }
 
-// PreviewFrames is how many frames went to the preview channel (-1 if unknown).
+// PreviewBigChannel is the channel a VideoSource feeds the big preview on,
+// for preview channel ch.
+func PreviewBigChannel(ch string) string { return ch + "-big" }
+
+// PreviewFrames is how many frames went to the preview channels (-1 if unknown).
 func (vs *VideoSource) PreviewFrames() int {
 	vs.life.RLock()
 	defer vs.life.RUnlock()
 	if vs.previewed == nil {
 		return -1
 	}
-	return vs.previewed.Load()
+	n := vs.previewed.Load()
+	if vs.previewedBig != nil {
+		n += vs.previewedBig.Load()
+	}
+	return n
 }
 
 // OfferedFrames is how many frames the capture handed to the encoders (-1
@@ -774,6 +902,10 @@ func (vs *VideoSource) Stop() {
 	if vs.previewed != nil {
 		vs.previewed.Free()
 		vs.previewed = nil
+	}
+	if vs.previewedBig != nil {
+		vs.previewedBig.Free()
+		vs.previewedBig = nil
 	}
 	if vs.thin != nil {
 		vs.thin.Free()

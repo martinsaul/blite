@@ -487,7 +487,7 @@ func TestShareSheetAndAdvanced(t *testing.T) {
 	sh := newShareSheet(u)
 	sh.update(u.st)
 
-	if sh.audioSeg.selected != "window" || len(sh.audioSeg.opts) != 4 {
+	if sh.audioSeg.selected != "window" || len(sh.audioSeg.opts) != 5 {
 		t.Fatalf("audio = %q of %+v, want \"This window's app\" offered and selected", sh.audioSeg.selected, sh.audioSeg.opts)
 	}
 	if sh.advBox.Visible() {

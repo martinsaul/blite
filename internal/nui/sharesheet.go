@@ -131,7 +131,7 @@ func newShareSheet(u *UI) *shareSheet {
 	}
 	s.presets = newPresetBar(pick, u.removePreset, func() { u.presetDialog(pick) })
 
-	s.audioSeg = newSegmented(audioSegOptions(false), func(val string) {
+	s.audioSeg = newSegmentedCols(2, audioSegOptions(false), func(val string) {
 		if s.setting {
 			return
 		}
@@ -406,6 +406,7 @@ func snapFPS(v float64) int {
 }
 
 // audioSegOptions are the audio choices; sharing a window adds its app's.
+// "Test tone" sends beeps, to check that viewers hear us.
 func audioSegOptions(window bool) []segOption {
 	opts := []segOption{{Value: "none", Label: i18n.L("No audio")}}
 	if window {
@@ -413,7 +414,8 @@ func audioSegOptions(window bool) []segOption {
 	}
 	return append(opts,
 		segOption{Value: "system", Label: i18n.L("Whole system")},
-		segOption{Value: "apps", Label: i18n.L("Only these apps..."), Retappable: true})
+		segOption{Value: "apps", Label: i18n.L("Only these apps..."), Retappable: true},
+		segOption{Value: "test", Label: i18n.L("Test tone")})
 }
 
 func parseUploadMbps(raw string) (int, error) {
@@ -496,8 +498,8 @@ func otherSource(src string) string {
 	return ""
 }
 
-// syncAudioSeg shows sh's audio choice; "This window's app" is offered while
-// a window is the source (two rows then, for long languages), unless we
+// syncAudioSeg shows sh's audio choice, in two columns for long languages;
+// "This window's app" is offered while a window is the source, unless we
 // can't find its process: then a note says so.
 func (s *shareSheet) syncAudioSeg(sh app.ShareConfig) {
 	window := (strings.HasPrefix(sh.Source, "window:") && !sh.NoWindowAudio) || sh.Audio.Mode == "window"
@@ -508,14 +510,11 @@ func (s *shareSheet) syncAudioSeg(sh app.ShareConfig) {
 	}
 	sel := sh.Audio.Mode
 	switch sel {
-	case "system", "apps", "window":
+	case "system", "apps", "window", "test":
 	default:
 		sel = "none"
 	}
-	s.audioSeg.cols = 0
-	if window {
-		s.audioSeg.cols = 2
-	}
+	s.audioSeg.cols = 2
 	s.audioSeg.SetOptions(audioSegOptions(window), sel)
 }
 

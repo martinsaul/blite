@@ -325,7 +325,7 @@ func TestPreference(t *testing.T) {
 	}
 }
 
-// TestDisplayLanguagePriority covers Windows's display language
+// TestDisplayLanguagePriority covers: Windows's display language
 // (e.g. pt-BR) beats an earlier keyboard/IME entry in the preferred list
 // (e.g. ja-JP), while an unsupported display language falls back to the list.
 func TestDisplayLanguagePriority(t *testing.T) {

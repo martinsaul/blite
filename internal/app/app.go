@@ -125,7 +125,10 @@ func New(cfg session.Config, def media.SourceKind) *App {
 		cfg.Port.SetMapping(portMap)
 	}
 	res, opts, e2ee := loadShareSettings(cfg.UploadKbps)
-	return &App{
+	if cfg.SelfView == "" {
+		cfg.SelfView = loadSettings().SelfView
+	}
+	a := &App{
 		cfg:           cfg,
 		log:           cfg.Log,
 		DefaultSource: def,
@@ -143,6 +146,10 @@ func New(cfg session.Config, def media.SourceKind) *App {
 		recent:        loadRecent(cfg.Server),
 		discordAuth:   make(chan struct{}, 1),
 	}
+	if a.cfg.OnSelfView == nil {
+		a.cfg.OnSelfView = a.keepSelfView
+	}
+	return a
 }
 
 // ShareConfig describes our current or pre-call share options for the UI.
@@ -156,7 +163,7 @@ type ShareConfig struct {
 	MinHeight          int             `json:"minHeight"`                 // 360, 540, 720
 	SmallerCopy        bool            `json:"smallerCopy"`               // default true
 	UploadKbps         int             `json:"uploadKbps,omitempty"`      // 0 = Automatic, >0 = kbit/s
-	Audio              audio.Selection `json:"audio"`                     // "none", "system", "apps", "window"
+	Audio              audio.Selection `json:"audio"`                     // "none", "system", "apps", "window", "test"
 	Output             string          `json:"output"`                    // "" = system default
 	RequirePassword    bool            `json:"requirePassword,omitempty"` // pre-call room creation option
 	RoomPassword       string          `json:"-"`                         // pre-call custom password (not exposed via JSON)
@@ -467,13 +474,19 @@ func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 	go func() {
 		<-s.Done()
 		a.mu.Lock()
+		lost := false
 		if a.sess == s {
 			a.sess = nil
 			if r := s.EndReason(); r != "" {
 				a.lastErr = r
 			}
+			lost = s.SlotLost()
 		}
 		a.mu.Unlock()
+		if lost {
+			a.rejoinLost(s.Rejoin())
+			return
+		}
 		a.applyPortMapIfIdle()
 		a.bc.Notify()
 	}()
@@ -486,6 +499,42 @@ func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 		}
 	}
 	a.bc.Notify()
+}
+
+// rejoinLost joins the room again, once, after the server lost our slot
+// (session.SlotLost): a restart of the server we resumed on, or a
+// failover that put us on another server. It is a fresh join, as after an
+// in-call update: new peer ID and connections, same room, password,
+// source and audio. If it fails, the session's end reason stays.
+func (a *App) rejoinLost(rj session.Rejoin) {
+	a.log.Info("the server lost our slot; rejoining the room")
+	a.bc.Notify()
+	if a.busy() {
+		return // the user started another session meanwhile
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	a.syncPortMapForNextSession()
+	cfg := a.config()
+	if rj.Server != "" {
+		cfg.Server = rj.Server
+	}
+	s, err := session.Join(ctx, cfg, rj.Room, rj.Password)
+	if err != nil {
+		a.log.Warn("rejoin after a lost slot", "err", err)
+		a.setErr("lost the connection to the room, and could not rejoin: " + friendly(err).Error())
+		a.applyPortMapIfIdle()
+		return
+	}
+	a.mu.Lock()
+	busy := a.sess != nil
+	a.mu.Unlock()
+	if busy { // the user was quicker
+		s.Close()
+		return
+	}
+	a.adoptAs(s, rj.Source)
+	a.log.Info("rejoined the room after a lost slot")
 }
 
 func (a *App) setErr(e string) {
@@ -821,9 +870,9 @@ func (a *App) SetAudio(mode string, apps []string) error {
 		mode = "none"
 	}
 	switch mode {
-	case "none", "system", "apps", "window":
+	case "none", "system", "apps", "window", "test":
 	default:
-		return errors.New("unknown audio mode") // test tone is for headless peers only
+		return errors.New("unknown audio mode")
 	}
 	sel := audio.Selection{Mode: mode, Apps: slices.Clone(apps)}
 	a.srcAudioMu.Lock()

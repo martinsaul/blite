@@ -92,13 +92,22 @@ type Room struct {
 	allowed map[string]bool // identity keys that take ownership from the host
 	banned  map[string]bool // identity keys the owner banned
 	// hold: the owner dropped or left to update. Until hold.until nobody
-	// else gets the room; owner keeps the away peer's ID meanwhile.
+	// else gets the room; owner keeps the away peer's ID meanwhile, even
+	// once that slot is gone (the only time owner may name a non-member).
 	hold *ownerHold
 
 	emptyAt time.Time // when the last peer left; zero while occupied
 	// restored: loaded by Restore, and nobody has joined or resumed since.
 	restored bool
+	// ephemeral: a canary room (CanaryPrefix): never in a snapshot, not
+	// counted as Served, and deleted as soon as its last peer is gone.
+	ephemeral bool
 }
+
+// CanaryPrefix marks a synthetic check's room: Create by a peer whose name
+// starts with it makes an ephemeral room (see Room.ephemeral), so a
+// deploy's canary (blite-signal -canary) leaves nothing behind.
+const CanaryPrefix = "bg-canary"
 
 func (r *Room) online(id string) bool {
 	p := r.peers[id]
@@ -278,7 +287,7 @@ func (m *Manager) Create(password, name, idKey, ver string, build int, e2ee bool
 	for m.rooms[code] != nil {
 		code = NewCode()
 	}
-	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, e2ee: e2ee}
+	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, e2ee: e2ee, ephemeral: strings.HasPrefix(name, CanaryPrefix)}
 	m.rooms[code] = r
 	seat := m.seatLocked(r, name, idKey, ver, build, out)
 	m.electLocked(r, seat.PeerID)
@@ -674,11 +683,21 @@ func (m *Manager) removeLocked(r *Room, peerID string) {
 		return
 	}
 	delete(r.peers, peerID)
+	if r.host == peerID {
+		r.host = "" // a returning relay becomes the host again (CreateFixed)
+	}
+	if r.owner == peerID && r.hold != nil && r.hold.idKey == "" {
+		r.hold = nil // only a resume of this slot could have taken it back
+	}
 	for i, id := range r.order {
 		if id == peerID {
 			r.order = append(r.order[:i], r.order[i+1:]...)
 			break
 		}
+	}
+	if len(r.peers) == 0 && r.ephemeral {
+		m.dropRoomLocked(r)
+		return
 	}
 	if len(r.peers) == 0 {
 		r.relayQ = nil
@@ -703,6 +722,39 @@ func (m *Manager) broadcastLocked(r *Room, except string, msg any) {
 			p.out.Send(msg)
 		}
 	}
+}
+
+// Served returns the number of rooms with members that this server has
+// seated or resumed since they were restored (or that it created): its own
+// sessions, as opposed to copies loaded from a state file.
+func (m *Manager) Served() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, r := range m.rooms {
+		if !r.restored && !r.ephemeral && len(r.peers) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// Reset deletes every room and channel tie, as if the server had just
+// started empty, and returns the connections that were seated in them (the
+// caller closes them; their peers' slots are gone).
+func (m *Manager) Reset() (rooms int, outs []Outbox) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rooms = len(m.rooms)
+	for _, r := range m.rooms {
+		for _, id := range r.order {
+			if p := r.peers[id]; p.out != nil {
+				outs = append(outs, p.out)
+			}
+		}
+	}
+	m.rooms, m.channels = map[string]*Room{}, map[string]string{}
+	return rooms, outs
 }
 
 // Count returns the number of live rooms (for logs).

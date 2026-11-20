@@ -46,6 +46,8 @@ server pings every 30 s.
 | `BLITE_HOST_KEY` | unset | Shared secret with a hosted relay (fixed room codes) |
 | `BLITE_MAX_PEERS` | `0` | Cap room size (0 = no cap) |
 | `BLITE_STATE_FILE` | unset | Keep rooms across restarts: saved every 30 s and on shutdown, loaded on start, reloaded on `SIGHUP` (rooms served since the last load are kept). Members resume into their slots instead of rejoining; after a crash, changes since the last save are lost. It holds password and token hashes, so put it on a private volume |
+| `BLITE_COLOR` | unset | Blue/green deploys: this instance's color. With `.ci-deploy-defer-<color>` next to the state file at startup it starts deferred (see [BLUE_GREEN.md](BLUE_GREEN.md)) |
+| `BLITE_ADMIN_ADDR` | `127.0.0.1:8081` | Loopback-only listener for the deploy hooks (`-drain`, `-adopt`, `-undrain`, `-status`); `off` = none |
 | `BLITE_MIN_COMPATIBLE_BUILD` | `0` | Refuse clients below this build |
 | `BLITE_MIN_RECOMMENDED_BUILD` | `0` | Ask clients below this build to update |
 | `BLITE_SITE_ALIASES` | unset | Other host names of this server (comma-separated); their web pages redirect to the main site |

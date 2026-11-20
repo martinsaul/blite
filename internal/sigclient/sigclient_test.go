@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -352,6 +353,19 @@ func TestLeaveFastWhenServerCloses(t *testing.T) {
 			}
 		case <-timeout:
 			t.Fatal("bob never saw alice leave")
+		}
+	}
+}
+
+// SlotLost tells a refused resume apart from other ends.
+func TestSlotLost(t *testing.T) {
+	lost := fmt.Errorf("signaling lost (EOF); resume failed: %w", fmt.Errorf("%w: %w", errSent, ServerError(proto.ErrResumeFail)))
+	if !SlotLost(lost) {
+		t.Fatal("resume_failed not seen")
+	}
+	for _, err := range []error{errors.New("left"), errors.New("kicked"), ServerError(proto.ErrNoRoom), nil} {
+		if SlotLost(err) {
+			t.Fatalf("SlotLost(%v)", err)
 		}
 	}
 }

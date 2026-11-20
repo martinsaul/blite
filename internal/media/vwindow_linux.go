@@ -37,6 +37,12 @@ type x11Video struct {
 	intercept atomic.Bool
 	closeOnce sync.Once
 	destroy   sync.Once
+	// onButton gets the pointer button events on the window (see
+	// SetButtonHandler); buttonMu also keeps it from running after it is
+	// replaced.
+	buttonMu  sync.Mutex
+	onButton  func(press bool, button int, x, y float64)
+	buttonGen uint64
 }
 
 func openVideoWindow(title string, w, h int) (Window, error) {
@@ -52,7 +58,7 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 	}
 	if err := xproto.CreateWindowChecked(c, scr.RootDepth, wid, scr.Root, 0, 0, uint16(w), uint16(h), 0,
 		xproto.WindowClassInputOutput, scr.RootVisual, xproto.CwBackPixel|xproto.CwEventMask,
-		[]uint32{scr.BlackPixel, xproto.EventMaskStructureNotify}).Check(); err != nil {
+		[]uint32{scr.BlackPixel, xproto.EventMaskStructureNotify | xproto.EventMaskButtonPress | xproto.EventMaskButtonRelease | xproto.EventMaskButtonMotion}).Check(); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -70,6 +76,21 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 			if ev == nil && err == nil {
 				return // connection closed
 			}
+			switch e := ev.(type) {
+			case xproto.ButtonPressEvent:
+				v.button(true, int(e.Detail), float64(e.EventX), float64(e.EventY))
+				continue
+			case xproto.ButtonReleaseEvent:
+				v.button(false, int(e.Detail), float64(e.EventX), float64(e.EventY))
+				continue
+			case xproto.MotionNotifyEvent:
+				// Only while a button is held: X then reports the
+				// pointer to us alone (the press grabbed it), so the
+				// sink sees no moves (a volume slider drag) unless we
+				// pass them on.
+				v.button(false, 0, float64(e.EventX), float64(e.EventY))
+				continue
+			}
 			if cm, ok := ev.(xproto.ClientMessageEvent); ok && cm.Format == 32 && xproto.Atom(cm.Data.Data32[0]) == del {
 				if v.intercept.Load() {
 					select {
@@ -84,6 +105,39 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 		}
 	}()
 	return v, nil
+}
+
+// The window takes the pointer button events itself: xvimagesink (and
+// ximagesink) select only pointer moves on a window they are given, never
+// clicks, which X lets a single client select on a window. Without this, the
+// tile controls lit up under the pointer but clicks on them went nowhere.
+// glimagesink draws into a child window that takes its own clicks, so none
+// reach this one twice.
+func (v *x11Video) button(press bool, button int, x, y float64) {
+	v.buttonMu.Lock()
+	defer v.buttonMu.Unlock()
+	if v.onButton != nil {
+		v.onButton(press, button, x, y)
+	}
+}
+
+// SetButtonHandler makes f get the window's pointer button events (x, y in
+// the window's pixels; button 0: a move while a button is held) until the returned func removes it (if no other
+// handler replaced it since). Once that returns, f isn't running and won't
+// run again.
+func (v *x11Video) SetButtonHandler(f func(press bool, button int, x, y float64)) (remove func()) {
+	v.buttonMu.Lock()
+	defer v.buttonMu.Unlock()
+	v.onButton = f
+	v.buttonGen++
+	gen := v.buttonGen
+	return func() {
+		v.buttonMu.Lock()
+		defer v.buttonMu.Unlock()
+		if v.buttonGen == gen {
+			v.onButton = nil
+		}
+	}
 }
 
 func (v *x11Video) Handle() uintptr                 { return uintptr(v.win) }

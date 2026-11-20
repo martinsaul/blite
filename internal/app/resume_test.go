@@ -4,11 +4,14 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,7 +61,8 @@ func TestResumeFile(t *testing.T) {
 
 // In-call update end to end at the app level: alice shares, leaves for an
 // update, and a new App with the same identity resumes from the file: it
-// is back in the room, owns it, and shares the same source again.
+// is back in the room, owns it, and shares the same source again, but not
+// the test tone (it could have been left on).
 func TestUpdateResumesCall(t *testing.T) {
 	f := tempResume(t)
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -98,6 +102,17 @@ func TestUpdateResumesCall(t *testing.T) {
 		}
 	}
 	waitUntil("bob sees alice's video", func() bool { n, o := alice(); return n > 10 && o })
+	if err := a.SetAudio("test", nil); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil("bob decodes alice's test tone", func() bool {
+		for _, m := range b.State().(UIState).Session.Members {
+			if m.Name == "alice" && m.Audio > 10 {
+				return true
+			}
+		}
+		return false
+	})
 
 	if !a.leaveForUpdate() {
 		t.Fatal("not in a call")
@@ -113,7 +128,7 @@ func TestUpdateResumesCall(t *testing.T) {
 	if !ok || err != nil {
 		t.Fatalf("resume: %v %v", ok, err)
 	}
-	if st := a2.State().(UIState).Session; st == nil || st.Source != "test" || !st.IsOwner {
+	if st := a2.State().(UIState).Session; st == nil || st.Source != "test" || !st.IsOwner || st.Audio.Mode == "test" {
 		t.Fatalf("resumed session %+v", st)
 	}
 	waitUntil("bob sees alice back, owner, video", func() bool { n, o := alice(); return n > 10 && o })
@@ -122,5 +137,88 @@ func TestUpdateResumesCall(t *testing.T) {
 	}
 	if ok, _ := a2.Resume(ctx); ok {
 		t.Fatal("resumed twice")
+	}
+}
+
+// When the server no longer has our slot after a signaling drop
+// (resume_failed), the app rejoins the same room by itself, once, and
+// shares the same source again.
+func TestLostSlotRejoins(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(server.Config{Log: quiet})
+	ts := httptest.NewUnstartedServer(srv)
+	var (
+		mu    sync.Mutex
+		socks []net.Conn // WebSockets: hijacked, so CloseClientConnections misses them
+	)
+	ts.Config.ConnState = func(c net.Conn, st http.ConnState) {
+		if st == http.StateHijacked {
+			mu.Lock()
+			socks = append(socks, c)
+			mu.Unlock()
+		}
+	}
+	ts.Start()
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	mk := func(name string) *App {
+		return New(session.Config{Server: ws, Name: name, View: media.ViewCount, Log: quiet}, media.SourceKind("none"))
+	}
+	a, b := mk("alice"), mk("bob")
+	defer a.Shutdown()
+	defer b.Shutdown()
+	ctx := context.Background()
+	if err := a.Create(ctx, "", true); err != nil {
+		t.Fatal(err)
+	}
+	room := a.State().(UIState).Session.Room
+	if err := b.JoinLink(ctx, a.State().(UIState).Session.Link); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetSource("test"); err != nil {
+		t.Fatal(err)
+	}
+	bob := func() (id string, frames int) {
+		for _, m := range a.State().(UIState).Session.Members {
+			if m.Name == "bob" && m.State == "connected" {
+				return m.ID, m.Frames
+			}
+		}
+		return "", 0
+	}
+	waitUntil := func(what string, ok func() bool) {
+		t.Helper()
+		for end := time.Now().Add(20 * time.Second); !ok(); time.Sleep(100 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatal("timed out: " + what)
+			}
+		}
+	}
+	waitUntil("alice sees bob's video", func() bool { _, n := bob(); return n > 10 })
+	old, _ := bob()
+	b.mu.Lock()
+	first := b.sess
+	b.mu.Unlock()
+
+	// The server forgets bob's slot; every socket drops. Alice resumes,
+	// bob's resume is refused and he rejoins.
+	srv.Rooms().Leave(strings.ReplaceAll(room, "-", ""), old)
+	mu.Lock()
+	for _, c := range socks {
+		c.Close()
+	}
+	mu.Unlock()
+	waitUntil("bob rejoins with a new ID and video", func() bool { id, n := bob(); return id != "" && id != old && n > 10 })
+	b.mu.Lock()
+	again, lastErr := b.sess, b.lastErr
+	b.mu.Unlock()
+	if again == nil || again == first || lastErr != "" {
+		t.Fatalf("bob's session after the rejoin: %p (was %p), error %q", again, first, lastErr)
+	}
+	if st := b.State().(UIState).Session; st == nil || st.Source != "test" {
+		t.Fatalf("bob's rejoined session %+v", st)
+	}
+	if st := a.State().(UIState).Session; st == nil {
+		t.Fatal("alice's session ended")
 	}
 }

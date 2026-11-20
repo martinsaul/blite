@@ -995,7 +995,9 @@ func TestSetRenditionsRollbackDoesNotClobberConcurrentSetSource(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan struct{})
 	alice.mu.Lock()
-	alice.srcKind = "window:0xdeadbeef" // force setRenditions' startSource to fail
+	// An unknown kind fails in startSource everywhere; a bogus window id
+	// doesn't when a display exists (ximagesrc only errors once running).
+	alice.srcKind = "bogus-nonexistent-source" // force setRenditions' startSource to fail
 	alice.rendRollbackHook = func(run func()) {
 		close(ready)
 		<-release

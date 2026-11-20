@@ -191,7 +191,7 @@ func TestNoWindowAudioNote(t *testing.T) {
 	}
 	sh := newShareSheet(u)
 	sh.update(u.st)
-	if !sh.noWinAudioNote.Visible() || len(sh.audioSeg.opts) != 3 || sh.audioSeg.selected != "none" {
+	if !sh.noWinAudioNote.Visible() || len(sh.audioSeg.opts) != 4 || sh.audioSeg.selected != "none" {
 		t.Fatalf("sheet: note %v, options %+v", sh.noWinAudioNote.Visible(), sh.audioSeg.opts)
 	}
 
@@ -204,5 +204,16 @@ func TestNoWindowAudioNote(t *testing.T) {
 	sh.update(u.st)
 	if u.lobby.chipAudio.text != "With sound" || u.lobby.noWinAudio.Visible() || sh.noWinAudioNote.Visible() || sh.audioSeg.selected != "window" {
 		t.Fatal("a window with a known process shares its app's audio, without the note")
+	}
+
+	// The test tone says so on Home, not just "With sound".
+	st.Share.Audio.Mode = "test"
+	be.mu.Lock()
+	be.st = st
+	be.mu.Unlock()
+	u.refresh()
+	sh.update(u.st)
+	if u.lobby.chipAudio.text != "Test tone" || sh.audioSeg.selected != "test" {
+		t.Fatalf("test tone: chip %q, selected %q", u.lobby.chipAudio.text, sh.audioSeg.selected)
 	}
 }

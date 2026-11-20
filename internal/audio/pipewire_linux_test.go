@@ -1,13 +1,34 @@
 package audio
 
 import (
+	"bytes"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// logBuf is a log the sharer's loop and the test share.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
 
 // Needs a PipeWire session with two players: application.name AppOne (440 Hz)
 // and AppTwo (1000 Hz). Run via scripts/pw-test-session.sh; skipped otherwise.
@@ -31,7 +52,8 @@ func TestShareOnlySelectedApp(t *testing.T) {
 	if one == "" || two == "" {
 		t.Fatalf("test apps not found: %+v", apps)
 	}
-	s, err := NewSharer()
+	var log logBuf
+	s, err := NewSharer(slog.New(slog.NewTextHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +88,20 @@ func TestShareOnlySelectedApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("none", false, false)
+	// An app that restarted (another pid): silence, and a warning naming
+	// what plays.
+	if err := s.Select(Selection{Mode: "apps", Apps: []string{"AppOne#1"}}); err != nil {
+		t.Fatal(err)
+	}
+	check("stale app", false, false)
+	got := log.String()
+	t.Log(got)
+	for _, want := range []string{`mode=apps streams="AppOne pid=`, `mode=system streams="AppOne pid=`,
+		`msg="shared audio matches no app stream" mode=apps apps=[AppOne#1] pid=0 playing="[AppOne#`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q", want)
+		}
+	}
 }
 
 func capture(t *testing.T, src string) []int16 {

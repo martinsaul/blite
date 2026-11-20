@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 
 	"blite/internal/app"
 	"blite/internal/audio"
+	"blite/internal/capture"
 	"blite/internal/i18n"
 	"blite/internal/session"
 	"blite/internal/ui"
@@ -34,8 +36,12 @@ type Options struct {
 	// Hidden starts with the window hidden (only the tray icon).
 	Hidden bool
 	// Scene opens a secondary UI surface after the initial draw (for blite-uidemo):
-	// "sharesheet", "advanced", "panel", "gear", "help".
+	// "sharesheet", "advanced", "panel", "gear", "help", "picker".
 	Scene string
+	// Targets and TargetIcons replace what the source picker lists
+	// (capture.List and capture.Icons) for blite-uidemo; nil: the real ones.
+	Targets     func() ([]capture.Target, error)
+	TargetIcons func([]capture.Target) map[string]image.Image
 }
 
 // UI is the running native interface.
@@ -47,8 +53,7 @@ type UI struct {
 
 	// closed: a quit was asked for (or Run returned). From then on nothing
 	// may queue work for the driver: once it has quit, fyne.Do runs the
-	// function inline on the calling goroutine, against a terminated GLFW
-	//.
+	// function inline on the calling goroutine, against a terminated GLFW.
 	closed atomic.Bool
 	// bg counts goroutines that report back to the UI (Go live, busy
 	// buttons), until their UI work ran, so tests can wait for them.
@@ -79,6 +84,12 @@ func Run(a ui.Backend, o Options) {
 	icon := fyne.NewStaticResource("icon.png", iconPNG)
 	fa.SetIcon(icon)
 	u := &UI{a: a, fa: fa, icon: icon}
+	if o.Targets != nil {
+		listTargets = o.Targets
+	}
+	if o.TargetIcons != nil {
+		targetIcons = o.TargetIcons
+	}
 	setFyneLanguage()
 	fa.Settings().SetTheme(themeFor())
 	curMu.Lock()
@@ -300,6 +311,8 @@ func (u *UI) applyScene(scene string) {
 		if btn := u.activeHelpButton(); btn != nil {
 			showMenuBelow(btn, u.helpMenuItems()...)
 		}
+	case "picker":
+		u.sourceDialog()
 	}
 }
 

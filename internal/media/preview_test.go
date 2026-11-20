@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"blite/internal/gst"
 )
 
 // The preview branch costs nothing until SetPreview opens it, and a
@@ -96,5 +98,67 @@ func TestInterHoldsLastFrame(t *testing.T) {
 	}
 	if y := data[0]; y < 200 {
 		t.Fatalf("2.5 s after the last frame the picture is %d (black), want the last white frame", y)
+	}
+}
+
+// The big preview (our preview as a tile or in its own window) comes at
+// PreviewBigW x PreviewBigH on PreviewBigChannel instead of the corner
+// picture's PreviewW x PreviewH, and switching while it runs keeps going.
+func TestPreviewBig(t *testing.T) {
+	Init()
+	ch := NewPreviewChannel()
+	src, _, err := StartVideoSource(SourceTest, Res1080, "", nil, "", ch, func(int, AccessUnit) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Stop()
+	view := func(ch string) *gst.Element {
+		t.Helper()
+		p, err := launch("intervideosrc channel=" + ch + " " + interHold + " ! videoconvert ! video/x-raw,format=I420 ! appsink name=out sync=false max-buffers=1 drop=true")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Stop)
+		out, err := p.element("out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.start(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	small, big := view(ch), view(PreviewBigChannel(ch))
+	size := func(out *gst.Element, w, h int) {
+		t.Helper()
+		want := w * h * 3 / 2
+		var got int
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+			if data, _, err := out.Pull(time.Second); err == nil {
+				if got = len(data); got == want {
+					return
+				}
+			}
+		}
+		t.Fatalf("preview frames of %d bytes, want %dx%d (%d)", got, w, h, want)
+	}
+	src.SetPreview(true)
+	size(small, PreviewW, PreviewH)
+	for range 2 {
+		src.SetPreviewBig(true)
+		time.Sleep(200 * time.Millisecond)
+		n := src.PreviewFrames()
+		size(big, PreviewBigW, PreviewBigH)
+		time.Sleep(time.Second)
+		if d := src.PreviewFrames() - n; d < PreviewFPS/2 || d > PreviewFPS*2 {
+			t.Fatalf("%d big preview frames in about a second, want about %d (one valve open)", d, PreviewFPS)
+		}
+		src.SetPreviewBig(false)
+		size(small, PreviewW, PreviewH)
+	}
+	select {
+	case err := <-src.Err:
+		t.Fatalf("capture: %v", err)
+	default:
 	}
 }

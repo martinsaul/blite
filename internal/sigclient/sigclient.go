@@ -181,6 +181,15 @@ type ServerError string
 
 func (e ServerError) Error() string { return "server: " + string(e) }
 
+// SlotLost reports whether err (an Event.Err) ended the session because
+// the server no longer had our slot when we resumed (resume_failed): it
+// restarted without our room, or another server held us meanwhile. The
+// room may well still be there; a fresh join gets back in.
+func SlotLost(err error) bool {
+	var se ServerError
+	return errors.As(err, &se) && se == proto.ErrResumeFail
+}
+
 // maxEarly caps the messages we keep that arrive before the welcome: the
 // server seats us before sending it, so members may already signal us (an
 // end-to-end exchange key).
