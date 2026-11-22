@@ -21,6 +21,7 @@ type serversBackend interface {
 	RemoveServer(url string) error
 	SetDefaultServer(url string) error
 	SelectServer(url string) error
+	SetServerPinned(url string, on bool) error
 }
 
 // serverName is how a server shows in the window.
@@ -138,6 +139,21 @@ func (u *UI) serversDialog() {
 				b.Importance = widget.LowImportance
 				right = append(right, b)
 			}
+			if srv.BuiltIn {
+				if srv.Pinned {
+					right = append([]fyne.CanvasObject{widget.NewLabel(i18n.L("Certificate pinned"))}, right...)
+				}
+			} else {
+				pinned := srv.Pinned
+				pc := widget.NewCheck(i18n.L("Pin certificate"), nil)
+				pc.SetChecked(pinned)
+				pc.OnChanged = func(on bool) {
+					if on != pinned {
+						act(func() error { return sb.SetServerPinned(srv.URL, on) })
+					}
+				}
+				right = append([]fyne.CanvasObject{pc}, right...)
+			}
 			if !srv.BuiltIn {
 				rm := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() { act(func() error { return sb.RemoveServer(srv.URL) }) })
 				rm.Importance = widget.LowImportance
@@ -161,7 +177,9 @@ func (u *UI) serversDialog() {
 	})
 	entry.OnSubmitted = func(string) { add.OnTapped() }
 	intro := label(i18n.L("Sessions you start run on the default server. Links you click always join on the server they came from, so you don't need to add a server to watch someone. Add a server of your own to start sessions there: a server picker then shows at the bottom right of the window."))
-	content := container.NewVBox(intro, widget.NewSeparator(), rows, widget.NewSeparator(),
+	pinNote := label(i18n.L("A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them."))
+	pinNote.Importance = widget.LowImportance
+	content := container.NewVBox(intro, widget.NewSeparator(), rows, pinNote, widget.NewSeparator(),
 		container.NewBorder(nil, nil, nil, add, entry), msg)
 	d := dialog.NewCustom(i18n.L("Servers"), i18n.L("Close"), content, u.win)
 	d.Resize(fyne.NewSize(600, 0))

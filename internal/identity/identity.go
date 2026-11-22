@@ -113,6 +113,30 @@ func VerifySDP(idKey, room, from, to, sdp string, sig []byte) error {
 	return nil
 }
 
+// signed is what Sign signs: its prefix differs from message's, so no
+// signature can pass for an SDP one (msg may be chosen by the server).
+func signed(purpose string, msg []byte) []byte {
+	return append([]byte("blite-sign-v1\x00"+purpose+"\x00"), msg...)
+}
+
+// Sign signs msg for purpose (which keeps a signature made for one use from
+// being valid for another).
+func (k Key) Sign(purpose string, msg []byte) []byte {
+	return ed25519.Sign(k.Private, signed(purpose, msg))
+}
+
+// Verify checks a Sign signature against the base64 public key idKey.
+func Verify(idKey, purpose string, msg, sig []byte) error {
+	pub, err := base64.StdEncoding.DecodeString(idKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return errors.New("no valid identity key")
+	}
+	if !ed25519.Verify(pub, signed(purpose, msg), sig) {
+		return errors.New("bad signature")
+	}
+	return nil
+}
+
 // SafetyCode derives a code everyone in the room sees identically if nobody
 // swapped keys: SHA-256 over the sorted idKeys, shown as 5 groups of 4 digits.
 func SafetyCode(idKeys []string) string {

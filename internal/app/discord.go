@@ -22,8 +22,15 @@ import (
 type Discord struct {
 	// Status: "off" (Discord isn't running), "login" (the user hasn't let
 	// us read their voice channel yet), "waiting" (approving in Discord),
-	// "ready".
-	Status    string `json:"status"`
+	// "linking" (approving in the browser), "ready".
+	Status string `json:"status"`
+	// Via "bot": our server's Discord bot follows the channel (the user
+	// linked their account; User is its name). "": Discord's local RPC.
+	Via  string `json:"via,omitempty"`
+	User string `json:"user,omitempty"`
+	// BotURL (Via "bot"): the server's page for adding its bot to a
+	// Discord server. The bot only sees voice channels in servers it's in.
+	BotURL    string `json:"botUrl,omitempty"`
 	Error     string `json:"error,omitempty"`
 	ChannelID string `json:"channelId,omitempty"` // "" = not in a voice channel
 	Channel   string `json:"channel,omitempty"`
@@ -157,8 +164,16 @@ func (a *App) DiscordLogin() {
 	}
 }
 
-// RunDiscord follows the user's Discord voice channel until ctx ends.
+// RunDiscord follows the user's Discord voice channel until ctx ends:
+// through our server's bot, or through Discord's local RPC when the server
+// has none or this install authorized RPC before (testers).
 func (a *App) RunDiscord(ctx context.Context) {
+	if loadDiscordToken() == nil {
+		if err := a.runFollow(ctx); !errors.Is(err, errNoFollow) {
+			return
+		}
+		a.log.Info("discord: the server has no bot; using Discord's RPC")
+	}
 	lastErr := ""
 	for ctx.Err() == nil {
 		c, err := discord.Dial()

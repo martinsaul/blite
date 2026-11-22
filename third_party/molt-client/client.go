@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,9 @@ type Client struct {
 
 	HTTP *http.Client     // default: 30s timeout for manifests; downloads use ctx
 	Now  func() time.Time // default time.Now
+	// Progress, if set, hears how much of a Download is on disk (done of
+	// total bytes) as it grows. It runs on the downloading goroutine.
+	Progress func(done, total int64)
 }
 
 // Update is an available, verified release newer than the installed build.
@@ -148,9 +152,11 @@ func fetchManifest(ctx context.Context, hc *http.Client, u, ua string, keys []ed
 
 // Download fetches the payload into dir, verifying size and sha256 over the
 // whole file before atomically renaming it to its final name. It returns the
-// verified file's path. A partial or mismatched file is removed.
+// verified file's path. A partial or mismatched file is removed. A slow link
+// gets all the time it needs; only a transfer that stalls (stallTimeout with
+// no data) is dropped and resumed.
 func (c *Client) Download(ctx context.Context, p Payload, dir string) (string, error) {
-	return download(ctx, p, dir, c.UserAgent())
+	return download(ctx, p, dir, c.UserAgent(), c.Progress)
 }
 
 // downloadAttempts bounds how often a dropped transfer is resumed. Proxies and
@@ -161,7 +167,12 @@ const downloadAttempts = 6
 // retryDelay is the backoff unit between resume attempts (a var for tests).
 var retryDelay = 2 * time.Second
 
-func download(ctx context.Context, p Payload, dir, ua string) (string, error) {
+// stallTimeout drops a transfer that brings no data for this long (waiting
+// for the response included), so the next attempt resumes it (a var for
+// tests).
+var stallTimeout = 60 * time.Second
+
+func download(ctx context.Context, p Payload, dir, ua string, progress func(done, total int64)) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -181,7 +192,7 @@ func download(ctx context.Context, p Payload, dir, ua string) (string, error) {
 			case <-time.After(time.Duration(attempt) * retryDelay):
 			}
 		}
-		done, err := fetchRange(ctx, p, part, ua)
+		done, err := fetchRange(ctx, p, part, ua, progress)
 		if err != nil {
 			lastErr = err
 			if errors.Is(err, ErrBadPayload) || ctx.Err() != nil {
@@ -215,9 +226,9 @@ func download(ctx context.Context, p Payload, dir, ua string) (string, error) {
 }
 
 // fetchRange appends the rest of the payload to part. It reports done once
-// part holds p.Size bytes; a transfer cut short returns the read error and
-// keeps what arrived for the next attempt.
-func fetchRange(ctx context.Context, p Payload, part, ua string) (bool, error) {
+// part holds p.Size bytes; a transfer cut short or stalled returns an error
+// and keeps what arrived for the next attempt.
+func fetchRange(ctx context.Context, p Payload, part, ua string, progress func(done, total int64)) (bool, error) {
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return false, err
@@ -236,6 +247,17 @@ func fetchRange(ctx context.Context, p Payload, part, ua string) (bool, error) {
 	if have == p.Size {
 		return true, nil
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(stallTimeout, func() { stalled.Store(true); cancel() })
+	defer watchdog.Stop()
+	stallErr := func(err error) error {
+		if stalled.Load() {
+			return fmt.Errorf("download stalled: no data for %s", stallTimeout)
+		}
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
 	if err != nil {
 		return false, err
@@ -246,7 +268,7 @@ func fetchRange(ctx context.Context, p Payload, part, ua string) (bool, error) {
 	}
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return false, err
+		return false, stallErr(err)
 	}
 	defer resp.Body.Close()
 	switch {
@@ -269,9 +291,14 @@ func fetchRange(ctx context.Context, p Payload, part, ua string) (bool, error) {
 	default:
 		return false, fmt.Errorf("download HTTP %d", resp.StatusCode)
 	}
-	n, err := io.Copy(f, io.LimitReader(resp.Body, p.Size-have+1))
+	body := &watchedReader{r: io.LimitReader(resp.Body, p.Size-have+1), watchdog: watchdog,
+		done: have, total: p.Size, progress: progress}
+	if progress != nil {
+		progress(have, p.Size)
+	}
+	n, err := io.Copy(f, body)
 	if err != nil {
-		return false, err
+		return false, stallErr(err)
 	}
 	switch got := have + n; {
 	case got > p.Size:
@@ -307,3 +334,24 @@ func safeName(name, sha string) string {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// watchedReader restarts the stall watchdog on every read that brings data
+// and reports progress.
+type watchedReader struct {
+	r           io.Reader
+	watchdog    *time.Timer
+	done, total int64
+	progress    func(done, total int64)
+}
+
+func (w *watchedReader) Read(b []byte) (int, error) {
+	n, err := w.r.Read(b)
+	if n > 0 {
+		w.watchdog.Reset(stallTimeout)
+		w.done += int64(n)
+		if w.progress != nil {
+			w.progress(min(w.done, w.total), w.total)
+		}
+	}
+	return n, err
+}

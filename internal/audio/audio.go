@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -81,6 +82,41 @@ func (l *shareLog) note(sel Selection, matched []stream, playing []string, now t
 		l.log.Info("shared audio streams", "mode", sel.Mode, "streams", strings.Join(parts, ", "))
 	}
 }
+
+// voiceApps are voice chat programs, by executable or application name
+// (lower case, no ".exe"). Whole-system sharing leaves them out unless
+// SetIncludeVoice: everyone in the voice call would hear each other twice,
+// once from the call and once, late, from the share. "webrtc voiceengine"
+// is how Discord's desktop app names its stream on Linux.
+var voiceApps = map[string]bool{
+	"discord": true, "discordptb": true, "discordcanary": true, "vesktop": true, "webcord": true, "legcord": true,
+	"webrtc voiceengine": true,
+	"teamspeak":          true, "ts3client_win64": true, "ts3client_win32": true, "ts3client_linux_amd64": true,
+	"mumble": true, "zoom": true, "teams": true, "ms-teams": true, "skype": true, "slack": true,
+	"signal": true, "telegram": true, "whatsapp": true, "element": true, "guilded": true, "webex": true, "ciscocollabhost": true,
+}
+
+// isVoiceApp reports whether any of names (an exe, binary or app name) is a
+// voice chat program.
+func isVoiceApp(names ...string) bool {
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		n = strings.TrimSuffix(n, ".exe")
+		if voiceApps[n] {
+			return true
+		}
+	}
+	return false
+}
+
+var includeVoice atomic.Bool
+
+// SetIncludeVoice sets whether whole-system sharing includes voice chat
+// apps (default: left out).
+func SetIncludeVoice(on bool) { includeVoice.Store(on) }
+
+// IncludeVoice reports SetIncludeVoice.
+func IncludeVoice() bool { return includeVoice.Load() }
 
 func orDiscard(l *slog.Logger) *slog.Logger {
 	if l == nil {

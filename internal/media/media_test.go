@@ -93,7 +93,7 @@ func TestOpusLoopback(t *testing.T) {
 	defer src.Stop()
 	deadline := time.After(5 * time.Second)
 	n := 0
-	for pl.Buffers() < 25 {
+	for pl.Buffers() < 60 { // over a second: at least one beep
 		select {
 		case f := <-frames:
 			n++
@@ -105,6 +105,11 @@ func TestOpusLoopback(t *testing.T) {
 		}
 	}
 	t.Logf("decoded %d buffers from %d Opus frames", pl.Buffers(), n)
+	// The meter hears the beeps (-12 dBFS), not silence.
+	l, ok := pl.Level()
+	if !ok || l.PeakDB < -24 {
+		t.Fatalf("decoded level %+v ok=%v, want the beeps' peak near -12 dBFS", l, ok)
+	}
 }
 
 // The test tone beeps at about -12 dBFS; silence meters as -96. Any sink

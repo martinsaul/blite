@@ -79,3 +79,17 @@ func TestTagAndNames(t *testing.T) {
 		}
 	}
 }
+
+func TestSignPurpose(t *testing.T) {
+	k := Ephemeral()
+	sig := k.Sign("discord-follow", []byte("abc"))
+	if err := Verify(k.Public(), "discord-follow", []byte("abc"), sig); err != nil {
+		t.Fatal(err)
+	}
+	if Verify(k.Public(), "other", []byte("abc"), sig) == nil || Verify(k.Public(), "discord-follow", []byte("abd"), sig) == nil {
+		t.Fatal("signature valid for another purpose or message")
+	}
+	if Verify(Ephemeral().Public(), "discord-follow", []byte("abc"), sig) == nil {
+		t.Fatal("signature valid for another key")
+	}
+}

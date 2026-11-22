@@ -53,7 +53,7 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 	install := fyne.NewMenuItem(i18n.L("Install update and restart"), func() {
 		u.do(func() error { return u.a.InstallUpdate(ctx()) })
 	})
-	install.Disabled = up == nil || up.Available == "" || !up.CanApply
+	install.Disabled = up == nil || up.Available == "" || !up.CanApply || up.Downloading
 	if up != nil && up.Available != "" {
 		install.Label = i18n.L("Install {{.Version}} and restart", i18n.D{"Version": up.Available})
 	}
@@ -61,21 +61,16 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 		u.do(func() error { return u.a.CheckUpdate(ctx()) })
 	}), up == nil || up.Checking)
 
-	autostart := check(i18n.L("Start Bellion Share when I sign in"), u.st.Autostart != nil && *u.st.Autostart, func() {
+	autostart := check(i18n.L("Open at sign-in"), u.st.Autostart != nil && *u.st.Autostart, func() {
 		on := !(u.st.Autostart != nil && *u.st.Autostart)
 		u.do(func() error { return u.a.SetAutostart(on) })
 	})
 	autostart.Disabled = u.st.Autostart == nil
 
-	sounds := check(i18n.L("Play sounds"), u.st.PlaySounds, func() {
-		on := !u.st.PlaySounds
-		u.do(func() error { return u.a.SetPlaySounds(on) })
-	})
-
-	autoWatch := check(i18n.L("Start watching new streams automatically"), u.st.AutoWatch, func() {
-		on := !u.st.AutoWatch
-		u.do(func() error { return u.a.SetAutoWatch(on) })
-	})
+	var unlink *fyne.MenuItem
+	if dc, ok := u.a.(discordBackend); ok && u.st.Discord != nil && u.st.Discord.Via == "bot" && u.st.Discord.Status == "ready" {
+		unlink = fyne.NewMenuItem(i18n.L("Disconnect Discord ({{.User}})", i18n.D{"User": u.st.Discord.User}), dc.DiscordUnlink)
+	}
 
 	return nonNil(
 		fyne.NewMenuItem(i18n.L("Your name..."), u.nameDialog),
@@ -83,10 +78,9 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 		fyne.NewMenuItem(i18n.L("Servers..."), u.serversDialog),
 		u.languageMenu(),
 		u.uiScaleMenu(),
+		unlink,
 		fyne.NewMenuItemSeparator(),
 		autostart,
-		sounds,
-		autoWatch,
 		fyne.NewMenuItemSeparator(),
 		checkUp,
 		install,
@@ -118,6 +112,7 @@ func (u *UI) helpMenuItems() []*fyne.MenuItem {
 			}()
 		}),
 		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem(i18n.L("What's new"), u.whatsNew),
 		fyne.NewMenuItem(i18n.L("About Bellion Share"), u.aboutDialog),
 	}
 }

@@ -77,6 +77,9 @@ func main() {
 		DiscordClientID:     os.Getenv("BLITE_DISCORD_CLIENT_ID"),
 		DiscordSecret:       os.Getenv("BLITE_DISCORD_SECRET"),
 		DiscordPublicKey:    os.Getenv("BLITE_DISCORD_PUBLIC_KEY"),
+		DiscordBotToken:     os.Getenv("BLITE_DISCORD_BOT_TOKEN"),
+		DiscordLinksFile:    os.Getenv("BLITE_DISCORD_LINKS_FILE"),
+		DiscordLinkRedirect: os.Getenv("BLITE_DISCORD_LINK_REDIRECT"),
 		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
 		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
 		// BLITE_STATE_FILE keeps rooms across restarts: members resume

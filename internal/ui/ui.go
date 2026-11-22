@@ -82,10 +82,13 @@ type Backend interface {
 	SetAutoWatch(on bool) error
 	// SetPlaySounds sets "Play sounds" (kept on disk).
 	SetPlaySounds(on bool) error
+	// SetVoiceInSystem sets whether whole-system share audio includes
+	// voice chat apps (kept on disk).
+	SetVoiceInSystem(on bool) error
+	// SetHideChangelog sets "Don't show change logs again" (kept on disk).
+	SetHideChangelog(on bool) error
 	// SetPortMap sets "Open a port on my router automatically" (kept on disk).
 	SetPortMap(on bool) error
-	// DismissLeavePrompt cancels the "Leave the session?" prompt.
-	DismissLeavePrompt()
 	// SendLogsNow uploads our recent logs for the developers.
 	SendLogsNow(ctx context.Context) error
 	// OpenLogFolder shows the log folder in the file manager.
@@ -228,6 +231,24 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.SetPlaySounds(b.On)
 	})))
+	mux.Handle("POST /api/voice-in-system", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			On bool `json:"on"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetVoiceInSystem(b.On)
+	})))
+	mux.Handle("POST /api/hide-changelog", s.authed(s.post(func(r *http.Request) error {
+		var b struct {
+			On bool `json:"on"`
+		}
+		if err := decode(r, &b); err != nil {
+			return err
+		}
+		return s.be.SetHideChangelog(b.On)
+	})))
 	mux.Handle("POST /api/portmap", s.authed(s.post(func(r *http.Request) error {
 		var b struct {
 			On bool `json:"on"`
@@ -236,10 +257,6 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 			return err
 		}
 		return s.be.SetPortMap(b.On)
-	})))
-	mux.Handle("POST /api/leave/dismiss", s.authed(s.post(func(*http.Request) error {
-		s.be.DismissLeavePrompt()
-		return nil
 	})))
 	mux.Handle("POST /api/mode", s.authed(s.post(func(r *http.Request) error {
 		var b struct {

@@ -389,6 +389,48 @@ type ChannelRoom struct {
 	Members []string `json:"members,omitempty"`
 }
 
+// Discord follow: the app keeps a WebSocket on GET /v1/discord/follow while
+// it runs, and the server tells it which Discord voice channel its linked
+// user is in, as Discord's Gateway reports it. The server sends
+// DiscordHello; the app answers DiscordAuth (its identity key signs the
+// challenge, purpose DiscordFollowPurpose); then DiscordState comes on
+// every change. The app may send DiscordLink (the answer is a DiscordState
+// with LinkURL, to open in a browser) and DiscordUnlink.
+const DiscordFollowPurpose = "discord-follow"
+
+const (
+	TDiscordHello  = "hello"
+	TDiscordAuth   = "auth"
+	TDiscordState  = "state"
+	TDiscordLink   = "link"
+	TDiscordUnlink = "unlink"
+)
+
+// DiscordMsg is any message on the follow socket.
+type DiscordMsg struct {
+	T string `json:"t"`
+	// Hello: what to sign (base64).
+	Challenge string `json:"challenge,omitempty"`
+	// Auth: the identity key (base64) and its signature (base64).
+	Key string `json:"key,omitempty"`
+	Sig string `json:"sig,omitempty"`
+	// State: whether this install is linked to a Discord account, whose,
+	// and the voice channel they're in (nil: none). LinkURL answers Link.
+	Linked  bool          `json:"linked,omitempty"`
+	User    string        `json:"user,omitempty"`
+	Voice   *DiscordVoice `json:"voice,omitempty"`
+	LinkURL string        `json:"linkUrl,omitempty"`
+	Error   string        `json:"error,omitempty"`
+}
+
+// DiscordVoice is a voice channel and its guild.
+type DiscordVoice struct {
+	GuildID   string `json:"guildId"`
+	Guild     string `json:"guild,omitempty"`
+	ChannelID string `json:"channelId"`
+	Channel   string `json:"channel,omitempty"`
+}
+
 // Report is a client's log report (POST /v1/report on the signal server):
 // a crash found at the next start, or logs the user chose to send.
 type Report struct {

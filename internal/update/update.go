@@ -42,7 +42,17 @@ type Info struct {
 	CanApply  bool   `json:"canApply"`            // this install can update itself
 	Problem   string `json:"problem,omitempty"`   // tampering or a failed install; never "offline"
 	Result    string `json:"result,omitempty"`    // outcome of the last update, shown once
+	// UpdatedFrom/UpdatedTo: Result is a successful update between these
+	// builds (the UI shows the changes in between).
+	UpdatedFrom int64 `json:"updatedFrom,omitempty"`
+	UpdatedTo   int64 `json:"updatedTo,omitempty"`
+	// Downloading: an install is fetching the update, Progress percent done.
+	Downloading bool `json:"downloading,omitempty"`
+	Progress    int  `json:"progress,omitempty"`
 }
+
+// ErrInstalling: Install was called while an install is already running.
+var ErrInstalling = errors.New("an update is already being installed")
 
 // Updater checks for and installs updates for this Blite.
 type Updater struct {
@@ -50,9 +60,13 @@ type Updater struct {
 	opts molt.ApplyOptions
 	log  *slog.Logger
 
-	mu      sync.Mutex
-	info    Info
-	pending *molt.Update
+	// OnChange, if set, is told when Info changes during an install.
+	OnChange func()
+
+	mu         sync.Mutex
+	info       Info
+	pending    *molt.Update
+	installing bool
 }
 
 // New returns an Updater for the running build, or nil when this build can't
@@ -73,6 +87,7 @@ func New(version string, build int64, channel string, pin bool, log *slog.Logger
 		log: log,
 	}
 	u.info.Channel = channel
+	u.c.Progress = u.progress
 	u.opts, u.info.CanApply = installLayout()
 	// A channel chosen by hand survives the update; otherwise the new build
 	// uses its own stamped default.
@@ -147,6 +162,9 @@ func (u *Updater) Started() {
 	switch r.Outcome {
 	case "updated":
 		u.setResult(fmt.Sprintf("Updated to build %d.", r.ToBuild))
+		u.mu.Lock()
+		u.info.UpdatedFrom, u.info.UpdatedTo = r.FromBuild, r.ToBuild
+		u.mu.Unlock()
 	case "rolled-back":
 		u.setResult(fmt.Sprintf("The update to build %d didn't start properly, so Bellion Share went back to build %d.", r.ToBuild, r.FromBuild))
 	default:
@@ -157,6 +175,7 @@ func (u *Updater) Started() {
 func (u *Updater) setResult(s string) {
 	u.mu.Lock()
 	u.info.Result = s
+	u.info.UpdatedFrom, u.info.UpdatedTo = 0, 0
 	u.mu.Unlock()
 }
 
@@ -201,16 +220,34 @@ func (u *Updater) Check(ctx context.Context) {
 
 // Install downloads and verifies the pending update and starts molt-swap.
 // On success the caller must exit Blite promptly so the swap can proceed.
+// One install runs at a time: another call meanwhile gets ErrInstalling.
+// The download has no deadline (a slow link takes as long as it takes);
+// a stalled one is resumed.
 func (u *Updater) Install(ctx context.Context) error {
 	u.mu.Lock()
 	up, canApply := u.pending, u.info.CanApply
-	u.mu.Unlock()
 	if up == nil {
+		u.mu.Unlock()
 		return errors.New("no update available")
 	}
 	if !canApply {
+		u.mu.Unlock()
 		return errors.New("this copy of Bellion Share can't update itself; install the release package instead")
 	}
+	if u.installing {
+		u.mu.Unlock()
+		return ErrInstalling
+	}
+	u.installing = true
+	u.info.Downloading, u.info.Progress, u.info.Problem = true, 0, ""
+	u.mu.Unlock()
+	u.changed()
+	defer func() {
+		u.mu.Lock()
+		u.installing, u.info.Downloading = false, false
+		u.mu.Unlock()
+		u.changed()
+	}()
 	cache, err := u.c.CacheDir(u.opts)
 	if err != nil {
 		return err
@@ -229,6 +266,27 @@ func (u *Updater) Install(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// progress notes how much of the update is downloaded (whole percents).
+func (u *Updater) progress(done, total int64) {
+	if total <= 0 {
+		return
+	}
+	pct := int(done * 100 / total)
+	u.mu.Lock()
+	same := u.info.Progress == pct
+	u.info.Progress = pct
+	u.mu.Unlock()
+	if !same {
+		u.changed()
+	}
+}
+
+func (u *Updater) changed() {
+	if u.OnChange != nil {
+		u.OnChange()
+	}
 }
 
 // retryWaits are the pauses before the second and later install attempts.

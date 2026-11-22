@@ -1,0 +1,50 @@
+[
+ {
+  "build": 213,
+  "date": "2026-11-22",
+  "changes": [
+   "Each person has a speaker next to the eye: click it to mute them for you. It lights up while they talk, and shows when they send no audio.",
+   "Sounds and auto-watch moved from the settings menu to buttons at the bottom right of the call: the music note, and the eye with play or stop.",
+   "Including voice chat apps in whole-system audio is now a checkbox under Whole system in Share options.",
+   "Buttons show a tooltip when you rest the mouse on them."
+  ]
+ },
+ {
+  "build": 212,
+  "date": "2026-11-22",
+  "changes": [
+   "Discord: connect your account once in the browser and Bellion Share follows your voice channel. Discord doesn't need to run on this computer.",
+   "The connection to the Bellion Share server accepts only certificates from its public authorities, so a company proxy or antivirus can't read it. Your own servers can be pinned too (Servers...).",
+   "After an update, Bellion Share shows what changed. Help > What's new shows it any time.",
+   "A new update shows its changes for 30 seconds when it's found."
+  ]
+ },
+ {
+  "build": 211,
+  "date": "2026-11-22",
+  "changes": [
+   "Updates no longer fail on slow connections, and the banner shows download progress.",
+   "Whole-system audio leaves out voice chat apps (Discord, TeamSpeak...), so others in the voice call don't hear voices twice. Settings can include them."
+  ]
+ },
+ {
+  "build": 210,
+  "date": "2026-11-21",
+  "changes": [
+   "Closing a stream window closes it and stops that stream, sound too. The eye brings it back.",
+   "Fixes smeared video that wouldn't recover.",
+   "Video windows show 60 fps streams at 60.",
+   "A 4K60 share the encoder can't keep up with steps down instead of silently halving the frame rate.",
+   "Windows: Bellion Share keeps full speed behind a fullscreen game.",
+   "Stops a log flood while sharing and watching."
+  ]
+ },
+ {
+  "build": 208,
+  "date": "2026-11-20",
+  "changes": [
+   "Fixes shared sound going silent on Linux after about half a second (viewers heard nothing).",
+   "Adds a Test tone audio option to check that others hear you, plus audio diagnostics in logs."
+  ]
+ }
+]

@@ -65,7 +65,7 @@ func startTranscoder(ids []int, enc encoder, onAU func(layer int, au AccessUnit)
 			"videoscale ! video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1 ! %s ! "+
 			"video/x-h264,profile=constrained-baseline ! "+
 			"h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "+
-			"appsink name=out%d sync=false max-buffers=4 drop=true", l.Width, l.Height, enc.launch(id, l), id))
+			"appsink name=out%d sync=false max-buffers=4 drop=false", l.Width, l.Height, enc.launch(id, l), id))
 	}
 	p, err := launch(strings.Join(branches, "  "))
 	if err != nil {

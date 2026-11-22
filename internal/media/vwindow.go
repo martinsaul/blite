@@ -10,14 +10,8 @@ import (
 // pipelines and keep the windows.
 type Window interface {
 	Handle() uintptr
-	// Closed is closed when the user closes a non-intercepted window (it hides at once).
+	// Closed is closed when the user closes the window (it hides at once).
 	Closed() <-chan struct{}
-	// SetInterceptClose asks the window not to hide or close when the user
-	// clicks its close button, signaling CloseRequested instead.
-	SetInterceptClose(on bool)
-	// CloseRequested receives a value when the user tries to close an
-	// intercepted window.
-	CloseRequested() <-chan struct{}
 	SetTitle(title string)
 	// PointerInside reports whether the pointer is over the window.
 	PointerInside() bool

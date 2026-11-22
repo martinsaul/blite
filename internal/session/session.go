@@ -116,6 +116,9 @@ type Member struct {
 	top       int         // their HIGH height as last heard; 0 = not sharing
 	Volume    float64     `json:"volume"` // playback gain, 0..2
 	Muted     bool        `json:"muted,omitempty"`
+	// Heard: their audio reaches us; Loud: it is sound, not silence.
+	Heard bool `json:"heard,omitempty"`
+	Loud  bool `json:"loud,omitempty"`
 	// Owner: they own the room.
 	Owner bool `json:"owner,omitempty"`
 	// KeyChanged: this name was seen before with a different identity key.
@@ -191,8 +194,6 @@ type State struct {
 	AutoWatch bool `json:"autoWatch"`
 	// ShareNotice: short note ("NAME started sharing") when auto-watch is off.
 	ShareNotice string `json:"shareNotice,omitempty"`
-	// LeavePrompt: the user clicked close on the main streaming window.
-	LeavePrompt bool `json:"leavePrompt,omitempty"`
 }
 
 // Slow-viewer degradation policy ("When a viewer's connection is slow").
@@ -298,13 +299,12 @@ type Session struct {
 	members  map[string]*Member
 	players  map[string]*media.Player
 	aplayers map[string]*media.AudioPlayer
+	hear     map[string]hearing // what the People list shows of each peer's audio
 	sharer   *audio.Sharer
 	feeds    *feeds.Machine
 
 	shareNotice     string
 	shareNoticePeer string
-	leavePrompt     bool
-	onLeavePrompt   func()
 
 	relayRefused bool
 	reconnAt     time.Time         // our signaling resume started; zero = connected
@@ -319,6 +319,8 @@ type Session struct {
 	resNote      string            // why we share below the chosen size
 	srcNote      string            // why sharing stopped on its own
 	keyAt        map[int]time.Time // last forced keyframe per layer
+	keys         keyStats
+	gridFast     atomic.Bool // video windows run at media.GridFastFPS
 	// srcMu serializes starting and stopping the capture. Two overlapping
 	// starts (a double-clicked source; a start takes ~8 s on Windows)
 	// each began a capture and the first was never stopped: two encoders
@@ -395,9 +397,8 @@ type Session struct {
 }
 
 type winMeta struct {
-	title     string
-	intercept bool
-	set       bool
+	title string
+	set   bool
 }
 
 // stopInfo is a peer's share that ended: when, and which stop.
@@ -615,6 +616,8 @@ func (s *Session) start(sig *sigclient.Client) (*Session, error) {
 	go s.watchDecoders()
 	go s.watchVisibility()
 	go s.watchWaiting()
+	go s.watchHearing()
+	go s.watchAudioCapture()
 	cpuMeterOnce.Do(func() { cpuMeter = load.NewMeter(10 * time.Second) })
 	return s, nil
 }
@@ -907,14 +910,6 @@ func (s *Session) OnChange(f func()) {
 	s.mu.Unlock()
 }
 
-// OnLeavePrompt registers a callback run when closing the main streaming
-// window asks whether to leave the session (so the control window surfaces).
-func (s *Session) OnLeavePrompt(f func()) {
-	s.mu.Lock()
-	s.onLeavePrompt = f
-	s.mu.Unlock()
-}
-
 // triggerRegrid schedules regrid in the background, coalescing concurrent
 // triggers so at most one background worker runs at a time with one trailing
 // pass if another trigger arrived mid-run.
@@ -1121,7 +1116,6 @@ const (
 func (s *Session) regrid() {
 	s.gridMu.Lock()
 	defer s.gridMu.Unlock()
-	hadMain := s.grids[""] != nil || s.wins[""] != nil
 
 	s.mu.Lock()
 	src := s.src
@@ -1203,9 +1197,6 @@ func (s *Session) regrid() {
 		if t, ok := popTiles[feeds.Self]; ok {
 			t.Channel = media.PreviewBigChannel(s.selfCh)
 			popTiles[feeds.Self] = t
-		}
-		if len(mainTiles) == 0 && hadMain {
-			s.leavePrompt = false
 		}
 	}
 	s.previewBig = bigPreview
@@ -1295,12 +1286,7 @@ func (s *Session) regrid() {
 			changed = true
 		}
 		if w := s.wins[k]; w != nil {
-			wantIntercept := k == ""
 			meta := s.winMeta[w]
-			if !meta.set || meta.intercept != wantIntercept {
-				w.SetInterceptClose(wantIntercept)
-				meta.intercept = wantIntercept
-			}
 			if !meta.set || meta.title != title {
 				w.SetTitle(title)
 				meta.title = title
@@ -1338,36 +1324,15 @@ func windowTitle(k string, cfg media.GridConfig) string {
 	return "Bellion Share"
 }
 
-// watchWindow handles close events on w: closing the main window prompts
-// "Leave the session?" without destroying video; closing a pop-out window
-// returns its stream to the main window.
+// watchWindow handles the user closing w: closing the main streaming window
+// stops watching the streams it shows (the eye watches them again); closing
+// a pop-out window returns its stream to the main window.
 func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 	for {
 		select {
-		case <-w.CloseRequested():
-			s.gridMu.Lock()
-			isMain := s.wins[""] == w
-			s.gridMu.Unlock()
-			if !isMain {
-				continue
-			}
-			s.mu.Lock()
-			if s.closed {
-				s.mu.Unlock()
-				return
-			}
-			s.leavePrompt = true
-			f := s.onLeavePrompt
-			s.mu.Unlock()
-			s.cfg.Log.Info("main video window close requested: prompting to leave")
-			if f != nil {
-				go f()
-			}
-			s.changed()
 		case <-w.Closed():
 			var closedKey string
 			var wasOpen bool
-			var f func()
 			s.gridMu.Lock()
 			delete(s.winStop, w)
 			delete(s.winMeta, w)
@@ -1387,11 +1352,7 @@ func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 			}
 			if wasOpen {
 				s.mu.Lock()
-				if closedKey != "" {
-					s.feeds.Apply(closedKey, feeds.PopOutClosed)
-				} else {
-					f = s.closeMainWindowFeedsLocked()
-				}
+				s.closeWindowFeedsLocked(closedKey)
 				s.mu.Unlock()
 			}
 			s.gridMu.Unlock()
@@ -1399,11 +1360,8 @@ func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 			if !wasOpen {
 				return
 			}
-			if closedKey == feeds.Self { // closing our preview's window puts it back
+			if closedKey == feeds.Self {
 				s.selfViewChanged()
-			}
-			if f != nil {
-				go f()
 			}
 			s.regrid()
 			s.applyAutoQuality()
@@ -1428,7 +1386,10 @@ func (s *Session) regridLocked(k string, cfg media.GridConfig) bool {
 	for _, t := range cfg.Tiles {
 		what = append(what, shown{t.Channel, t.Label, t.ID, t.Self, t.Pinned, t.Stopped, t.PiP, t.Self && t.PoppedOut})
 	}
-	key := fmt.Sprint(cfg.Rows, cfg.Cols, what, fmt.Sprintf("%p", cfg.Window))
+	if s.gridFast.Load() {
+		cfg.FPS = media.GridFastFPS
+	}
+	key := fmt.Sprint(cfg.Rows, cfg.Cols, cfg.FPS, what, fmt.Sprintf("%p", cfg.Window))
 	if g := s.grids[k]; g != nil {
 		if key == s.gridKeys[k] {
 			for _, t := range cfg.Tiles {
@@ -1470,26 +1431,32 @@ func (s *Session) regridLocked(k string, cfg media.GridConfig) bool {
 	return true
 }
 
-// closeMainWindowFeedsLocked marks all feeds currently shown in the main
-// streaming window as user-closed (EyeToggle -> NotWatched, or Gone for
-// StoppedFading) and prompts "Leave the session?" when a non-interceptable main
-// window closes (gridMu and mu held), so no concurrent regrid() can reopen the
-// window or clear leavePrompt before feeds reflect the close.
-func (s *Session) closeMainWindowFeedsLocked() func() {
+// closeWindowFeedsLocked applies the user closing video window k: a pop-out
+// returns its feed to the main window; closing the main streaming window ("")
+// stops watching the streams it shows (EyeToggle: NotWatched, or Gone for
+// StoppedFading), sound included. Runs with gridMu and mu held, so no
+// concurrent regrid() can reopen the window before feeds reflect the close.
+func (s *Session) closeWindowFeedsLocked(k string) {
 	if s.closed {
-		return nil
+		return
 	}
-	s.leavePrompt = true
-	for _, id := range s.feeds.MainFeeds() {
+	if k != "" {
+		s.feeds.Apply(k, feeds.PopOutClosed)
+		return
+	}
+	ids := s.feeds.MainFeeds()
+	for _, id := range ids {
 		tr := s.feeds.Apply(id, feeds.EyeToggle)
 		if id != feeds.Self && !tr.Next.Watched() {
 			if tr.Prev != feeds.StoppedFading {
 				delete(s.stopped, id)
 			}
-			s.stopRemoteVideoLocked(id)
+			s.stopRemoteMediaLocked(id)
 		}
 	}
-	return s.onLeavePrompt
+	if len(ids) > 0 {
+		s.cfg.Log.Info("main video window closed by the user: stopped watching", "streams", len(ids))
+	}
 }
 
 func (s *Session) watchGridWindow(k string, g *media.Grid) {
@@ -1503,7 +1470,6 @@ func (s *Session) watchGridWindow(k string, g *media.Grid) {
 	case <-s.done:
 		return
 	}
-	var f func()
 	s.gridMu.Lock()
 	if s.grids[k] != g {
 		s.gridMu.Unlock()
@@ -1513,15 +1479,11 @@ func (s *Session) watchGridWindow(k string, g *media.Grid) {
 	delete(s.grids, k)
 	delete(s.gridKeys, k)
 	s.mu.Lock()
-	if k != "" {
-		s.feeds.Apply(k, feeds.PopOutClosed)
-	} else {
-		f = s.closeMainWindowFeedsLocked()
-	}
+	s.closeWindowFeedsLocked(k)
 	s.mu.Unlock()
 	s.gridMu.Unlock()
-	if f != nil {
-		go f()
+	if k == feeds.Self {
+		s.selfViewChanged()
 	}
 	s.regrid()
 	s.applyAutoQuality()
@@ -1567,7 +1529,7 @@ func (s *Session) ToggleWatch(id string) error {
 		} else {
 			delete(s.stopped, id)
 		}
-		s.stopRemoteVideoLocked(id)
+		s.stopRemoteMediaLocked(id)
 	} else {
 		if s.shareNoticePeer == id {
 			s.shareNotice, s.shareNoticePeer = "", ""
@@ -1842,19 +1804,6 @@ func (s *Session) stopSoundPlayer(dropPending bool) {
 	}
 }
 
-// DismissLeavePrompt cancels the "Leave the session?" prompt while keeping
-// the main streaming window open.
-func (s *Session) DismissLeavePrompt() {
-	s.mu.Lock()
-	if !s.leavePrompt {
-		s.mu.Unlock()
-		return
-	}
-	s.leavePrompt = false
-	s.mu.Unlock()
-	s.changed()
-}
-
 // control handles a button clicked on tile id's overlay bar.
 func (s *Session) control(id string, c media.Control, v float64) {
 	switch c {
@@ -1930,12 +1879,22 @@ func (s *Session) audioSink() string {
 	return audio.PlaybackSink(s.output)
 }
 
+// watchingLocked reports whether we watch peer id's stream (mu held).
+func (s *Session) watchingLocked(id string) bool {
+	st := s.feeds.State(id)
+	return st != feeds.NotWatched && (st.Watched() || s.feeds.AutoWatch())
+}
+
 func (s *Session) pushAudio(peer string, frame []byte) {
 	if s.cfg.NoPlayback {
 		return
 	}
 	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if s.feeds.State(peer) == feeds.NotWatched { // not watching their share: not hearing it either
 		s.mu.Unlock()
 		return
 	}
@@ -2017,6 +1976,40 @@ func (s *Session) SetAudio(sel audio.Selection) error {
 	s.mesh.SetSharingAudio(sel.Mode != "" && sel.Mode != "none")
 	s.changed()
 	return nil
+}
+
+// audioCaptureEvery is how often whole-system audio looks at which apps
+// play: on Windows, while a voice chat app is left out, the capture is a mix
+// of the others, so one that starts playing joins it within this time.
+const audioCaptureEvery = 3 * time.Second
+
+func (s *Session) watchAudioCapture() {
+	t := time.NewTicker(audioCaptureEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		s.RefreshAudio(false)
+	}
+}
+
+// RefreshAudio rebuilds whole-system audio sharing when what it captures
+// changed (or always, with force: e.g. the voice chat setting changed).
+func (s *Session) RefreshAudio(force bool) {
+	s.mu.Lock()
+	sel, sharer, cur := s.asel, s.sharer, s.asrcDesc
+	s.mu.Unlock()
+	if sharer == nil || sel.Mode != "system" {
+		return
+	}
+	if force || string(sharer.Capture()) != cur {
+		if err := s.SetAudio(sel); err != nil {
+			s.cfg.Log.Warn("shared audio", "err", err)
+		}
+	}
 }
 
 func (s *Session) ensureSharer() (*audio.Sharer, error) {
@@ -2139,7 +2132,7 @@ func (s *Session) SetPeer(id, quality string, volume float64, muted bool) error 
 	}
 	m.Quality, m.Volume, m.Muted = quality, volume, muted
 	st := s.feeds.State(id)
-	if st == feeds.NotWatched || (!st.Watched() && !s.feeds.AutoWatch()) {
+	if !s.watchingLocked(id) {
 		layer = layerOff
 	} else {
 		layer = max(layer, autoQualityLayer[m.Auto])
@@ -2198,6 +2191,7 @@ func (s *Session) watchVisibility() {
 func (s *Session) watchWaiting() {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
+	var vr viewRates
 	for {
 		select {
 		case <-s.done:
@@ -2205,12 +2199,27 @@ func (s *Session) watchWaiting() {
 		case <-t.C:
 		}
 		waiting := map[string]bool{}
+		decoded := map[string]int{}
 		s.mu.Lock()
 		for id, pl := range s.players {
-			_, decoded := pl.Progress() // Frames counts the headless view only
-			waiting[id] = decoded == 0 && s.feeds.Watched(id)
+			_, d := pl.Progress() // Frames counts the headless view only
+			waiting[id] = d == 0 && s.feeds.Watched(id)
+			if s.feeds.Watched(id) {
+				decoded[id] = d
+			}
 		}
 		s.mu.Unlock()
+		s.gridMu.Lock()
+		shown := map[string]int{}
+		for k, g := range s.grids {
+			shown[k] = g.Frames()
+		}
+		s.gridMu.Unlock()
+		if fast, ok := vr.update(s.cfg.Log, decoded, shown, s.gridFast.Load()); ok {
+			s.gridFast.Store(fast)
+			s.cfg.Log.Info("video windows frame rate", "fps", windowRate(fast))
+			go s.regrid()
+		}
 		s.gridMu.Lock()
 		for _, g := range s.grids {
 			for id, w := range waiting {
@@ -2360,10 +2369,12 @@ func (s *Session) forceKeyframe(layer int) {
 	}
 	if now.Sub(s.keyAt[layer]) < keyframeMin {
 		s.mu.Unlock()
+		s.keys.asked(layer, false)
 		return
 	}
 	s.keyAt[layer] = now
 	s.mu.Unlock()
+	s.keys.asked(layer, src != nil)
 	if src != nil {
 		src.ForceKeyframe(layer)
 	}
@@ -2580,6 +2591,7 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 		if layer == media.High {
 			highAUs.Add(1)
 		}
+		s.keys.sent(s.cfg.Log, layer, rtc.HasIDR(au.Data))
 		s.mesh.WriteVideo(layer, au.Data, au.Duration)
 	})
 	if err != nil {
@@ -3137,7 +3149,6 @@ func (s *Session) State() State {
 		SelfState:         selfState,
 		AutoWatch:         s.feeds.AutoWatch(),
 		ShareNotice:       s.shareNotice,
-		LeavePrompt:       s.leavePrompt,
 	}
 	if !s.reconnAt.IsZero() {
 		st.GiveUpAt = s.reconnAt.Add(sigclient.ResumeWindow).UTC().Format(time.RFC3339)
@@ -3158,6 +3169,8 @@ func (s *Session) State() State {
 		if ap := s.aplayers[m.ID]; ap != nil {
 			c.Audio = ap.Buffers()
 		}
+		h := s.hear[m.ID]
+		c.Heard, c.Loud = h.heard, h.loud
 		ps := stats[m.ID]
 		c.Pair, c.RTTms, c.Tx, c.Rx, c.Loss = ps.Pair, int(ps.RTT*1000), ps.TxBytes, ps.RxBytes, ps.Loss
 		c.TxKbps, c.RxKbps, c.FPSIn = s.rates.of(m.ID, c.Tx, c.Rx, c.Frames)
@@ -3329,7 +3342,6 @@ func (s *Session) Close() {
 		return
 	}
 	s.closed = true
-	s.leavePrompt = false
 	s.feeds.LeaveAll()
 	src, asrc, sharer := s.src, s.asrc, s.sharer
 	players, aplayers := s.players, s.aplayers

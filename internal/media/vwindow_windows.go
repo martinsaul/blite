@@ -4,7 +4,6 @@ import (
 	"errors"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -108,14 +107,7 @@ func videoProc(hwnd, m, wp, lp uintptr) uintptr {
 		videoWinsMu.Lock()
 		w := videoWins[hwnd]
 		videoWinsMu.Unlock()
-		if w != nil && w.intercept.Load() {
-			select {
-			case w.closeReq <- struct{}{}:
-			default:
-			}
-			return 0
-		}
-		// Non-intercepted (pop-out): hide now, the owner destroys it.
+		// Hide now, the owner destroys it.
 		procShowWindow.Call(hwnd, swHide)
 		if w != nil {
 			w.closeOnce.Do(func() { close(w.closed) })
@@ -135,8 +127,6 @@ func videoProc(hwnd, m, wp, lp uintptr) uintptr {
 type winVideo struct {
 	hwnd      uintptr
 	closed    chan struct{}
-	closeReq  chan struct{}
-	intercept atomic.Bool
 	closeOnce sync.Once
 	gone      chan struct{}
 	destroy   sync.Once
@@ -146,7 +136,7 @@ func openVideoWindow(title string, cw, ch int) (Window, error) {
 	if err := registerVideoClass(); err != nil {
 		return nil, err
 	}
-	w := &winVideo{closed: make(chan struct{}), closeReq: make(chan struct{}, 1), gone: make(chan struct{})}
+	w := &winVideo{closed: make(chan struct{}), gone: make(chan struct{})}
 	ready := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
@@ -185,10 +175,8 @@ func openVideoWindow(title string, cw, ch int) (Window, error) {
 	return w, nil
 }
 
-func (w *winVideo) Handle() uintptr                 { return w.hwnd }
-func (w *winVideo) Closed() <-chan struct{}         { return w.closed }
-func (w *winVideo) SetInterceptClose(on bool)       { w.intercept.Store(on) }
-func (w *winVideo) CloseRequested() <-chan struct{} { return w.closeReq }
+func (w *winVideo) Handle() uintptr         { return w.hwnd }
+func (w *winVideo) Closed() <-chan struct{} { return w.closed }
 
 func (w *winVideo) SetTitle(title string) {
 	procSetWindowTextW.Call(w.hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(title))))

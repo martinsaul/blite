@@ -4,19 +4,28 @@
 <h1>Discord integration</h1>
 <p class="lead">Bellion Share can follow the Discord voice channel you're in, so your friends in that channel find your stream without anyone pasting a link.</p>
 
-<p class="note"><strong>Not open to everyone yet.</strong> Discord is still reviewing the Bellion app. Until it approves it, <strong>Connect Discord</strong> only works for people added as testers, and there are only a few tester slots for now. Everything else in Bellion Share works without Discord.</p>
-
 <h2>Connect Discord</h2>
 <ol>
-  <li>Start the Discord desktop app on the same computer as Bellion Share.</li>
   <li>In Bellion Share, press <strong>Connect Discord</strong>.</li>
-  <li>Approve <em>Bellion</em> in the Discord window that opens. This lets Bellion Share see which voice channel you are in, nothing else.</li>
+  <li>Your browser opens Discord's authorize page. Approve <em>Bellion</em> there. It only lets Bellion know who you are on Discord.</li>
+  <li>Join a voice channel in a Discord server that has the <a href="#add-the-bot">Bellion bot</a>. Bellion Share shows that channel within a second or two.</li>
 </ol>
-<p>You only do this once per computer. If Discord isn't running, Bellion Share says so; the normal <em>Share your screen</em> and <em>Watch someone</em> cards work as always.</p>
+<p>You do this once per computer. Discord doesn't have to run on the same computer: the Bellion bot tells the app which voice channel you're in. To disconnect, open <em>Settings &gt; Disconnect Discord</em> in the app.</p>
+
+<h2 id="add-the-bot">Add the Bellion bot to your server</h2>
+<p>Bellion only sees voice channels in Discord servers that the Bellion bot was added to. If you're in a voice channel and Bellion Share still says <em>Join a Discord voice channel</em>, that server doesn't have the bot yet. Press <strong>Copy link for the admin</strong> in the app and send it to someone who can manage the server. The link brings them here.</p>
+<p><strong>For server admins:</strong> adding the bot takes one click, and it asks for only one permission, <em>View Channels</em>.</p>
+<p><a class="btn btn-lg" href="https://discord.com/oauth2/authorize?client_id=1569899965323415693&amp;permissions=1024&amp;scope=bot" rel="noopener">Add to Discord</a></p>
+<ul>
+  <li><strong>It sees:</strong> who joins and leaves voice channels, and the channel and server names. It keeps the voice channel only for people who connected Bellion Share and have the app running. Everyone else's voice channel changes are dropped at once, without being stored or logged.</li>
+  <li><strong>It can't:</strong> read or send messages, join voice channels, hear anything, or change anything in your server. Its only command is <code>/status</code>, which says whether Bellion's servers are up.</li>
+  <li><strong>To remove it:</strong> kick it like any member (<em>Server Settings &gt; Members</em>). Bellion then stops seeing that server.</li>
+</ul>
+<p>Details are in the <a href="/privacy">Privacy Policy</a>.</p>
 
 <h2>Go live in your voice channel</h2>
 <figure>
-  <a href="/static/shots/lobby-discord.webp"><img src="/static/shots/lobby-discord.webp" width="1000" height="330" alt="Bellion Share showing You're in #gaming (Game Night) on Discord, with a Go live in #gaming button" loading="lazy"></a>
+  <a href="/static/shots/lobby-discord.webp"><img src="/static/shots/lobby-discord.webp" width="1100" height="550" alt="Bellion Share showing You're in #gaming (Game Night) on Discord, with Join and Share buttons" loading="lazy"></a>
   <figcaption>In a Discord voice channel: one click to go live there.</figcaption>
 </figure>
 <p>Join a voice channel in Discord. The home screen shows <em>You're in #channel (server) on Discord</em> with two buttons:</p>
@@ -28,19 +37,19 @@
 
 <h2>Watch someone in your voice channel</h2>
 <figure>
-  <a href="/static/shots/lobby-watch.webp"><img src="/static/shots/lobby-watch.webp" width="1000" height="330" alt="Bellion Share showing Someone is sharing in #gaming (Game Night) (3 people), with a Watch button" loading="lazy"></a>
+  <a href="/static/shots/lobby-watch.webp"><img src="/static/shots/lobby-watch.webp" width="1100" height="585" alt="Bellion Share showing Bob is sharing their screen in #gaming (Game Night), with the people in the session and a Watch button" loading="lazy"></a>
   <figcaption>Someone is sharing in your voice channel: one click to watch.</figcaption>
 </figure>
 <p>When someone in your voice channel has gone live, the home screen says who is sharing (for example <em>Sam is sharing their screen</em>), shows who's in the session, and offers a <strong>Watch</strong> button. If the session has a password, it asks for it.</p>
 
 <h2>What Bellion sees</h2>
-<p>Bellion Share only reads which voice channel you're in (and the Discord server's name, to show it). Our server remembers which voice channel a live session is tied to, in memory, until the session ends. Bellion doesn't read your messages, servers or friends. The app keeps its Discord login on your computer. Details are in the <a href="/privacy">Privacy Policy</a>.</p>
-<p>To disconnect, open Discord's <em>User Settings &gt; Authorized Apps</em> and remove <em>Bellion</em>.</p>
+<p>Bellion knows your Discord user ID and name (until you disconnect) and, while the app runs, which voice channel you're in on servers that have the bot. Our server remembers which voice channel a live session is tied to, in memory, until the session ends. Bellion doesn't read your messages, servers or friends. Details are in the <a href="/privacy">Privacy Policy</a>.</p>
+<p>To disconnect, open <em>Settings &gt; Disconnect Discord</em> in the app. That deletes the link on our server.</p>
 
 <h2>If it doesn't work</h2>
 <ul>
-  <li><strong>"Discord isn't running on this computer"</strong>: start the Discord desktop app (the browser version can't talk to other apps). Bellion Share looks for it again every 15 seconds.</li>
-  <li><strong>"Discord didn't allow it"</strong>: until Discord approves the Bellion app for everyone, only accounts added as testers can connect it.</li>
+  <li><strong>"Join a Discord voice channel" while you're in one</strong>: that server doesn't have the Bellion bot. Ask a server admin to <a href="#add-the-bot">add it</a>; <strong>Copy link for the admin</strong> in the app gives you the link to send.</li>
+  <li><strong>The browser tab closed before you approved</strong>: press <strong>Open it again</strong>.</li>
   <li><strong>No Share or Join button</strong>: join a voice channel first; text channels don't count.</li>
   <li>Share links work without Discord: paste one in any chat.</li>
 </ul>

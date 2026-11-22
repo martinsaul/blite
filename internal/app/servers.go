@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"blite/internal/session"
 )
@@ -25,6 +26,9 @@ type serverSettings struct {
 	Default string `json:"default,omitempty"`
 	// Trusted are hosts of other servers the user agreed to join once.
 	Trusted []string `json:"trusted,omitempty"`
+	// Pin are the Custom servers whose certificate is pinned (package pin;
+	// the built-in server's always is).
+	Pin []string `json:"pin,omitempty"`
 }
 
 // serversPath is overridden by tests.
@@ -54,6 +58,7 @@ func loadServers() serverSettings {
 	if s.Default != "" && !slices.Contains(s.Custom, s.Default) {
 		s.Default = ""
 	}
+	s.Pin = slices.DeleteFunc(s.Pin, func(p string) bool { return !slices.Contains(s.Custom, p) })
 	return s
 }
 
@@ -83,6 +88,8 @@ type Server struct {
 	URL     string `json:"url"`
 	Host    string `json:"host"`
 	BuiltIn bool   `json:"builtIn,omitempty"`
+	// Pinned: only certificates from the pinned authorities are accepted.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // Custom reports whether the list has servers besides the built-in one.
@@ -103,9 +110,9 @@ func (a *App) builtIn() string {
 
 // serverState builds Servers; a.mu is held.
 func (a *App) serverState() *Servers {
-	st := &Servers{List: []Server{{URL: a.cfg.Server, Host: session.ServerHost(a.cfg.Server), BuiltIn: true}}}
+	st := &Servers{List: []Server{{URL: a.cfg.Server, Host: session.ServerHost(a.cfg.Server), BuiltIn: true, Pinned: builtInPins(a.cfg.Server)[session.ServerHost(a.cfg.Server)]}}}
 	for _, c := range a.servers.Custom {
-		st.List = append(st.List, Server{URL: c, Host: session.ServerHost(c)})
+		st.List = append(st.List, Server{URL: c, Host: session.ServerHost(c), Pinned: slices.Contains(a.servers.Pin, c)})
 	}
 	st.Default, st.Selected = a.defaultServerLocked(), a.selectedLocked()
 	return st
@@ -158,6 +165,7 @@ func (a *App) RemoveServer(url string) error {
 		return errors.New("the built-in server can't be removed")
 	}
 	a.servers.Custom = slices.Delete(a.servers.Custom, i, i+1)
+	a.servers.Pin = slices.DeleteFunc(a.servers.Pin, func(p string) bool { return p == url })
 	if a.servers.Default == url {
 		a.servers.Default = ""
 	}
@@ -201,11 +209,73 @@ func (a *App) SelectServer(url string) error {
 }
 
 func (a *App) saveServersLocked() error {
+	a.updatePinsLocked()
 	if err := saveServers(a.servers); err != nil {
 		a.log.Warn("save servers", "err", err)
 		return errors.New("could not save the server list: " + err.Error())
 	}
 	return nil
+}
+
+// SetServerPinned turns certificate pinning on or off for one of the
+// user's servers (the built-in server's is always on).
+func (a *App) SetServerPinned(url string, on bool) error {
+	a.mu.Lock()
+	if !slices.Contains(a.servers.Custom, url) {
+		a.mu.Unlock()
+		return errors.New("the Bellion Share server is always pinned")
+	}
+	a.servers.Pin = slices.DeleteFunc(a.servers.Pin, func(p string) bool { return p == url })
+	if on {
+		a.servers.Pin = append(a.servers.Pin, url)
+	}
+	err := a.saveServersLocked()
+	a.mu.Unlock()
+	a.bc.Notify()
+	return err
+}
+
+// updatePinsLocked recomputes the pinned hosts: the built-in server's
+// (with www. and its aliases) and those of the user's pinned servers.
+func (a *App) updatePinsLocked() {
+	m := builtInPins(a.cfg.Server)
+	for _, p := range a.servers.Pin {
+		m[session.ServerHost(p)] = true
+	}
+	a.pins.Store(&m)
+}
+
+// pinDefaultServer: the built-in server is pinned. Stamped "false" by
+// builds for a server whose certificate comes from another authority
+// (BLITE_PIN_DEFAULT_SERVER, scripts/version.sh).
+var pinDefaultServer = "true"
+
+// builtInPins are the built-in server's hosts (with www. and its aliases)
+// when it uses TLS and the build pins it.
+func builtInPins(server string) map[string]bool {
+	m := map[string]bool{}
+	if strings.HasPrefix(server, "wss://") && pinDefaultServer != "false" {
+		h := session.ServerHost(server)
+		m[h], m["www."+h] = true, true
+		for _, al := range BuiltInAliases {
+			m[al] = true
+		}
+	}
+	return m
+}
+
+// BuiltInPinned is pin.SetPinned's check before there is an App (headless
+// runs, crash reports): the built-in server's hosts only.
+func BuiltInPinned(server string) func(host string) bool {
+	m := builtInPins(server)
+	return func(host string) bool { return m[host] }
+}
+
+// PinnedHost reports whether TLS connections to host are pinned
+// (pin.SetPinned). It takes no lock: it runs inside TLS handshakes.
+func (a *App) PinnedHost(host string) bool {
+	m := a.pins.Load()
+	return m != nil && (*m)[host]
 }
 
 // ErrServerNotConfirmed: the user didn't agree to join on another server.

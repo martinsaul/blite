@@ -10,13 +10,13 @@
   <li><strong>Linux (Ubuntu 24.04, Mint 22 or newer, 64-bit):</strong> <a href="/">download the .deb</a>, open a terminal in its folder and run <code>sudo apt install ./blite_*.deb</code>, then start Bellion Share from your app menu. Bellion Share needs an X11 session; Wayland sessions aren't supported yet.</li>
 </ul>
 <p>Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
-<p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Start Bellion Share when I sign in</em>, in the gear (Settings) menu at the top right, starts it in the tray at sign-in.</p>
+<p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Open at sign-in</em>, in the gear (Settings) menu at the top right, starts it in the tray when you sign in.</p>
 
 <h2>2. Pick your name</h2>
 <p>The top of the window shows who you are, for example <strong>You are Alice#4417</strong>. Press <em>Change name...</em> to set the name others see. The 4-digit tag after it comes from your identity key, a key the app creates on your computer, so two people can't pass as each other by picking the same name.</p>
 
 <figure>
-  <a href="/static/shots/lobby.webp"><img src="/static/shots/lobby.webp" width="1000" height="360" alt="The Bellion Share window before a call: Share your screen with a Go live button and Options (Require a password, Encrypt end to end), and Watch someone with a box to paste a share link" loading="lazy"></a>
+  <a href="/static/shots/lobby.webp"><img src="/static/shots/lobby.webp" width="1100" height="480" alt="The Bellion Share window before a call: Share your screen with Entire screen or A window, quality presets, With sound and Go live and copy link; Watch someone with a box for a share link or room code; and Recent rooms" loading="lazy"></a>
   <figcaption>Before a call: share your screen on the left, watch someone on the right.</figcaption>
 </figure>
 
@@ -45,13 +45,14 @@
 
 <h2>5. In the call</h2>
 <figure>
-  <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1280" height="600" alt="A call with three other people: Bob and Carol connected with Fair connections, Dave unable to connect, with a hint that his network may block UDP" loading="lazy"></a>
+  <a href="/static/shots/call.webp"><img src="/static/shots/call.webp" width="1100" height="760" alt="A call with three other people: Bob connected and talking (his speaker glows), Carol muted and not watched, Dave unable to connect with a hint that his network may block UDP" loading="lazy"></a>
   <figcaption>The call window: the room, your share controls, and everyone in the call.</figcaption>
 </figure>
 <ul>
   <li>The top shows the room code and whether the call is <strong>end-to-end encrypted</strong>. <strong>Copy link</strong> copies the link again to invite more people; <strong>Leave</strong> ends your part in the call.</li>
   <li><strong>Go live: main monitor / Stop sharing</strong> starts or stops your share; <em>Share a window...</em> (or <em>Share something else...</em>) picks what you share, and <em>Share options...</em> changes the quality and sound.</li>
-  <li><strong>People</strong> lists you and everyone else, with their connection and the quality you get from them. Click someone to open their panel: their volume (up to 200%), mute, their video quality and connection details. The eye next to each person who shares starts or stops watching them.</li>
+  <li><strong>People</strong> lists you and everyone else, with their connection and the quality you get from them. Click someone to open their panel: their volume (up to 200%), mute, their video quality and connection details. The eye next to each person who shares starts or stops watching them, and the speaker next to it mutes them for you; it glows while they talk.</li>
+  <li>At the bottom of the People list: <em>Volunteer as relay</em> and <em>About relays</em> on the left (see <a href="/docs/relays">Relays</a>); on the right, the music note turns the app's sounds on or off, and the eye with play or stop sets whether new streams open automatically.</li>
   <li>The <strong>safety code</strong> is the same for everyone when nobody is intercepting the connection. Click the <em>End-to-end encrypted</em> badge to see it, and read it aloud once to check.</li>
   <li>The screens you watch open in a video window: see <a href="/docs/features#watching">Watching</a>.</li>
 </ul>

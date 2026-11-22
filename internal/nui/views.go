@@ -26,7 +26,6 @@ type notices struct {
 	updText *widget.Label
 	updBtn  *widget.Button
 	reach   *widget.Label
-	shown   string // the update result we already showed
 }
 
 func newNotices(u *UI) *notices {
@@ -53,16 +52,16 @@ func (n *notices) set(u *UI, st app.UIState) {
 	n.err.SetText(i18n.Msg(st.Error))
 	show(n.err, st.Error != "")
 	up := st.Update
-	if up != nil && up.Result != "" && up.Result != n.shown {
-		n.shown = up.Result
-		res := up.Result
-		u.info(i18n.L("Update"), i18n.Msg(res), func() { u.a.DismissUpdateResult() })
-	}
 	switch {
+	case up != nil && up.Downloading:
+		n.updText.SetText(i18n.L("Downloading Bellion Share {{.Version}}: {{.Percent}}%", i18n.D{"Version": up.Available, "Percent": up.Progress}))
+		n.updText.Importance = widget.MediumImportance
+		n.updBtn.Hide()
+		show(n.update, true)
 	case up != nil && up.Problem != "":
 		n.updText.SetText(i18n.L("Update problem: {{.Err}}", i18n.D{"Err": i18n.Msg(up.Problem)}))
 		n.updText.Importance = widget.DangerImportance
-		n.updBtn.Hide()
+		show(n.updBtn, up.Available != "" && up.CanApply) // try again
 		show(n.update, true)
 	case up != nil && up.Available != "":
 		t := i18n.L("Bellion Share {{.Version}} is available.", i18n.D{"Version": up.Available})
@@ -389,6 +388,8 @@ type callView struct {
 	relaySw    *toggleSwitch
 	relayLbl   *tapLabel
 	relayOn    bool
+	sounds     *iconToggle
+	autoWatch  *iconToggle
 }
 
 func newCall(u *UI) *callView {
@@ -442,15 +443,26 @@ func newCall(u *UI) *callView {
 		}
 	}}
 	v.relayLbl.Text = i18n.L("Volunteer as relay")
-	v.relayLbl.Wrapping = fyne.TextWrapWord
+	v.relayLbl.Wrapping = fyne.TextWrapOff // in a row with About relays: a wrapping label would shrink to nothing
 	v.relayLbl.ExtendBaseWidget(v.relayLbl)
 
 	aboutRelays := widget.NewButton(i18n.L("About relays"), u.relayDialog)
 	aboutRelays.Importance = widget.LowImportance
+	v.sounds = newIconToggle(u.tips, musicWhiteRes, func() {
+		on := !u.st.PlaySounds
+		u.do(func() error { return u.a.SetPlaySounds(on) })
+	})
+	v.autoWatch = newIconToggle(u.tips, autoWatchOnRes, func() {
+		on := !u.st.AutoWatch
+		u.do(func() error { return u.a.SetAutoWatch(on) })
+	})
+	v.autoWatch.aspect = 38.0 / 24
 	relayFooter := container.NewVBox(
 		widget.NewSeparator(),
 		v.relay,
-		container.NewBorder(nil, nil, container.NewHBox(v.relaySw, v.relayLbl), aboutRelays),
+		container.NewBorder(nil, nil,
+			container.NewHBox(v.relaySw, v.relayLbl, aboutRelays),
+			container.NewHBox(v.sounds, v.autoWatch)),
 	)
 
 	peopleList := container.NewVScroll(container.NewVBox(v.self.root, widget.NewSeparator(), v.alone, v.rows))
@@ -567,6 +579,18 @@ func (v *callView) update(st app.UIState) {
 
 	v.self.update(st, s)
 
+	// Footer toggles.
+	if st.PlaySounds {
+		v.sounds.Set(musicWhiteRes, i18n.L("Sounds on: a chime when someone joins or goes live"), false)
+	} else {
+		v.sounds.Set(musicOffRes, i18n.L("Sounds off"), false)
+	}
+	if st.AutoWatch {
+		v.autoWatch.Set(autoWatchOnRes, i18n.L("New streams open automatically"), false)
+	} else {
+		v.autoWatch.Set(autoWatchOffRes, i18n.L("New streams wait until you open them"), false)
+	}
+
 	// Relay footer state.
 	v.relay.SetText(relayText(s))
 	meRelay, meWaiting := false, false
@@ -679,12 +703,14 @@ func newSelfRow(u *UI) *selfRow {
 		avatar: newAvatar("?", 34),
 		ident:  newNameTag(),
 		status: caption(""),
-		eye: newEyeToggle(func() {
+		eye: newEyeToggle(u.tips, func() {
 			u.do(func() error { return u.a.ToggleWatch(feeds.Self) })
 		}),
 	}
 	info := container.NewVBox(r.ident, r.status)
-	row := container.NewBorder(nil, nil, r.avatar, r.eye, container.New(&insetLayout{pad: 4}, info))
+	gap := canvas.NewRectangle(color.Transparent) // where peers' speaker goes: the eyes line up
+	gap.SetMinSize(fyne.NewSize(34, 34))
+	row := container.NewBorder(nil, nil, r.avatar, container.NewHBox(gap, r.eye), container.New(&insetLayout{pad: 4}, info))
 	r.root = container.New(&insetLayout{pad: 4}, row)
 	return r
 }
@@ -718,9 +744,15 @@ func (r *selfRow) update(st app.UIState, s *session.State) {
 			r.status.SetText(i18n.L("Sharing {{.Resolution}}", i18n.D{"Resolution": res}))
 		}
 		r.eye.SetEye(s.SelfEye)
+		if s.SelfEye == feeds.EyeClosed {
+			r.eye.SetTip(i18n.L("Show your preview"))
+		} else {
+			r.eye.SetTip(i18n.L("Hide your preview"))
+		}
 	} else {
 		r.status.SetText(i18n.L("Watching only"))
 		r.eye.SetEye(feeds.EyeGrey)
+		r.eye.SetTip(i18n.L("You aren't sharing"))
 	}
 	if s.Audio.Mode == "test" { // so it isn't left on unnoticed
 		r.status.SetText(r.status.Text + " · " + i18n.L("Test tone"))
@@ -736,6 +768,8 @@ type peerRow struct {
 	ident    *nameTag
 	status   *widget.Label
 	eye      *eyeToggle
+	speaker  *iconToggle
+	m        session.Member
 	selected bool
 	hovered  bool
 }
@@ -749,16 +783,26 @@ func newPeerRow(u *UI, id string, onSelect func()) *peerRow {
 		avatar: newAvatar("?", 34),
 		ident:  newNameTag(),
 		status: caption(""),
-		eye: newEyeToggle(func() {
+		eye: newEyeToggle(u.tips, func() {
 			u.do(func() error { return u.a.ToggleWatch(id) })
 		}),
 	}
+	r.speaker = newIconToggle(u.tips, speakerNoneRes, func() {
+		q, vol, muted := r.m.Quality, r.m.Volume, !r.m.Muted
+		if q == "" {
+			q = "auto"
+		}
+		if !muted && vol == 0 { // unmuting someone turned all the way down
+			vol = 1
+		}
+		u.do(func() error { return u.a.SetPeer(id, q, vol, muted) })
+	})
 	mainBody := container.NewBorder(nil, nil, r.avatar, nil, container.New(&insetLayout{pad: 4}, container.NewVBox(r.ident, r.status)))
 	tap := newTapArea(mainBody, onSelect, func(hov bool) {
 		r.hovered = hov
 		r.refreshBg()
 	})
-	inner := container.NewBorder(nil, nil, nil, r.eye, tap)
+	inner := container.NewBorder(nil, nil, nil, container.NewHBox(r.speaker, r.eye), tap)
 	r.root = container.NewStack(r.bg, container.New(&insetLayout{pad: 6}, inner))
 	return r
 }
@@ -790,6 +834,9 @@ func (r *peerRow) refreshBg() {
 }
 
 func (r *peerRow) update(m session.Member) {
+	r.m = m
+	res, glow := speakerIcon(m)
+	r.speaker.Set(res, speakerTip(m), glow)
 	r.avatar.SetName(m.Name)
 	badge := ""
 	if m.Owner {
@@ -812,6 +859,46 @@ func (r *peerRow) update(m session.Member) {
 		}
 	}
 	r.eye.SetEye(eye)
+	r.eye.SetTip(eyeTip(eye, m.Name))
+}
+
+// speakerIcon is the person row's audio state: white while their audio
+// reaches us (glowing while it isn't silence), struck through while we
+// muted them, a dim speaker with a dot while they send none.
+func speakerIcon(m session.Member) (res fyne.Resource, glow bool) {
+	switch {
+	case m.Muted && m.Heard:
+		return speakerMutedRes, false
+	case m.Muted:
+		return speakerMutedDimRes, false
+	case !m.Heard:
+		return speakerNoneRes, false
+	case m.Loud:
+		return speakerLoudRes, true
+	}
+	return speakerWhiteRes, false
+}
+
+func speakerTip(m session.Member) string {
+	name := i18n.D{"Name": m.Name}
+	switch {
+	case m.Muted:
+		return i18n.L("Unmute {{.Name}}", name)
+	case !m.Heard:
+		return i18n.L("No audio from {{.Name}}. Click to mute them anyway.", name)
+	}
+	return i18n.L("Mute {{.Name}}", name)
+}
+
+// eyeTip is a person's eye tooltip.
+func eyeTip(eye feeds.Eye, name string) string {
+	switch eye {
+	case feeds.EyeOpen:
+		return i18n.L("Stop watching {{.Name}}", i18n.D{"Name": name})
+	case feeds.EyeClosed:
+		return i18n.L("Watch {{.Name}}", i18n.D{"Name": name})
+	}
+	return i18n.L("{{.Name}} isn't sharing", i18n.D{"Name": name})
 }
 
 func peerStatus(m session.Member) (string, widget.Importance) {
@@ -949,9 +1036,28 @@ func (v *lobbyView) updateDiscord(u *UI, d *app.Discord) {
 	case d.Status == "waiting":
 		v.dcTitle.SetText(i18n.L("Approve Bellion in the Discord window that just opened."))
 		v.dcPrimary.Hide()
+	case d.Status == "linking":
+		v.dcTitle.SetText(i18n.L("Approve Bellion in the browser tab that just opened."))
+		v.dcPrimary.SetText(i18n.L("Open it again"))
+		v.dcPrimary.SetIcon(theme.LoginIcon())
+		v.dcPriAct = dc.DiscordLogin
 	case d.ChannelID == "":
 		v.dcTitle.SetText(i18n.L("Join a Discord voice channel to watch or go live there in one click."))
 		v.dcPrimary.Hide()
+		if d.BotURL != "" {
+			// The bot only sees servers it was added to.
+			v.dcSub.SetText(i18n.L("Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it."))
+			v.dcSub.Show()
+			v.dcPrimary.SetText(i18n.L("Copy link for the admin"))
+			v.dcPrimary.SetIcon(theme.ContentCopyIcon())
+			v.dcPrimary.Show()
+			link := d.BotURL
+			v.dcPriAct = func() {
+				u.fa.Clipboard().SetContent(link)
+				v.dcPrimary.SetText(i18n.L("Link copied"))
+				v.dcPrimary.SetIcon(theme.ConfirmIcon())
+			}
+		}
 	case someoneSharing:
 		v.syncDiscordAvatars(d.Members)
 		switch {

@@ -7,21 +7,26 @@ import (
 	"sync"
 	"time"
 
+	"blite/internal/audio"
 	"blite/internal/media"
 	"blite/internal/session"
 )
 
 type appSettings struct {
-	AutoWatch   *bool  `json:"autoWatch,omitempty"`
-	PlaySounds  *bool  `json:"playSounds,omitempty"`
-	PortMap     *bool  `json:"portMap,omitempty"`
-	Resolution  string `json:"resolution,omitempty"`
-	FPS         *int   `json:"fps,omitempty"`
-	SlowViewer  string `json:"slowViewer,omitempty"`
-	MinHeight   *int   `json:"minHeight,omitempty"`
-	SmallerCopy *bool  `json:"smallerCopy,omitempty"`
-	UploadKbps  *int   `json:"uploadKbps,omitempty"`
-	E2EE        *bool  `json:"e2ee,omitempty"`
+	AutoWatch  *bool `json:"autoWatch,omitempty"`
+	PlaySounds *bool `json:"playSounds,omitempty"`
+	// VoiceInSystem: whole-system share audio includes voice chat apps.
+	VoiceInSystem bool `json:"voiceInSystem,omitempty"`
+	// HideChangelog: don't show what changed after an update.
+	HideChangelog bool   `json:"hideChangelog,omitempty"`
+	PortMap       *bool  `json:"portMap,omitempty"`
+	Resolution    string `json:"resolution,omitempty"`
+	FPS           *int   `json:"fps,omitempty"`
+	SlowViewer    string `json:"slowViewer,omitempty"`
+	MinHeight     *int   `json:"minHeight,omitempty"`
+	SmallerCopy   *bool  `json:"smallerCopy,omitempty"`
+	UploadKbps    *int   `json:"uploadKbps,omitempty"`
+	E2EE          *bool  `json:"e2ee,omitempty"`
 	// UIScale is the window's interface size in percent ("" = follow the
 	// desktop). Read once at startup (uiscale.Apply), so it applies on restart.
 	UIScale string `json:"uiScale,omitempty"`
@@ -190,6 +195,22 @@ func saveAutoWatch(on bool) error {
 	})
 }
 
+// LoadVoiceInSystem reports "Include voice chat apps in whole-system audio"
+// (default off).
+func LoadVoiceInSystem() bool { return loadSettings().VoiceInSystem }
+
+func saveVoiceInSystem(on bool) error {
+	return updateSettings(func(st *appSettings) {
+		st.VoiceInSystem = on
+	})
+}
+
+func saveHideChangelog(on bool) error {
+	return updateSettings(func(st *appSettings) {
+		st.HideChangelog = on
+	})
+}
+
 func savePlaySounds(on bool) error {
 	return updateSettings(func(st *appSettings) {
 		st.PlaySounds = &on
@@ -286,6 +307,24 @@ func (a *App) SetPlaySounds(on bool) error {
 	return nil
 }
 
+// SetVoiceInSystem implements ui.Backend: "Include voice chat apps in
+// whole-system audio", kept on disk. Off, others in the voice call don't
+// hear themselves twice.
+func (a *App) SetVoiceInSystem(on bool) error {
+	if err := saveVoiceInSystem(on); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
+	audio.SetIncludeVoice(on)
+	a.mu.Lock()
+	s := a.sess
+	a.mu.Unlock()
+	if s != nil {
+		s.RefreshAudio(true)
+	}
+	a.bc.Notify()
+	return nil
+}
+
 // SetAutoWatch implements ui.Backend: "Start watching new streams
 // automatically", kept on disk across sessions.
 func (a *App) SetAutoWatch(on bool) error {
@@ -330,17 +369,6 @@ func (a *App) Pin(id string) error {
 		return err
 	}
 	return s.Pin(id)
-}
-
-// DismissLeavePrompt implements ui.Backend: cancels the "Leave the session?"
-// prompt requested by closing the main streaming window.
-func (a *App) DismissLeavePrompt() {
-	a.mu.Lock()
-	s := a.sess
-	a.mu.Unlock()
-	if s != nil {
-		s.DismissLeavePrompt()
-	}
 }
 
 // renameRetry renames, retrying briefly: on Windows an antivirus scan or a

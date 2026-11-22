@@ -443,14 +443,12 @@ func TestGridLabelText(t *testing.T) {
 
 type noopWindow struct{ closed chan struct{} }
 
-func (w *noopWindow) Handle() uintptr                 { return 0 }
-func (w *noopWindow) Closed() <-chan struct{}         { return w.closed }
-func (w *noopWindow) SetInterceptClose(bool)          {}
-func (w *noopWindow) CloseRequested() <-chan struct{} { return nil }
-func (w *noopWindow) SetTitle(string)                 {}
-func (w *noopWindow) PointerInside() bool             { return true }
-func (w *noopWindow) Minimized() bool                 { return false }
-func (w *noopWindow) Destroy()                        {}
+func (w *noopWindow) Handle() uintptr         { return 0 }
+func (w *noopWindow) Closed() <-chan struct{} { return w.closed }
+func (w *noopWindow) SetTitle(string)         {}
+func (w *noopWindow) PointerInside() bool     { return true }
+func (w *noopWindow) Minimized() bool         { return false }
+func (w *noopWindow) Destroy()                {}
 
 // TestStartGridViewCountWindowNoRace verifies g.win is initialized before the
 // tick goroutine starts in ViewCount mode (M12.7).

@@ -113,12 +113,37 @@ to join a session on a server not run by Bellion Share.
 
 Discord integration isn't available on self-hosted servers yet.
 
+### Certificate pinning
+
+The app can pin the certificate authorities a server's TLS certificate may
+come from: Let's Encrypt (ISRG Root X1, X2, YE, YR), Google Trust Services
+(GTS Root R1-R4) and SSL.com (its RSA and ECC roots, and the TLS 2022
+roots). These are the CAs Cloudflare issues edge certificates from. A
+pinned connection is refused when its certificate chains only to another
+root the computer trusts, such as a company proxy, antivirus HTTPS
+scanning or malware. The app then says the connection is being
+intercepted. The roots are in `internal/pin/roots.pem`.
+
+- The built-in server is always pinned. It can't be turned off in the app.
+- Servers you add are not pinned until you tick *Pin certificate* next to
+  them under *Servers...*. Tick it when your certificate comes from one of
+  the CAs above, for example Caddy's or Traefik's Let's Encrypt
+  certificates. Leave it off for a private CA or a self-signed certificate.
+- `ws://` servers (no TLS) are never pinned.
+- Builds with your own `BLITE_DEFAULT_SERVER` pin it like the official
+  server does. If its certificate comes from another CA, build with
+  `BLITE_PIN_DEFAULT_SERVER=false`.
+
+The pins are CA roots, not the certificate or its key, so certificate
+renewals and Cloudflare's own rotations need no app update.
+
 Dev builds connect to `ws://localhost:8080/ws` unless told otherwise. Point
 them at your server with `-server wss://blite.example.com/ws` or
 `BLITE_SERVER`, or bake it into your builds:
 
 ```bash
 export BLITE_DEFAULT_SERVER=wss://blite.example.com/ws
+# export BLITE_PIN_DEFAULT_SERVER=false   # if its certificate isn't from a pinned CA
 scripts/build-windows.sh dist/windows   # or scripts/build-deb.sh dist/linux
 ```
 

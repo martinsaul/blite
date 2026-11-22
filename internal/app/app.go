@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"blite/internal/audio"
@@ -17,6 +18,7 @@ import (
 	"blite/internal/i18n"
 	"blite/internal/identity"
 	"blite/internal/media"
+	"blite/internal/pin"
 	"blite/internal/proto"
 	"blite/internal/redact"
 	"blite/internal/register"
@@ -52,13 +54,19 @@ type App struct {
 	sessPortMap bool                 // portMap setting active in the current session
 	autoWatch   bool                 // start watching new remote streams automatically; kept on disk
 	playSounds  bool                 // play notification sounds; kept on disk
-	discord     Discord              // the user's Discord voice channel (RunDiscord)
-	servers     serverSettings       // the user's signaling servers; kept on disk
-	picked      string               // the lobby's server for new sessions; "" = the default
-	recent      []recentEntry        // last 5 rooms created or joined; kept on disk
-	recentGen   uint64               // bumps on each ProbeRecentRooms pass
+	// hideChangelog: don't show what changed after an update; kept on disk.
+	hideChangelog bool
+	discord       Discord        // the user's Discord voice channel (RunDiscord)
+	servers       serverSettings // the user's signaling servers; kept on disk
+	picked        string         // the lobby's server for new sessions; "" = the default
+	recent        []recentEntry  // last 5 rooms created or joined; kept on disk
+	recentGen     uint64         // bumps on each ProbeRecentRooms pass
 	// discordAuth wakes RunDiscord to ask Discord for permission.
 	discordAuth chan struct{}
+	// pins are the pinned hosts (PinnedHost).
+	pins atomic.Pointer[map[string]bool]
+	// discordUnlink wakes the follow socket to unlink the Discord account.
+	discordUnlink chan struct{}
 	// DefaultSource is what a new session shares first.
 	DefaultSource media.SourceKind
 	// Exe is the installed Blite binary; empty for dev builds, which don't
@@ -120,6 +128,7 @@ func New(cfg session.Config, def media.SourceKind) *App {
 	if cfg.PlaySounds != nil {
 		playSounds = *cfg.PlaySounds
 	}
+	audio.SetIncludeVoice(LoadVoiceInSystem())
 	portMap := LoadPortMap()
 	if cfg.Port != nil {
 		cfg.Port.SetMapping(portMap)
@@ -142,13 +151,16 @@ func New(cfg session.Config, def media.SourceKind) *App {
 		portMap:       portMap,
 		autoWatch:     autoWatch,
 		playSounds:    playSounds,
+		hideChangelog: loadSettings().HideChangelog,
 		servers:       loadServers(),
 		recent:        loadRecent(cfg.Server),
 		discordAuth:   make(chan struct{}, 1),
+		discordUnlink: make(chan struct{}, 1),
 	}
 	if a.cfg.OnSelfView == nil {
 		a.cfg.OnSelfView = a.keepSelfView
 	}
+	a.updatePinsLocked()
 	return a
 }
 
@@ -192,7 +204,14 @@ type UIState struct {
 	AutoWatch bool `json:"autoWatch"`
 	// PlaySounds is whether call notification sounds play.
 	PlaySounds bool `json:"playSounds"`
-	Logs       any  `json:"logs,omitempty"`
+	// VoiceInSystem: whole-system share audio includes voice chat apps.
+	VoiceInSystem bool `json:"voiceInSystem,omitempty"`
+	// Build is our build number (0 for dev builds).
+	Build int `json:"build,omitempty"`
+	// HideChangelog: the user doesn't want to see what changed after an
+	// update (Help > What's new still shows it).
+	HideChangelog bool `json:"hideChangelog,omitempty"`
+	Logs          any  `json:"logs,omitempty"`
 	// Reach says whether others can reach us from the internet.
 	Reach *Reach `json:"reach,omitempty"`
 	// Discord: the user's voice channel and its session (nil until the
@@ -213,7 +232,7 @@ type Reach struct {
 // State implements ui.Backend.
 func (a *App) State() any {
 	a.mu.Lock()
-	s, e, autoWatch, playSounds := a.sess, a.lastErr, a.autoWatch, a.playSounds
+	s, e, autoWatch, playSounds, hideChangelog := a.sess, a.lastErr, a.autoWatch, a.playSounds, a.hideChangelog
 	portMap, sessPortMap := a.portMap, a.sessPortMap
 	opts := session.NormalizeShareOptions(a.shareOpts)
 	homeSrc := a.homeSource
@@ -253,7 +272,10 @@ func (a *App) State() any {
 	servers := a.serverState()
 	recent := a.recentStateLocked()
 	a.mu.Unlock()
-	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), AutoWatch: autoWatch, PlaySounds: playSounds, Discord: dc, Servers: servers, Recent: recent}
+	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), AutoWatch: autoWatch, PlaySounds: playSounds, VoiceInSystem: audio.IncludeVoice(), HideChangelog: hideChangelog, Discord: dc, Servers: servers, Recent: recent}
+	if a.cfg.Client != nil {
+		st.Build = a.cfg.Client.Build
+	}
 	if a.cfg.Identity.Private != nil {
 		st.Tag = identity.Tag(a.cfg.Identity.Public())
 	}
@@ -444,7 +466,6 @@ func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 	rj := s.Rejoin()
 	a.recordRecent(rj.Server, rj.Room, rj.Password)
 	s.OnChange(a.bc.Notify)
-	s.OnLeavePrompt(a.ShowUI)
 	a.mu.Lock()
 	a.sess, a.lastErr = s, ""
 	if a.cfg.Port != nil {
@@ -984,11 +1005,14 @@ func (a *App) InstallUpdate(ctx context.Context) error {
 	if a.Updates == nil {
 		return errors.New("this build doesn't update itself")
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-	defer cancel()
-	// Download and verify while the call goes on.
-	if err := a.Updates.Install(ctx); err != nil {
+	// Download and verify while the call goes on, however long a slow link
+	// takes (a stalled download is resumed). A second click while it runs
+	// changes nothing: the progress shows.
+	if err := a.Updates.Install(context.WithoutCancel(ctx)); err != nil {
 		a.bc.Notify()
+		if errors.Is(err, update.ErrInstalling) {
+			return nil
+		}
 		return err
 	}
 	inCall := a.leaveForUpdate()
@@ -1027,6 +1051,19 @@ func (a *App) SetAutostart(on bool) error {
 	return err
 }
 
+// SetHideChangelog implements ui.Backend: "Don't show change logs again",
+// kept on disk.
+func (a *App) SetHideChangelog(on bool) error {
+	if err := saveHideChangelog(on); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
+	a.mu.Lock()
+	a.hideChangelog = on
+	a.mu.Unlock()
+	a.bc.Notify()
+	return nil
+}
+
 // DismissUpdateResult implements ui.Backend: the "updated" notice was seen.
 func (a *App) DismissUpdateResult() {
 	if a.Updates != nil {
@@ -1049,6 +1086,9 @@ var serverMessages = map[string]string{
 }
 
 func friendly(err error) error {
+	if errors.Is(err, pin.ErrUnpinned) {
+		return pin.ErrUnpinned // without the dial and TLS wrapping
+	}
 	var se sigclient.ServerError
 	if errors.As(err, &se) {
 		if msg, ok := serverMessages[string(se)]; ok {

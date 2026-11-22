@@ -8,12 +8,15 @@
 //	discord-watch Home screen with Discord sharer + avatars + Watch (alias: room)
 //	login         Home screen with Discord Connect prompt
 //	servers       Home screen with a custom signaling server picked
+//	servers-dialog The Servers dialog (gear > Servers...)
 //	sharesheet    Share options sheet open
 //	advanced      Share options sheet with Advanced... expanded
 //	call          In-call control window (people list, eyes, relay footer)
 //	panel         In-call control window with a person's side panel open
 //	gear          Control window with Gear menu open (and update dot)
 //	help          Control window with ? menu open
+//	updated       Home screen with the changes since the last update
+//	update-notice Home screen with a new update's notice in the corner
 //	picker        "Share a monitor or window" with made-up displays and windows
 //	video         The main video window: two streams and our preview in its corner
 //	video-tile    The main video window with our preview expanded to a tile
@@ -44,6 +47,8 @@ type demo struct {
 	fps           int
 	uploadKbps    int
 	updateWaiting bool
+	updateNotes   bool  // the waiting update has release notes
+	updatedFrom   int64 // > 0: we just updated from this build to 212
 	autoWatch     bool
 	playSounds    bool
 	portMap       bool
@@ -83,6 +88,12 @@ func (d *demo) State() any {
 		up.CanApply = true
 		up.Available = "0.1.0 (85)"
 	}
+	if d.updateNotes {
+		up.Notes = "Help > What's new shows what changed. Fixes the share sheet's preset chips on small screens."
+	}
+	if d.updatedFrom > 0 {
+		up.Result, up.UpdatedFrom, up.UpdatedTo = "Updated to build 212.", d.updatedFrom, 212
+	}
 	st := app.UIState{Version: "0.1.0 (84) linux", Name: "Alice", Tag: "4417", Autostart: &auto,
 		AutoWatch: d.autoWatch, PlaySounds: d.playSounds,
 		Share: app.ShareConfig{
@@ -105,6 +116,8 @@ func (d *demo) State() any {
 		st.Discord = &app.Discord{Status: "login"}
 	case "ready":
 		st.Discord = &app.Discord{Status: "ready", ChannelID: "111", Channel: "gaming", Guild: "Game Night"}
+	case "nobot":
+		st.Discord = &app.Discord{Status: "ready", Via: "bot", User: "alice", BotURL: "https://bellion.example.com/bot"}
 	case "room":
 		st.Discord = &app.Discord{Status: "ready", ChannelID: "111", Channel: "gaming", Guild: "Game Night", Room: "K7PQ-2M4X", Open: true, People: 3, Sharers: []string{"Bob"}, Members: []string{"Bob", "Carol", "Dave"}}
 	}
@@ -112,7 +125,7 @@ func (d *demo) State() any {
 		{Code: "K7PQ2M4X", Display: "K7PQ-2M4X", Server: demoServer, Host: "bellion.example.com", BuiltIn: true, Status: "ready"},
 		{Code: "MAMAC0", Display: "MAMAC0", Server: "wss://share.example.com/ws", Host: "share.example.com", HasPassword: true, Status: "checking"},
 	}
-	srv := &app.Servers{List: []app.Server{{URL: demoServer, Host: "bellion.example.com", BuiltIn: true}}, Default: demoServer, Selected: demoServer}
+	srv := &app.Servers{List: []app.Server{{URL: demoServer, Host: "bellion.example.com", BuiltIn: true, Pinned: true}}, Default: demoServer, Selected: demoServer}
 	for _, c := range d.servers {
 		srv.List = append(srv.List, app.Server{URL: c, Host: session.ServerHost(c)})
 	}
@@ -154,9 +167,9 @@ func (d *demo) State() any {
 		SelfEye: selfEye, AutoWatch: d.autoWatch, Relay: relays,
 		Members: []session.Member{
 			{ID: "a", Name: "Bob", Tag: "2926", Client: "0.1.0 (83) windows", State: "connected", Pair: "host/prflx", Layer: "high",
-				RTTms: 42, TxKbps: 3050, RxKbps: 4200, FPSIn: 60, Quality: "auto", Volume: 1, Recv: 1080, Sharing: true, Watching: d.bobWatch, Eye: bobEye},
+				RTTms: 42, TxKbps: 3050, RxKbps: 4200, FPSIn: 60, Quality: "auto", Volume: 1, Recv: 1080, Sharing: true, Watching: d.bobWatch, Eye: bobEye, Heard: true, Loud: true},
 			{ID: "b", Name: "Carol", Tag: "0815", Client: "0.1.0 (83) linux", State: "connected", Pair: "srflx/srflx", Layer: "720p",
-				Limit: "bandwidth", RTTms: 185, Loss: 0.062, TxKbps: 1400, RxKbps: 2900, FPSIn: 30, Quality: "low", Volume: 0.6, Muted: true, Recv: 720, Sharing: true, Watching: d.carolWatch, Eye: carolEye},
+				Limit: "bandwidth", RTTms: 185, Loss: 0.062, TxKbps: 1400, RxKbps: 2900, FPSIn: 30, Quality: "low", Volume: 0.6, Muted: true, Recv: 720, Sharing: true, Watching: d.carolWatch, Eye: carolEye, Heard: true},
 			{ID: "c", Name: "Dave", Tag: "7301", Client: "0.1.0 (82) windows", State: "unreachable", Quality: "auto", Volume: 1, Eye: feeds.EyeGrey,
 				Hint: "No route: their network may block UDP."},
 		},
@@ -234,8 +247,9 @@ func (d *demo) PopOut(string) error                                  { return ni
 func (d *demo) Pin(string) error                                     { return nil }
 func (d *demo) SetAutoWatch(on bool) error                           { d.autoWatch = on; d.changed(); return nil }
 func (d *demo) SetPlaySounds(on bool) error                          { d.playSounds = on; d.changed(); return nil }
+func (d *demo) SetVoiceInSystem(bool) error                          { return nil }
+func (d *demo) SetHideChangelog(bool) error                          { return nil }
 func (d *demo) SetPortMap(on bool) error                             { d.portMap = on; d.changed(); return nil }
-func (d *demo) DismissLeavePrompt()                                  {}
 func (d *demo) SendLogsNow(context.Context) error                    { return nil }
 func (d *demo) OpenLogFolder() error                                 { return nil }
 func (d *demo) Diagnostics() string                                  { return "demo" }
@@ -247,7 +261,8 @@ func (d *demo) Kick(string, bool) error                              { return ni
 func (d *demo) ShowUI()                                              {}
 func (d *demo) Subscribe() (<-chan struct{}, func())                 { return d.ch, func() {} }
 
-func (d *demo) DiscordLogin() {}
+func (d *demo) DiscordLogin()  {}
+func (d *demo) DiscordUnlink() {}
 func (d *demo) GoLiveInChannel(context.Context, string, bool) error {
 	d.inCall = true
 	d.changed()
@@ -279,6 +294,8 @@ func (d *demo) RemoveServer(url string) error {
 	d.changed()
 	return nil
 }
+
+func (d *demo) SetServerPinned(url string, on bool) error { return nil }
 
 func (d *demo) SetDefaultServer(url string) error {
 	d.def, d.pick = url, ""
@@ -313,10 +330,15 @@ func main() {
 		d.dc = "room"
 	case "login":
 		d.dc = "login"
+	case "nobot":
+		d.dc = "nobot"
 	case "servers":
 		d.dc = "ready"
 		d.servers = []string{"wss://share.example.com/ws"}
 		d.pick = d.servers[0]
+	case "servers-dialog":
+		d.servers = []string{"wss://share.example.com/ws"}
+		scene = "servers-dialog"
 	case "sharesheet":
 		scene = "sharesheet"
 	case "advanced":
@@ -328,6 +350,9 @@ func main() {
 	case "panel":
 		d.inCall = true
 		scene = "panel"
+	case "tooltip", "tooltip-footer":
+		d.inCall = true
+		scene = arg
 	case "gear":
 		d.inCall = true
 		d.updateWaiting = true
@@ -335,6 +360,10 @@ func main() {
 	case "help":
 		d.inCall = true
 		scene = "help"
+	case "updated":
+		d.updatedFrom = 208
+	case "update-notice":
+		d.updateWaiting, d.updateNotes = true, true
 	case "picker":
 		d.inCall = true
 		scene = "picker"

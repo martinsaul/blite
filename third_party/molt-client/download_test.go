@@ -60,7 +60,7 @@ func TestDownloadResumesAfterDroppedConnection(t *testing.T) {
 
 	p := testPayload(t, srv.URL+"/blob", body)
 	dir := t.TempDir()
-	got, err := download(context.Background(), p, dir, "test")
+	got, err := download(context.Background(), p, dir, "test", nil)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestDownloadRestartsWhenRangeIgnored(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := download(context.Background(), testPayload(t, srv.URL, body), t.TempDir(), "test")
+	got, err := download(context.Background(), testPayload(t, srv.URL, body), t.TempDir(), "test", nil)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -106,11 +106,62 @@ func TestDownloadRejectsWrongHash(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	_, err := download(context.Background(), testPayload(t, srv.URL, body), dir, "test")
+	_, err := download(context.Background(), testPayload(t, srv.URL, body), dir, "test", nil)
 	if !errors.Is(err, ErrBadPayload) {
 		t.Fatalf("err = %v, want ErrBadPayload", err)
 	}
 	if parts, _ := filepath.Glob(filepath.Join(dir, "*")); len(parts) != 0 {
 		t.Fatalf("files left behind: %v", parts)
+	}
+}
+
+// A transfer that stops sending is dropped after stallTimeout and resumed;
+// one that keeps trickling is never cut, however long it takes.
+func TestDownloadStallAndSlowLink(t *testing.T) {
+	old := stallTimeout
+	stallTimeout = 200 * time.Millisecond
+	defer func() { stallTimeout = old }()
+	body := bytes.Repeat([]byte("molt-stall-"), 2_000) // 22 KB
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		if n == 1 { // half the body, then silence
+			w.Header().Set("Content-Length", itoa(int64(len(body))))
+			w.Write(body[:len(body)/2])
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		// The rest in 10 slow pieces: 500 ms in all, past stallTimeout.
+		start := 0
+		if rg := r.Header.Get("Range"); rg != "" {
+			start = len(body) / 2
+			w.Header().Set("Content-Range", "bytes "+itoa(int64(start))+"-"+itoa(int64(len(body)-1))+"/"+itoa(int64(len(body))))
+			w.Header().Set("Content-Length", itoa(int64(len(body)-start)))
+			w.WriteHeader(http.StatusPartialContent)
+		}
+		rest := body[start:]
+		step := len(rest)/10 + 1
+		for i := 0; i < len(rest); i += step {
+			w.Write(rest[i:min(i+step, len(rest))])
+			w.(http.Flusher).Flush()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	var last, total atomic.Int64
+	got, err := download(context.Background(), testPayload(t, srv.URL, body), t.TempDir(), "test",
+		func(done, size int64) { last.Store(done); total.Store(size) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(got); !bytes.Equal(b, body) {
+		t.Fatal("wrong content")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("%d requests, want 2 (one stalled, one resumed)", requests.Load())
+	}
+	if last.Load() != int64(len(body)) || total.Load() != int64(len(body)) {
+		t.Fatalf("progress ended at %d of %d", last.Load(), total.Load())
 	}
 }

@@ -6,13 +6,13 @@
 
 <h2 id="sharing">Sharing</h2>
 <figure>
-  <a href="/static/shots/share-menu.webp"><img src="/static/shots/share-menu.webp" width="1280" height="600" alt="The Share menu: All screens combined, A monitor or window, Test pattern, Nothing (watch only), and submenus for Resolution, Tuned for, Preview of your stream, Audio you share and Play the call on" loading="lazy"></a>
-  <figcaption>Choosing what you share and how.</figcaption>
+  <a href="/static/shots/share-options.webp"><img src="/static/shots/share-options.webp" width="580" height="686" alt="Share options: quality presets from 720p to 4K at 30 or 60 fps; audio choices No audio, Whole system, Only these apps and Test tone, with Include voice apps (Discord, TeamSpeak...) under Whole system; Play the call on; and Advanced" loading="lazy"></a>
+  <figcaption><em>Share options</em>: quality, the sound you share, and where the call plays.</figcaption>
 </figure>
 <ul>
   <li><strong>What you share.</strong> On the home screen, pick <em>Entire screen</em> (your main monitor) or <em>A window</em>, which lists your monitors and windows with their apps' icons. In a call, <em>Go live: main monitor</em> and <em>Share a window...</em> do the same. <em>Share options &gt; Advanced...</em> also offers <em>All screens combined</em>, a <em>Test pattern</em>, and <em>Nothing (watch only)</em>. You can switch at any time without leaving the call.</li>
   <li id="quality"><strong>Quality presets.</strong> A row of presets on the home screen and in <em>Share options</em>: 720p, 1080p and 4K, each at 30 fps (sharp text) or 60 fps (smooth games and video). Scroll it sideways to see them all. Press <strong>+</strong> to add your own resolution and frame rate (10 to 60 fps); the x on one of yours removes it. <em>Advanced...</em> also has a custom frame rate. Higher needs more upload and CPU on your side and theirs. If your computer can't encode fast enough, Bellion Share steps the resolution down and tells you.</li>
-  <li id="sound"><strong>Sound.</strong> Picking a window shares its app's sound automatically. Picking the entire screen doesn't turn sound on. In <em>Share options</em>, choose <em>No audio</em>, <em>This window's app</em> (while you share a window), <em>Whole system</em> (everything you hear except Bellion Share itself, so the call never echoes back), <em>Only these apps...</em>, or <em>Test tone</em> (a short beep every second instead of your sound, to check that others hear you). If Bellion Share can't find the app a window belongs to (for example an app running as administrator), there's no window sound and a note says so. This uses PipeWire on Linux and per-app loopback capture on Windows.</li>
+  <li id="sound"><strong>Sound.</strong> Picking a window shares its app's sound automatically. Picking the entire screen doesn't turn sound on. In <em>Share options</em>, choose <em>No audio</em>, <em>This window's app</em> (while you share a window), <em>Whole system</em> (everything you hear except Bellion Share itself, so the call never echoes back; voice chat apps such as Discord and TeamSpeak are left out too, so people in your voice call don't hear themselves twice, unless you tick <em>Include voice apps</em> under it), <em>Only these apps...</em>, or <em>Test tone</em> (a short beep every second instead of your sound, to check that others hear you). If Bellion Share can't find the app a window belongs to (for example an app running as administrator), there's no window sound and a note says so. This uses PipeWire on Linux and per-app loopback capture on Windows.</li>
   <li><strong>Play the call on</strong> (in <em>Share options</em>): the speakers or headset other people's audio plays on.</li>
   <li><strong>Advanced...</strong> (in <em>Share options</em>): what to lower first when a viewer's connection is slow (resolution or frame rate), the lowest resolution allowed, whether slow viewers get a smaller copy, an upload limit (automatic or your own), opening a port on your router, and the session's password and encryption.</li>
   <li><strong>Your preview.</strong> While you share, your own stream shows as a tile in the video window, so you see what others get. The eye on your row in the People list hides or shows it.</li>
@@ -22,17 +22,18 @@
 <h2 id="watching">Watching</h2>
 <ul>
   <li><strong>One video window.</strong> Everyone you watch shows as a tile in one window. Each tile has buttons to stop watching (the eye), pop it out into its own window (and back), and pin it, so it takes the main part of the window. Remote tiles also have mute and a volume slider. When someone stops sharing, their tile says so and fades out.</li>
-  <li><strong>Who you watch.</strong> The eye next to each person in the People list starts or stops watching them. When you don't watch someone, you get neither their video nor their audio. New streams start watching automatically; turn off <em>Start watching new streams automatically</em> in the gear menu to pick them yourself. Closing the video window stops watching everyone in it and asks whether you want to leave the session.</li>
+  <li><strong>Who you watch.</strong> The eye next to each person in the People list starts or stops watching them. When you don't watch someone, you get neither their video nor their audio. New streams start watching automatically; the eye-and-play button at the bottom right of the People list turns that off (it then shows stop), so you pick them yourself. Closing the video window stops watching everyone in it and asks whether you want to leave the session.</li>
+  <li><strong>Hear who's talking.</strong> The speaker next to each person's eye shows their sound: white while it reaches you, glowing while they make sound, struck through when you've muted them, and dim with a dot when they send none. Click it to mute or unmute them (only for you).</li>
   <li><strong>Per person.</strong> Click someone in the People list to open their panel: their volume (up to 200%), mute, and their video at <em>Best (automatic)</em> or <em>Low (saves data)</em>.</li>
   <li><strong>Adapts to each viewer.</strong> Every sharer sends a high and a low layer, plus in-between sizes (1080p, 720p) for viewers whose connection or computer can't take the top size. Each person's row shows what you get from them, for example <em>Good, watching in 720p</em>.</li>
   <li><strong>Smooth over loss.</strong> When packets get lost, Bellion Share holds the last good picture until the next full frame instead of showing a smeared one.</li>
-  <li><strong>Sounds.</strong> Bellion Share plays a short sound when someone joins, when someone starts sharing, when you go live, and when someone starts watching you. Turn them off with <em>Play sounds</em> in the gear menu.</li>
+  <li><strong>Sounds.</strong> Bellion Share plays a short sound when someone joins, when someone starts sharing, when you go live, and when someone starts watching you. The music note at the bottom right of the People list turns them off (struck through) and on.</li>
 </ul>
 
 <h2 id="rooms">Rooms and people</h2>
 <figure>
-  <a href="/static/shots/people-menu.webp"><img src="/static/shots/people-menu.webp" width="1280" height="600" alt="The People menu with a submenu for one person: Their video, Mute, Network path, Make owner, Disconnect and Ban; below the people, Volunteer as relay and About relays" loading="lazy"></a>
-  <figcaption>Per-person settings, owner controls, and relays.</figcaption>
+  <a href="/static/shots/person-panel.webp"><img src="/static/shots/person-panel.webp" width="1100" height="760" alt="A call with Bob's panel open: his volume and mute, Their video at Best or Low, connection details, and owner actions Make owner, Disconnect and Ban. In the People list each person has a speaker and an eye; at the bottom, Volunteer as relay and About relays on the left, the sounds and auto-watch buttons on the right" loading="lazy"></a>
+  <figcaption>A person's panel, owner controls, and relays.</figcaption>
 </figure>
 <ul>
   <li><strong>Sessions</strong> are a room code plus an optional password, shared as one link. Links open the app directly; older <code>blite://</code> links still work. You can also type just the room code into <em>Watch someone</em>.</li>
@@ -55,8 +56,9 @@
 
 <h2 id="app">The app</h2>
 <ul>
-  <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in (<em>Start Bellion Share when I sign in</em> in the gear menu).</li>
+  <li>Runs in the tray; closing the window keeps it running. Optionally starts at sign-in (<em>Open at sign-in</em> in the gear menu).</li>
   <li>The gear menu also sets your name, shows your identity key, adds your own <a href="/docs/self-hosting">servers</a>, picks the app's language, and checks for updates.</li>
+  <li>Hover over a button to see what it does.</li>
   <li>Updates itself: new versions are signed, offered in the app, and rolled back automatically if something goes wrong.</li>
   <li>Opens a UDP port (30471) on your router with UPnP, NAT-PMP or PCP by default, when the router allows it, so others can reach you directly. To turn this off, switch off <em>Open a port on my router automatically</em> in <em>Share options &gt; Advanced...</em> (it applies to your next session), or start the app with <code>-udp-port 0</code>.</li>
   <li>Like any peer-to-peer app, people in your session learn your IP address, and you learn theirs. Clicking a share link joins that session right away, so only click links from people you trust.</li>

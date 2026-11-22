@@ -72,8 +72,8 @@ func TestSelfPreview(t *testing.T) {
 	if err := s.ToggleWatch(feeds.Self); err != nil {
 		t.Fatal(err)
 	}
-	if st := s.State(); s.PreviewFrames() != -1 || st.SelfEye != feeds.EyeClosed || st.SelfState != feeds.NotWatched || st.LeavePrompt {
-		t.Fatalf("after hiding preview: frames=%d eye=%s state=%s leavePrompt=%v", s.PreviewFrames(), st.SelfEye, st.SelfState, st.LeavePrompt)
+	if st := s.State(); s.PreviewFrames() != -1 || st.SelfEye != feeds.EyeClosed || st.SelfState != feeds.NotWatched {
+		t.Fatalf("after hiding preview: frames=%d eye=%s state=%s", s.PreviewFrames(), st.SelfEye, st.SelfState)
 	}
 	s.gridMu.Lock()
 	winCount := len(s.wins)

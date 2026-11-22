@@ -44,3 +44,19 @@ func TestShareLog(t *testing.T) {
 		}
 	}
 }
+
+func TestIsVoiceApp(t *testing.T) {
+	for _, n := range []string{"Discord.exe", "discord", "WEBRTC VoiceEngine", "ts3client_win64.exe", "Zoom.exe", "ms-teams.exe"} {
+		if !isVoiceApp(n) {
+			t.Errorf("%q: want a voice chat app", n)
+		}
+	}
+	for _, n := range []string{"RSDragonwilds-Win64-Shipping.exe", "firefox", "chrome.exe", "Spotify.exe", ""} {
+		if isVoiceApp(n) {
+			t.Errorf("%q: not a voice chat app", n)
+		}
+	}
+	if !isVoiceApp("", "Discord") {
+		t.Error("any of the names counts")
+	}
+}

@@ -3,6 +3,8 @@ package update
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,5 +156,58 @@ func TestRetry(t *testing.T) {
 	err = retry(cctx, log, func() error { n++; return molt.ErrCouldNotCheck })
 	if n != 1 || err == nil {
 		t.Fatalf("cancelled: %d tries, want 1", n)
+	}
+}
+
+// One install at a time, with progress: a second Install while the first
+// downloads gets ErrInstalling, and the UI hears the progress.
+func TestInstallSingleFlight(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	body := []byte(strings.Repeat("x", 1000))
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/blob" {
+			http.NotFound(w, r) // no molt-swap published: Apply fails after the download
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		w.Write(body[:500])
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write(body[500:])
+	}))
+	defer srv.Close()
+	u := updater(srv.URL, pub)
+	u.opts.CacheDir = t.TempDir()
+	u.info.CanApply = true
+	p := payload(23, 0)
+	sum := sha256.Sum256(body)
+	p.URL, p.Size, p.SHA256 = srv.URL+"/blob", int64(len(body)), hex.EncodeToString(sum[:])
+	u.pending = &molt.Update{Payload: p}
+	u.c.Progress = u.progress
+	var changes atomic.Int32
+	u.OnChange = func() { changes.Add(1) }
+
+	done := make(chan error, 1)
+	go func() { done <- u.Install(context.Background()) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for i := u.Info(); !(i.Downloading && i.Progress == 50); i = u.Info() {
+		if time.Now().After(deadline) {
+			t.Fatalf("no progress: %+v", i)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := u.Install(context.Background()); !errors.Is(err, ErrInstalling) {
+		t.Fatalf("second Install: %v, want ErrInstalling", err)
+	}
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("Apply should fail without molt-swap")
+	}
+	if i := u.Info(); i.Downloading || i.Problem == "" {
+		t.Fatalf("after the install: %+v", i)
+	}
+	if changes.Load() < 3 {
+		t.Fatalf("%d change notifications", changes.Load())
 	}
 }

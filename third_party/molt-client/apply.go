@@ -147,7 +147,7 @@ func (c *Client) rollbackPayload(ctx context.Context, cache string) (string, err
 	if err != nil {
 		return "", err
 	}
-	return download(ctx, p, filepath.Join(cache, "rollback"), c.UserAgent())
+	return download(ctx, p, filepath.Join(cache, "rollback"), c.UserAgent(), nil)
 }
 
 func (c *Client) fetchSwap(ctx context.Context, cache string) (string, error) {
@@ -156,7 +156,7 @@ func (c *Client) fetchSwap(ctx context.Context, cache string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("molt-swap: %w", err)
 	}
-	path, err := download(ctx, p, filepath.Join(cache, "swap", itoa(p.Build)), c.UserAgent())
+	path, err := download(ctx, p, filepath.Join(cache, "swap", itoa(p.Build)), c.UserAgent(), nil)
 	if err != nil {
 		return "", fmt.Errorf("molt-swap: %w", err)
 	}

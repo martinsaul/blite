@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// hasIDR reports whether an Annex-B access unit holds an IDR slice.
-func hasIDR(au []byte) bool {
+// HasIDR reports whether an Annex-B access unit holds an IDR slice.
+func HasIDR(au []byte) bool {
 	for {
 		i := bytes.Index(au, []byte{0, 0, 1})
 		if i < 0 || i+3 >= len(au) {
@@ -29,7 +29,7 @@ func TestIdlePausesCapture(t *testing.T) {
 	src, _, err := StartVideoSource(SourceTest, "", "", nil, "", "", func(layer int, au AccessUnit) {
 		if layer == High {
 			high.Add(1)
-			if hasIDR(au.Data) {
+			if HasIDR(au.Data) {
 				keys.Add(1)
 			}
 		}

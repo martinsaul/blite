@@ -15,14 +15,14 @@ Formerly Blite. The code, binaries and packages still use the `blite` name.
 > nothing to run it. You are not only allowed but encouraged to review this
 > code base yourself, or to have AI agents review it for you.
 
-![A call: the room with its safety code, and the People table with each person's status, connection and video settings](docs/screenshots/call.png)
+![A call: the room, your share controls, and the People list with each person's connection, a speaker that glows while they talk, and an eye to watch them](docs/screenshots/call.png)
 
 | Before a call | With Discord connected |
 |---|---|
-| ![The start screen: Go live: main monitor, or paste a share link to watch](docs/screenshots/start.png) | ![Go live in your Discord voice channel with one click](docs/screenshots/discord.png) |
+| ![The start screen: share your entire screen or a window, or paste a share link to watch](docs/screenshots/start.png) | ![Join or share in your Discord voice channel with one click](docs/screenshots/discord.png) |
 
-More screenshots: [the Share menu](docs/screenshots/share-menu.png),
-[the People menu](docs/screenshots/people-menu.png),
+More screenshots: [Share options](docs/screenshots/share-options.png),
+[a person's panel](docs/screenshots/person-panel.png),
 [watching someone in your Discord voice channel](docs/screenshots/discord-watch.png).
 
 ## Bigger groups: relays
@@ -62,7 +62,8 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   be found, there's no window audio and a note says so); the entire screen
   starts without sound. Or share the whole system's audio (never the call
   itself, so nothing echoes back) or only the apps you pick. PipeWire on
-  Linux, per-app loopback capture on Windows.
+  Linux, per-app loopback capture on Windows. Whole-system audio leaves out
+  voice chat apps (Discord, TeamSpeak...) unless you tick *Include voice apps*.
 - Hardware H.264 encoding when available (NVENC, Quick Sync, AMF, VA-API,
   Media Foundation), x264 otherwise.
 - A preview of your own stream in the video window, hidden with one click.
@@ -70,13 +71,16 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
 **Watching**
 - Everyone you watch in one video window: pin a tile, or pop it out into
   its own window. An eye next to each person starts or stops watching them;
-  new streams start watching automatically (you can turn that off).
+  new streams start watching automatically (the eye-and-play button at the
+  bottom right turns that off).
+- A speaker next to each person glows while they talk; click it to mute them
+  for you (struck through), or see that they send no audio.
 - When someone stops sharing, their tile says so and fades out.
 - Click someone for their panel: volume (up to 200%), mute, video quality
   (Best or Low), connection details and owner actions. Plus a choice of
   playback device.
 - Short sounds when someone joins, starts sharing or starts watching you, and
-  when you go live (can be turned off).
+  when you go live (the music note at the bottom right turns them off).
 - Adapts to each viewer: every sharer sends a high and a low layer, plus
   in-between sizes (1080p, 720p) for viewers whose connection or computer
   can't take the top size. Lost packets are concealed by holding the last
@@ -131,7 +135,8 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   [Bigger groups: relays](#bigger-groups-relays).
 
 **The app**
-- A native window plus a tray icon; optional start at sign-in.
+- A native window plus a tray icon; optional start at sign-in. Buttons
+  explain themselves on hover.
 - Signed self-update with automatic rollback; updating during a call
   restarts the app and rejoins the call.
 - Opens UDP port 30471 on your router (UPnP, NAT-PMP or PCP) by default, when

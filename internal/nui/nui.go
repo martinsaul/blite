@@ -63,13 +63,17 @@ type UI struct {
 	ownLink string // the share link we copied for our own session
 	devices []audio.Device
 
-	icon             fyne.Resource
-	view             *fyne.Container
-	viewKind         string // lobby | call
-	lobby            *lobbyView
-	call             *callView
-	sheet            *shareSheet
-	leaveDialogShown bool
+	icon     fyne.Resource
+	view     *fyne.Container
+	viewKind string // lobby | call
+	lobby    *lobbyView
+	call     *callView
+	sheet    *shareSheet
+
+	toasts      *fyne.Container // floating notices over the view
+	tips        *tooltips       // hover tooltips over everything
+	shownResult string          // the update result we already showed
+	noticed     string          // the available update we already noticed
 }
 
 var (
@@ -106,7 +110,9 @@ func Run(a ui.Backend, o Options) {
 	}
 	u.win.Resize(fyne.NewSize(1100, winH))
 	u.view = container.NewStack()
-	u.win.SetContent(u.view)
+	u.toasts = container.New(&cornerLayout{w: 400, pad: 16})
+	u.tips = newTooltips()
+	u.win.SetContent(container.NewStack(u.view, u.toasts, u.tips.layer))
 
 	if d, ok := fa.(desktop.App); ok {
 		d.SetSystemTrayIcon(icon)
@@ -251,11 +257,12 @@ func (u *UI) refresh() {
 	}
 	st, _ := u.a.State().(app.UIState)
 	u.st = st
+	u.updateResult(st)
+	u.updateNotice(st)
 	if u.sheet != nil {
 		u.sheet.update(st)
 	}
 	if st.Session == nil {
-		u.leaveDialogShown = false
 		enteredLobby := false
 		if u.viewKind != "lobby" {
 			u.lobby = newLobby(u)
@@ -270,12 +277,6 @@ func (u *UI) refresh() {
 			go u.a.ProbeRecentRooms()
 		}
 		return
-	}
-	if !st.Session.LeavePrompt {
-		u.leaveDialogShown = false
-	} else if !u.leaveDialogShown {
-		u.leaveDialogShown = true
-		u.showLeaveStreamDialog()
 	}
 	if u.viewKind != "call" {
 		if u.lobby != nil && u.lobby.recent != nil {
@@ -303,6 +304,16 @@ func (u *UI) applyScene(scene string) {
 		if u.call != nil && u.st.Session != nil && len(u.st.Session.Members) > 0 {
 			u.call.selectPeer(u.st.Session.Members[0].ID)
 		}
+	case "tooltip": // the first person's speaker and the auto-watch button, hovered
+		if u.call != nil && u.st.Session != nil && len(u.st.Session.Members) > 0 {
+			if r := u.call.people[u.st.Session.Members[0].ID]; r != nil {
+				u.tips.place(r.speaker, r.speaker.meaning)
+			}
+		}
+	case "tooltip-footer":
+		if u.call != nil {
+			u.tips.place(u.call.autoWatch, u.call.autoWatch.meaning)
+		}
 	case "gear":
 		if btn := u.activeGearButton(); btn != nil {
 			showMenuBelow(btn, u.gearMenuItems()...)
@@ -313,6 +324,8 @@ func (u *UI) applyScene(scene string) {
 		}
 	case "picker":
 		u.sourceDialog()
+	case "servers-dialog":
+		u.serversDialog()
 	}
 }
 
@@ -482,6 +495,7 @@ func label(text string) *widget.Label {
 // discordBackend is what the app adds for Discord voice channels.
 type discordBackend interface {
 	DiscordLogin()
+	DiscordUnlink()
 	GoLiveInChannel(ctx context.Context, password string, e2ee bool) error
 	EnterChannel(ctx context.Context, password string, e2ee bool) error
 	JoinChannel(ctx context.Context, password string) error

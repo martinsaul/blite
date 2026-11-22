@@ -133,6 +133,7 @@ type AudioPlayer struct {
 	vol     *gst.Element
 	life    sync.RWMutex
 	decoded *gst.Counter // buffers out of the decoder (nil if unavailable or stopped)
+	meter   *gst.Meter   // the decoded audio, before our volume (nil if unavailable or stopped)
 }
 
 // StartAudioPlayer plays on sink (a GStreamer sink description, e.g. from
@@ -144,7 +145,7 @@ func StartAudioPlayer(sink string) (*AudioPlayer, error) {
 	}
 	desc := "appsrc name=ain is-live=true format=time do-timestamp=true " +
 		"caps=audio/x-opus,rate=48000,channels=2,channel-mapping-family=0 ! " +
-		"opusdec name=adec plc=true ! audioconvert ! volume name=vol ! audioresample ! queue max-size-time=200000000 leaky=downstream ! " + out
+		"opusdec name=adec plc=true ! audioconvert name=aconv ! volume name=vol ! audioresample ! queue max-size-time=200000000 leaky=downstream ! " + out
 	p, err := launch(desc)
 	if err != nil {
 		return nil, err
@@ -162,6 +163,9 @@ func StartAudioPlayer(sink string) (*AudioPlayer, error) {
 	ap := &AudioPlayer{Pipeline: p, src: src, vol: vol}
 	if dec, err := p.element("adec"); err == nil {
 		ap.decoded, _ = dec.CountBuffers()
+	}
+	if conv, err := p.element("aconv"); err == nil {
+		ap.meter, _ = conv.Meter() // opusdec hands it S16
 	}
 	if sink == "count" {
 		pcm, err := p.element("pcm")
@@ -183,6 +187,9 @@ func StartAudioPlayer(sink string) (*AudioPlayer, error) {
 	if err := p.start(); err != nil { // stopped the pipeline
 		if ap.decoded != nil {
 			ap.decoded.Free()
+		}
+		if ap.meter != nil {
+			ap.meter.Free()
 		}
 		return nil, err
 	}
@@ -217,6 +224,18 @@ func (ap *AudioPlayer) Buffers() int {
 	return ap.decoded.Load()
 }
 
+// Level returns the level of the audio decoded since the previous call,
+// whatever our volume; ok is false when none came.
+func (ap *AudioPlayer) Level() (l AudioLevel, ok bool) {
+	ap.life.RLock()
+	defer ap.life.RUnlock()
+	if ap.meter == nil {
+		return l, false
+	}
+	l.PeakDB, l.RMSDB, ok = ap.meter.Take()
+	return l, ok
+}
+
 // Stop tears the player down; concurrent Push calls finish first.
 func (ap *AudioPlayer) Stop() {
 	ap.life.Lock()
@@ -225,5 +244,9 @@ func (ap *AudioPlayer) Stop() {
 	if ap.decoded != nil {
 		ap.decoded.Free()
 		ap.decoded = nil
+	}
+	if ap.meter != nil {
+		ap.meter.Free()
+		ap.meter = nil
 	}
 }

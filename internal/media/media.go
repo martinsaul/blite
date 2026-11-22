@@ -629,14 +629,21 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 		if l.Height == 0 {
 			continue
 		}
-		scale := "identity name=thin ! " // HIGH: SetHighFPS drops frames here
+		// HIGH: SetHighFPS drops frames at thin, before the queue, so
+		// that thin counts what HIGH's encoder is offered: frames the
+		// leaky queue drops because the encoder is slow count as offered.
+		thin, scale := "identity name=thin ! ", ""
 		if i != High {
-			scale = fmt.Sprintf("videoscale ! videorate ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! ", l.Width, l.Height, l.FPS)
+			thin, scale = "", fmt.Sprintf("videoscale ! videorate ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! ", l.Width, l.Height, l.FPS)
 		}
-		branches = append(branches, fmt.Sprintf("t. ! queue max-size-buffers=2 leaky=downstream ! %s%s ! "+
+		// The appsink never drops: a lost access unit breaks the references
+		// of every frame after it, for every viewer, until the next IDR,
+		// with no packet loss to tell. A slow consumer blocks the encoder
+		// instead, and the leaky queue before it drops raw frames.
+		branches = append(branches, fmt.Sprintf("t. ! %squeue max-size-buffers=2 leaky=downstream ! %s%s ! "+
 			"video/x-h264,profile=constrained-baseline ! "+
 			"h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "+
-			"appsink name=out%d sync=false max-buffers=4 drop=true", scale, enc.launch(i, l), i))
+			"appsink name=out%d sync=false max-buffers=4 drop=false", thin, scale, enc.launch(i, l), i))
 	}
 	if preview != "" {
 		// The valves drop everything until SetPreview opens one, so a
@@ -883,8 +890,9 @@ func (vs *VideoSource) OfferedFrames() int {
 	return vs.offered.Load()
 }
 
-// HighOfferedFrames is how many frames HIGH's encoder was handed, after
-// SetHighFPS thinned them (-1 if unknown).
+// HighOfferedFrames is how many frames HIGH's encoder was offered, after
+// SetHighFPS thinned them and before a slow encoder's queue dropped any
+// (-1 if unknown).
 func (vs *VideoSource) HighOfferedFrames() int {
 	vs.life.RLock()
 	defer vs.life.RUnlock()
@@ -940,17 +948,18 @@ type Player struct {
 
 // StartPlayer starts a decoder pipeline.
 func StartPlayer(view ViewKind) (*Player, error) {
-	sink, channel := "videoconvert ! autovideosink sync=false", ""
+	sink, channel, scale := "videoconvert ! autovideosink sync=false", "", ""
 	switch view {
 	case ViewCount:
 		sink = "videoconvert ! video/x-raw,format=I420 ! appsink name=frames sync=false max-buffers=2 drop=true"
 	case ViewGrid:
 		channel = fmt.Sprintf("blite-tile-%d", tileSeq.Add(1))
 		sink = "intervideosink channel=" + channel + " sync=false"
+		scale = playerScale()
 	}
 	desc := "appsrc name=in is-live=true format=time do-timestamp=true " +
 		"caps=video/x-h264,stream-format=byte-stream,alignment=au ! " +
-		"h264parse ! decodebin ! identity name=decoded ! queue max-size-buffers=2 leaky=downstream ! " + sink
+		"h264parse ! decodebin ! identity name=decoded ! " + scale + "queue max-size-buffers=2 leaky=downstream ! " + sink
 	p, err := launch(desc)
 	if err != nil {
 		return nil, err

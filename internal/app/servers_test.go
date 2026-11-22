@@ -243,3 +243,44 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 		}
 	}
 }
+
+func TestServerPinning(t *testing.T) {
+	tempServers(t)
+	a := newTestApp()
+	if !a.PinnedHost("bellion.example.com") || !a.PinnedHost("www.bellion.example.com") {
+		t.Fatal("built-in server not pinned")
+	}
+	if err := a.AddServer("share.example.org"); err != nil {
+		t.Fatal(err)
+	}
+	own := "wss://share.example.org/ws"
+	if a.PinnedHost("share.example.org") {
+		t.Fatal("the user's server is pinned before they turn it on")
+	}
+	if err := a.SetServerPinned(builtIn, false); err == nil {
+		t.Fatal("unpinned the built-in server")
+	}
+	if err := a.SetServerPinned(own, true); err != nil {
+		t.Fatal(err)
+	}
+	if !a.PinnedHost("share.example.org") {
+		t.Fatal("pinning didn't take")
+	}
+	// Kept on disk.
+	b := newTestApp()
+	if !b.PinnedHost("share.example.org") {
+		t.Fatal("pin not kept")
+	}
+	if l := b.State().(UIState).Servers.List; !l[0].Pinned || !l[1].Pinned {
+		t.Fatalf("server list %+v", l)
+	}
+	if err := b.RemoveServer(own); err != nil {
+		t.Fatal(err)
+	}
+	if b.PinnedHost("share.example.org") {
+		t.Fatal("a removed server stays pinned")
+	}
+	if BuiltInPinned("ws://localhost:8080/ws")("localhost") {
+		t.Fatal("a ws:// server is pinned")
+	}
+}

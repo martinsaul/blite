@@ -110,7 +110,7 @@ var (
 
 // siteShots are the app screenshots on the download page and in the docs,
 // served at /static/shots/<name>.
-var siteShots = []string{"call.webp", "lobby.webp", "lobby-discord.webp", "lobby-watch.webp", "share-menu.webp", "people-menu.webp"}
+var siteShots = []string{"call.webp", "lobby.webp", "lobby-discord.webp", "lobby-watch.webp", "share-options.webp", "person-panel.webp"}
 
 // docPage is one page of the docs section.
 type docPage struct {

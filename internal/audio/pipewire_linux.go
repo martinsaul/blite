@@ -207,7 +207,7 @@ func (s *Sharer) sync(ctx context.Context) error {
 		}
 		switch sel.Mode {
 		case "system":
-			return true
+			return includeVoice.Load() || !isVoiceApp(appName(n), n.str("application.process.binary"))
 		case "apps":
 			return want[appKey(appName(n), n.num("application.process.id"))]
 		case "window":

@@ -8,6 +8,9 @@
 # file named by BLITE_BUILD_ENV:
 #   BLITE_DEFAULT_SERVER  signaling URL the app uses without -server
 #   BLITE_DEFAULT_SERVER_ALIASES  other host names of that server (comma-separated)
+#   BLITE_PIN_DEFAULT_SERVER  false: don't pin that server's certificate
+#                         authorities (needed when its certificate isn't from
+#                         Let's Encrypt, Google Trust Services or SSL.com)
 #   BLITE_UPDATE_URL      update server; with BLITE_UPDATE_KEYS (release
 #                         signing keys, std base64 Ed25519, comma-separated)
 #                         the app updates itself
@@ -40,6 +43,7 @@ date=$(date -u '+%Y-%m-%d %H:%M')
 ld="-s -w -X main.version=$app -X main.build=$build -X \"main.buildDate=$date\" -X main.defaultChannel=${BLITE_DEFAULT_CHANNEL:-beta}"
 [ -z "${BLITE_DEFAULT_SERVER:-}" ] || ld="$ld -X main.defaultServer=$BLITE_DEFAULT_SERVER"
 [ -z "${BLITE_DEFAULT_SERVER_ALIASES:-}" ] || ld="$ld -X main.defaultServerAliases=$BLITE_DEFAULT_SERVER_ALIASES"
+[ "${BLITE_PIN_DEFAULT_SERVER:-true}" != false ] || ld="$ld -X blite/internal/app.pinDefaultServer=false"
 [ -z "${BLITE_UPDATE_URL:-}" ] || ld="$ld -X blite/internal/update.serverURL=$BLITE_UPDATE_URL"
 [ -z "${BLITE_UPDATE_KEYS:-}" ] || ld="$ld -X blite/internal/update.trustedKeys=$BLITE_UPDATE_KEYS"
 echo "APP_VERSION='$app' BUILD='$build' BUILD_DATE='$date'"

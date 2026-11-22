@@ -3,7 +3,6 @@ package media
 import (
 	"encoding/binary"
 	"sync"
-	"sync/atomic"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -33,8 +32,6 @@ type x11Video struct {
 	c         *xgb.Conn
 	win       xproto.Window
 	closed    chan struct{}
-	closeReq  chan struct{}
-	intercept atomic.Bool
 	closeOnce sync.Once
 	destroy   sync.Once
 	// onButton gets the pointer button events on the window (see
@@ -62,7 +59,7 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 		c.Close()
 		return nil, err
 	}
-	v := &x11Video{c: c, win: wid, closed: make(chan struct{}), closeReq: make(chan struct{}, 1)}
+	v := &x11Video{c: c, win: wid, closed: make(chan struct{})}
 	v.SetTitle(title)
 	class := []byte("bellionshare-video\x00BellionShare\x00")
 	xproto.ChangeProperty(c, xproto.PropModeReplace, wid, atom(c, "WM_CLASS"), xproto.AtomString, 8, uint32(len(class)), class)
@@ -92,13 +89,6 @@ func openVideoWindow(title string, w, h int) (Window, error) {
 				continue
 			}
 			if cm, ok := ev.(xproto.ClientMessageEvent); ok && cm.Format == 32 && xproto.Atom(cm.Data.Data32[0]) == del {
-				if v.intercept.Load() {
-					select {
-					case v.closeReq <- struct{}{}:
-					default:
-					}
-					continue
-				}
 				xproto.UnmapWindow(c, wid) // hide now, the owner destroys it
 				v.closeOnce.Do(func() { close(v.closed) })
 			}
@@ -140,10 +130,8 @@ func (v *x11Video) SetButtonHandler(f func(press bool, button int, x, y float64)
 	}
 }
 
-func (v *x11Video) Handle() uintptr                 { return uintptr(v.win) }
-func (v *x11Video) Closed() <-chan struct{}         { return v.closed }
-func (v *x11Video) SetInterceptClose(on bool)       { v.intercept.Store(on) }
-func (v *x11Video) CloseRequested() <-chan struct{} { return v.closeReq }
+func (v *x11Video) Handle() uintptr         { return uintptr(v.win) }
+func (v *x11Video) Closed() <-chan struct{} { return v.closed }
 
 func (v *x11Video) SetTitle(title string) {
 	for _, p := range []struct {

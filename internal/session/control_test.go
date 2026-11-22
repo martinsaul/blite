@@ -60,10 +60,9 @@ func TestVideoWindowButtons(t *testing.T) {
 		t.Fatalf("eye button: %+v", m)
 	}
 	waitFor(t, "alice stops sending video to bob", 5*time.Second, func() bool { return member(a, "bob").Layer == "off" })
-	audioBefore := member(b, "alice").Audio
-	waitFor(t, "remote audio continues independently of video eye", 5*time.Second, func() bool {
-		return member(b, "alice").Audio > audioBefore
-	})
+	if m := member(b, "alice"); m.Audio != 0 {
+		t.Fatalf("still hearing alice with the eye closed: audio=%d", m.Audio)
+	}
 
 	if err := b.ToggleWatch(alice); err != nil {
 		t.Fatal(err)
@@ -126,37 +125,27 @@ func TestAutoQuality(t *testing.T) {
 
 // fakeWindow stands in for a native video window.
 type fakeWindow struct {
-	mu              sync.Mutex
-	title           string
-	closed          chan struct{}
-	closeReq        chan struct{}
-	closeOnce       sync.Once
-	ignoreIntercept bool
-	intercept       atomic.Bool
-	destroyed       atomic.Bool
-	minimized       atomic.Bool
-	titleCalls      atomic.Int32
-	interceptCalls  atomic.Int32
+	mu         sync.Mutex
+	title      string
+	closed     chan struct{}
+	closeOnce  sync.Once
+	destroyed  atomic.Bool
+	minimized  atomic.Bool
+	titleCalls atomic.Int32
 }
 
 func newFakeWindow(title string) *fakeWindow {
 	return &fakeWindow{
-		title:    title,
-		closed:   make(chan struct{}),
-		closeReq: make(chan struct{}, 1),
+		title:  title,
+		closed: make(chan struct{}),
 	}
 }
 
-func (w *fakeWindow) Handle() uintptr                 { return 0 }
-func (w *fakeWindow) Closed() <-chan struct{}         { return w.closed }
-func (w *fakeWindow) CloseRequested() <-chan struct{} { return w.closeReq }
-func (w *fakeWindow) SetInterceptClose(on bool) {
-	w.interceptCalls.Add(1)
-	w.intercept.Store(on)
-}
-func (w *fakeWindow) PointerInside() bool { return true }
-func (w *fakeWindow) Minimized() bool     { return w.minimized.Load() }
-func (w *fakeWindow) Destroy()            { w.destroyed.Store(true) }
+func (w *fakeWindow) Handle() uintptr         { return 0 }
+func (w *fakeWindow) Closed() <-chan struct{} { return w.closed }
+func (w *fakeWindow) PointerInside() bool     { return true }
+func (w *fakeWindow) Minimized() bool         { return w.minimized.Load() }
+func (w *fakeWindow) Destroy()                { w.destroyed.Store(true) }
 func (w *fakeWindow) SetTitle(t string) {
 	w.titleCalls.Add(1)
 	w.mu.Lock()
@@ -169,18 +158,11 @@ func (w *fakeWindow) Title() string {
 	return w.title
 }
 func (w *fakeWindow) userClose() {
-	if w.intercept.Load() && !w.ignoreIntercept {
-		select {
-		case w.closeReq <- struct{}{}:
-		default:
-		}
-		return
-	}
 	w.closeOnce.Do(func() { close(w.closed) })
 }
 
-// Main streaming window, pop-out / pop-in, pin, close prompt, and auto-close
-// when nothing is watched.
+// Main streaming window, pop-out / pop-in, pin, and auto-close when nothing
+// is watched.
 func TestOwnWindows(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
@@ -189,13 +171,11 @@ func TestOwnWindows(t *testing.T) {
 	cfg := func(n string, v media.ViewKind) Config { return Config{Server: ws, Name: n, View: v, Log: quiet} }
 	ctx := context.Background()
 
-	var prompts atomic.Int32
 	viewer, err := Create(ctx, cfg("viewer", media.ViewGrid), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer viewer.Close()
-	viewer.OnLeavePrompt(func() { prompts.Add(1) })
 	viewer.gridMu.Lock()
 	viewer.gridView = media.ViewCount
 	viewer.openWindow = func(title string, _, _ int) (media.Window, error) {
@@ -239,21 +219,8 @@ func TestOwnWindows(t *testing.T) {
 	viewer.gridMu.Lock()
 	gw := viewer.wins[""].(*fakeWindow)
 	viewer.gridMu.Unlock()
-	if gw.Title() != "Bellion Share" || !gw.intercept.Load() {
-		t.Fatalf("unexpected main window: title=%q intercept=%v", gw.Title(), gw.intercept.Load())
-	}
-
-	// Closing the main window prompts "Leave the session?" without destroying it.
-	gw.userClose()
-	waitFor(t, "leave prompt set", 5*time.Second, func() bool {
-		return viewer.State().LeavePrompt && prompts.Load() >= 1
-	})
-	if gw.destroyed.Load() || winCount() != 1 {
-		t.Fatalf("main window destroyed on close request: destroyed=%v wins=%d", gw.destroyed.Load(), winCount())
-	}
-	viewer.DismissLeavePrompt()
-	if viewer.State().LeavePrompt {
-		t.Fatal("LeavePrompt not cleared by DismissLeavePrompt")
+	if gw.Title() != "Bellion Share" {
+		t.Fatalf("unexpected main window title %q", gw.Title())
 	}
 
 	// Pop out alice: 2 windows open; closing alice's pop-out returns her to main.
@@ -266,8 +233,8 @@ func TestOwnWindows(t *testing.T) {
 	viewer.gridMu.Lock()
 	aliceWin := viewer.wins[aliceID].(*fakeWindow)
 	viewer.gridMu.Unlock()
-	if aliceWin.intercept.Load() || !strings.HasPrefix(aliceWin.Title(), "Bellion Share: alice") {
-		t.Fatalf("unexpected pop-out window: title=%q intercept=%v", aliceWin.Title(), aliceWin.intercept.Load())
+	if !strings.HasPrefix(aliceWin.Title(), "Bellion Share: alice") {
+		t.Fatalf("unexpected pop-out window title %q", aliceWin.Title())
 	}
 	aliceWin.userClose()
 	waitFor(t, "alice returns to main window", 5*time.Second, func() bool {
@@ -307,15 +274,15 @@ func TestOwnWindows(t *testing.T) {
 		t.Fatalf("pin switch failed: alice=%s bob=%s", member(viewer, "alice").FeedState, member(viewer, "bob").FeedState)
 	}
 
-	// Stop watching everyone (including own preview): main window closes silently
-	// without LeavePrompt, and reopens automatically when watching resumes.
+	// Stop watching everyone (including own preview): main window closes, and
+	// reopens automatically when watching resumes.
 	for _, id := range []string{aliceID, bobID, feeds.Self} {
 		if err := viewer.ToggleWatch(id); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if winCount() != 0 || viewer.State().LeavePrompt {
-		t.Fatalf("expected 0 windows and no leavePrompt when nothing watched: wins=%d prompt=%v", winCount(), viewer.State().LeavePrompt)
+	if winCount() != 0 {
+		t.Fatalf("expected 0 windows when nothing watched: wins=%d", winCount())
 	}
 	if err := viewer.ToggleWatch(aliceID); err != nil {
 		t.Fatal(err)
@@ -326,8 +293,8 @@ func TestOwnWindows(t *testing.T) {
 }
 
 // When AutoWatch is off, a new remote sharer shows a closed eye and a short
-// notice in State; no window opens and no video plays until clicked, while
-// remote audio plays independently of video state.
+// notice in State; no window opens and nothing plays, sound included, until
+// clicked.
 func TestAutoWatchOff(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
@@ -365,14 +332,14 @@ func TestAutoWatchOff(t *testing.T) {
 		m := member(viewer, "alice")
 		return st.ShareNotice == "alice started sharing" && m.Eye == feeds.EyeClosed && m.FeedState == feeds.NotWatched
 	})
-	waitFor(t, "alice capped to off while audio plays", 15*time.Second, func() bool {
-		return member(alice, "viewer").Layer == "off" && member(viewer, "alice").Audio > 5
+	waitFor(t, "alice capped to off", 15*time.Second, func() bool {
+		return member(alice, "viewer").Layer == "off"
 	})
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(time.Second)
 	viewer.gridMu.Lock()
 	wins := len(viewer.wins)
 	viewer.gridMu.Unlock()
-	if m := member(viewer, "alice"); wins != 0 || m.Frames != 0 || m.Audio == 0 {
+	if m := member(viewer, "alice"); wins != 0 || m.Frames != 0 || m.Audio != 0 {
 		t.Fatalf("unexpected playback with AutoWatch off: wins=%d frames=%d audio=%d", wins, m.Frames, m.Audio)
 	}
 
@@ -465,8 +432,8 @@ func TestStoppedSharing(t *testing.T) {
 		t.Fatal("no window for the stopped tile")
 	}
 	waitFor(t, "tile gone and window auto-closed", 8*time.Second, func() bool { t, w := tile(); return t.ID == "" && w == nil })
-	if !w.destroyed.Load() || viewer.State().LeavePrompt {
-		t.Fatalf("main window after last stopped tile faded: destroyed=%v leavePrompt=%v", w.destroyed.Load(), viewer.State().LeavePrompt)
+	if !w.destroyed.Load() {
+		t.Fatal("main window not destroyed after last stopped tile faded")
 	}
 
 	if err := alice.SetSource(media.SourceTest); err != nil {
@@ -609,8 +576,12 @@ func TestAudioOnlyAndStoppedVideoAudioWithAutoWatchOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "bob sharing video+audio", 10*time.Second, func() bool {
-		return member(viewer, "bob").Sharing && member(viewer, "bob").Audio > 5
+		return member(viewer, "bob").Sharing
 	})
+	time.Sleep(500 * time.Millisecond)
+	if m := member(viewer, "bob"); m.Audio != 0 {
+		t.Fatalf("hearing bob's share before watching it: audio=%d", m.Audio)
+	}
 	bobID := member(viewer, "bob").ID
 	if err := viewer.ToggleWatch(bobID); err != nil {
 		t.Fatal(err)
@@ -631,29 +602,25 @@ func TestAudioOnlyAndStoppedVideoAudioWithAutoWatchOff(t *testing.T) {
 	})
 }
 
-// M12.3: when the main streaming window closes and the sink can't intercept
-// the close, LeavePrompt is shown and changed() -> regrid() does not reopen
-// the window until the user opens video again or a new share starts.
-func TestNonInterceptedMainWindowCloseDoesNotReopen(t *testing.T) {
+// Closing the main streaming window closes it at once and stops watching
+// (and hearing) its streams; changed() -> regrid() does not reopen it until
+// the user opens video again or a new share starts.
+func TestMainWindowCloseStopsWatching(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
 	defer ts.Close()
 	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 	ctx := context.Background()
 
-	var prompts atomic.Int32
 	viewer, err := Create(ctx, Config{Server: ws, Name: "viewer", View: media.ViewGrid, Log: quiet}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer viewer.Close()
-	viewer.OnLeavePrompt(func() { prompts.Add(1) })
 	viewer.gridMu.Lock()
 	viewer.gridView = media.ViewCount
 	viewer.openWindow = func(title string, _, _ int) (media.Window, error) {
-		w := newFakeWindow(title)
-		w.ignoreIntercept = true // simulate sink/WM that cannot intercept close
-		return w, nil
+		return newFakeWindow(title), nil
 	}
 	viewer.gridMu.Unlock()
 
@@ -665,42 +632,40 @@ func TestNonInterceptedMainWindowCloseDoesNotReopen(t *testing.T) {
 	if err := alice.SetSource(media.SourceTest); err != nil {
 		t.Fatal(err)
 	}
+	if err := alice.SetAudio(audio.Selection{Mode: "test"}); err != nil {
+		t.Fatal(err)
+	}
 
 	winCount := func() int {
 		viewer.gridMu.Lock()
 		defer viewer.gridMu.Unlock()
 		return len(viewer.wins)
 	}
-	waitFor(t, "main window opens for alice", 15*time.Second, func() bool {
-		return winCount() == 1
+	waitFor(t, "main window opens for alice and her sound plays", 15*time.Second, func() bool {
+		return winCount() == 1 && member(viewer, "alice").Audio > 5
 	})
 	aliceID := member(viewer, "alice").ID
 	viewer.gridMu.Lock()
 	w1 := viewer.wins[""].(*fakeWindow)
 	viewer.gridMu.Unlock()
 
-	// User closes the non-intercepted main window: LeavePrompt is shown and
-	// alice is marked NotWatched so the window stays closed.
+	// User closes the main window: it is destroyed and alice is marked
+	// NotWatched, so the window stays closed and her sound stops.
 	w1.userClose()
-	waitFor(t, "main window closed, leave prompt shown, and alice marked NotWatched", 5*time.Second, func() bool {
-		return winCount() == 0 &&
-			member(viewer, "alice").FeedState == feeds.NotWatched &&
-			viewer.State().LeavePrompt &&
-			prompts.Load() == 1
+	waitFor(t, "main window closed and alice marked NotWatched", 5*time.Second, func() bool {
+		return winCount() == 0 && w1.destroyed.Load() &&
+			member(viewer, "alice").FeedState == feeds.NotWatched
 	})
-	// Subsequent changed() / regrid() calls must neither reopen the main window
-	// nor clear LeavePrompt before the user responds.
+	// Subsequent changed() / regrid() calls must not reopen the main window.
 	viewer.changed()
 	viewer.regrid()
-	time.Sleep(300 * time.Millisecond)
-	if winCount() != 0 || member(viewer, "alice").Eye != feeds.EyeClosed || !viewer.State().LeavePrompt {
-		t.Fatalf("after changed/regrid: wins=%d eye=%s leavePrompt=%v",
-			winCount(), member(viewer, "alice").Eye, viewer.State().LeavePrompt)
+	time.Sleep(500 * time.Millisecond)
+	if m := member(viewer, "alice"); winCount() != 0 || m.Eye != feeds.EyeClosed || m.Audio != 0 {
+		t.Fatalf("after changed/regrid: wins=%d eye=%s audio=%d", winCount(), m.Eye, m.Audio)
 	}
-	viewer.DismissLeavePrompt()
-	if viewer.State().LeavePrompt {
-		t.Fatal("LeavePrompt not cleared by DismissLeavePrompt")
-	}
+	waitFor(t, "alice stops sending video", 5*time.Second, func() bool {
+		return member(alice, "viewer").Layer == "off"
+	})
 
 	// Opening video again via the eye reopens the main window.
 	if err := viewer.ToggleWatch(aliceID); err != nil {
@@ -709,16 +674,18 @@ func TestNonInterceptedMainWindowCloseDoesNotReopen(t *testing.T) {
 	if winCount() != 1 || member(viewer, "alice").FeedState != feeds.InMain {
 		t.Fatalf("expected main window reopened via eye: wins=%d state=%s", winCount(), member(viewer, "alice").FeedState)
 	}
+	waitFor(t, "alice's sound plays again", 10*time.Second, func() bool {
+		return member(viewer, "alice").Audio > 5
+	})
 
-	// Close again: prompt fires again, then a brand-new share from bob reopens the main window.
+	// Close again, then a brand-new share from bob reopens the main window.
 	viewer.gridMu.Lock()
 	w2 := viewer.wins[""].(*fakeWindow)
 	viewer.gridMu.Unlock()
 	w2.userClose()
-	waitFor(t, "main window closed a second time with leave prompt", 5*time.Second, func() bool {
-		return winCount() == 0 && viewer.State().LeavePrompt && prompts.Load() == 2
+	waitFor(t, "main window closed a second time", 5*time.Second, func() bool {
+		return winCount() == 0
 	})
-	viewer.DismissLeavePrompt()
 
 	bob, err := Join(ctx, Config{Server: ws, Name: "bob", View: media.ViewCount, Log: quiet}, viewer.sig.Welcome.Room, "")
 	if err != nil {
@@ -817,7 +784,7 @@ func TestDismissedStoppedTileIgnoresInFlightFrame(t *testing.T) {
 	})
 }
 
-// M12.6: regrid calls SetTitle and SetInterceptClose only on change, and rapid
+// M12.6: regrid calls SetTitle only on change, and rapid
 // gotSending reports coalesce background applyAutoQuality goroutines.
 func TestGotSendingCoalescesAutoQualityAndWindowCallsOnChange(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -856,34 +823,34 @@ func TestGotSendingCoalescesAutoQualityAndWindowCallsOnChange(t *testing.T) {
 	viewer.gridMu.Lock()
 	w := viewer.wins[""].(*fakeWindow)
 	viewer.gridMu.Unlock()
-	if gotT, gotI := w.titleCalls.Load(), w.interceptCalls.Load(); gotT != 1 || gotI != 1 {
-		t.Fatalf("initial window calls: SetTitle=%d SetInterceptClose=%d, want 1/1", gotT, gotI)
+	if got := w.titleCalls.Load(); got != 1 {
+		t.Fatalf("initial window calls: SetTitle=%d, want 1", got)
 	}
 
 	for range 8 {
 		viewer.regrid()
 	}
-	if gotT, gotI := w.titleCalls.Load(), w.interceptCalls.Load(); gotT != 1 || gotI != 1 {
-		t.Fatalf("unchanged regrid repeated window calls: SetTitle=%d SetInterceptClose=%d, want 1/1", gotT, gotI)
+	if got := w.titleCalls.Load(); got != 1 {
+		t.Fatalf("unchanged regrid repeated window calls: SetTitle=%d, want 1", got)
 	}
 
-	// Pop out alice: reuses window w for pop-out -> both title and intercept change once.
+	// Pop out alice: reuses window w for pop-out -> its title changes once.
 	if err := viewer.PopOut(aliceID); err != nil {
 		t.Fatal(err)
 	}
-	if gotT, gotI := w.titleCalls.Load(), w.interceptCalls.Load(); gotT != 2 || gotI != 2 {
-		t.Fatalf("after reusing window as pop-out: SetTitle=%d SetInterceptClose=%d, want 2/2", gotT, gotI)
+	if got := w.titleCalls.Load(); got != 2 {
+		t.Fatalf("after reusing window as pop-out: SetTitle=%d, want 2", got)
 	}
 
-	// Rename alice while popped out -> only SetTitle changes, SetInterceptClose stays 2.
+	// Rename alice while popped out -> SetTitle again.
 	if err := alice.Rename("alicia"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "pop-out window title updated on rename", 5*time.Second, func() bool {
 		return strings.HasPrefix(w.Title(), "Bellion Share: alicia")
 	})
-	if gotT, gotI := w.titleCalls.Load(), w.interceptCalls.Load(); gotT != 3 || gotI != 2 {
-		t.Fatalf("after rename: SetTitle=%d SetInterceptClose=%d, want 3/2", gotT, gotI)
+	if got := w.titleCalls.Load(); got != 3 {
+		t.Fatalf("after rename: SetTitle=%d, want 3", got)
 	}
 
 	// Coalescing check: hold autoQMu briefly while firing 200 gotSending reports

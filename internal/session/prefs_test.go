@@ -78,8 +78,8 @@ func TestViewerQualityReachesSender(t *testing.T) {
 	}
 	time.Sleep(800 * time.Millisecond)
 	m2 := member(b, "alice")
-	if m2.Frames != m1.Frames || m2.Audio <= m1.Audio {
-		t.Fatalf("expected video stopped and audio continuing while not watching video: frames %d -> %d, audio %d -> %d", m1.Frames, m2.Frames, m1.Audio, m2.Audio)
+	if m2.Frames != m1.Frames || m2.Audio != 0 {
+		t.Fatalf("expected video and sound stopped while not watching: frames %d -> %d, audio %d -> %d", m1.Frames, m2.Frames, m1.Audio, m2.Audio)
 	}
 
 	if err := b.ToggleWatch(alice); err != nil {

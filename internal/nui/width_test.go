@@ -92,6 +92,9 @@ func (f *fakeBackend) Volunteer(on bool) error {
 	return nil
 }
 
+func (f *fakeBackend) SetVoiceInSystem(bool) error { return nil }
+func (f *fakeBackend) SetHideChangelog(bool) error { return nil }
+
 func (f *fakeBackend) SetPlaySounds(on bool) error {
 	f.mu.Lock()
 	f.sounds = &on
@@ -219,7 +222,8 @@ func (f *fakeBackend) RemoveRecentRoom(server, code string) error {
 	return nil
 }
 
-func (f *fakeBackend) DiscordLogin() {}
+func (f *fakeBackend) DiscordLogin()  {}
+func (f *fakeBackend) DiscordUnlink() {}
 
 func (f *fakeBackend) GoLiveInChannel(context.Context, string, bool) error {
 	f.mu.Lock()
@@ -271,9 +275,9 @@ func demoState(inCall bool) app.UIState {
 			ShareNotice: "Bob started sharing",
 			Members: []session.Member{
 				{ID: "a", Name: "Bob", Tag: "2926", Client: "0.1.0 (83) windows", State: "connected", Pair: "host/srflx", Layer: "high", Limit: "bandwidth", Auto: "off",
-					RTTms: 152, Loss: 0.06, TxKbps: 3050, RxKbps: 4100, Quality: "auto", Volume: 1, Recv: 720, Sharing: true, Watching: true, Eye: feeds.EyeOpen, Owner: true, KeyChanged: true},
+					RTTms: 152, Loss: 0.06, TxKbps: 3050, RxKbps: 4100, Quality: "auto", Volume: 1, Recv: 720, Sharing: true, Watching: true, Eye: feeds.EyeOpen, Owner: true, KeyChanged: true, Heard: true, Loud: true},
 				{ID: "b", Name: "Carol", Tag: "0815", Client: "0.1.0 (83) linux", State: "connected", Layer: "high",
-					RTTms: 35, TxKbps: 2800, RxKbps: 3500, Quality: "auto", Volume: 1, Recv: 1080, Sharing: true, Watching: false, Eye: feeds.EyeClosed},
+					RTTms: 35, TxKbps: 2800, RxKbps: 3500, Quality: "auto", Volume: 1, Recv: 1080, Sharing: true, Watching: false, Eye: feeds.EyeClosed, Muted: true},
 				{ID: "c", Name: "Dave", Tag: "7301", Client: "0.1.0 (82) windows", State: "unreachable", Quality: "auto", Volume: 1, Eye: feeds.EyeGrey,
 					Hint: "No connection between you yet; trying again. If it keeps failing, a firewall may block it: send logs from both sides."},
 				{ID: "d", Name: "Eve", Tag: "1111", State: "untrusted", Quality: "low", Eye: feeds.EyeGrey},
@@ -374,13 +378,43 @@ func TestControlWindowInteractions(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Your name...", "Your identity key...", "Servers...", "Language",
-		"Start Bellion Share when I sign in", "Play sounds",
-		"Start watching new streams automatically", "Check for updates",
+		"Open at sign-in", "Check for updates",
 	} {
 		if !slices.Contains(gearLabels, want) {
 			t.Errorf("gear menu missing %q (got %v)", want, gearLabels)
 		}
 	}
+	for _, moved := range []string{ // now in the call footer and Share options
+		"Play sounds", "Start watching new streams automatically",
+		"Include voice chat apps (Discord, TeamSpeak...) in whole-system audio",
+	} {
+		if slices.Contains(gearLabels, moved) {
+			t.Errorf("gear menu still has %q", moved)
+		}
+	}
+
+	// Footer toggles: sounds and auto-watch, both on in the demo, turn off.
+	test.Tap(u.call.sounds)
+	test.Tap(u.call.autoWatch)
+	// The speaker mutes Bob locally, keeping his quality and volume.
+	test.Tap(u.call.people["a"].speaker)
+	for i := 0; i < 400; i++ {
+		be.mu.Lock()
+		done := be.sounds != nil && be.autoWatch != nil && be.peerMuted
+		be.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	be.mu.Lock()
+	if be.sounds == nil || *be.sounds || be.autoWatch == nil || *be.autoWatch {
+		t.Errorf("footer toggles: sounds %v, auto-watch %v; want both off", be.sounds, be.autoWatch)
+	}
+	if !be.peerMuted || be.peerVol != 1 || be.peerQuality != "auto" {
+		t.Errorf("speaker: muted %v vol %v quality %q; want muted at 1, auto", be.peerMuted, be.peerVol, be.peerQuality)
+	}
+	be.mu.Unlock()
 
 	var helpLabels []string
 	for _, it := range u.helpMenuItems() {

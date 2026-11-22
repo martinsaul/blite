@@ -67,6 +67,15 @@ type Config struct {
 	// Discord Developer Portal used to verify POST /v1/discord/interactions.
 	// Empty = the interactions endpoint is off.
 	DiscordPublicKey string
+	// DiscordBotToken turns on following linked users' voice channels
+	// through a bot on Discord's Gateway (with DiscordClientID and
+	// DiscordSecret, for linking). DiscordLinksFile keeps the links
+	// (default: discord-links.json next to StateFile; neither = memory
+	// only). DiscordLinkRedirect is the OAuth redirect URI registered on
+	// the Discord app (default https://bellion.app/v1/discord/linked).
+	DiscordBotToken     string
+	DiscordLinksFile    string
+	DiscordLinkRedirect string
 	// ReportDir stores client log reports (POST /v1/report). Empty = the
 	// endpoint is off.
 	ReportDir string
@@ -104,6 +113,7 @@ type Server struct {
 	mux           *http.ServeMux
 	releases      *releases // the download page (nil = off)
 	discordPubKey ed25519.PublicKey
+	discord       *discordFollow // nil = no Discord bot
 	started       time.Time
 	saveMu        sync.Mutex // one SaveState at a time; guards blueGreen's mode changes
 	standbyState
@@ -164,6 +174,11 @@ func New(cfg Config) *Server {
 	if cfg.DiscordClientID != "" && cfg.DiscordSecret != "" {
 		s.mux.HandleFunc("POST /v1/discord/token", s.handleDiscordToken)
 	}
+	if cfg.DiscordBotToken != "" && cfg.DiscordClientID != "" && cfg.DiscordSecret != "" {
+		s.discord = newDiscordFollow(s)
+		s.mux.HandleFunc("GET /v1/discord/follow", s.handleDiscordFollow)
+		s.mux.HandleFunc("GET /v1/discord/linked", s.handleDiscordLinked)
+	}
 	if cfg.DiscordPublicKey != "" {
 		pk, err := hex.DecodeString(strings.TrimSpace(cfg.DiscordPublicKey))
 		if err != nil || len(pk) != ed25519.PublicKeySize {
@@ -188,6 +203,11 @@ func New(cfg Config) *Server {
 	for _, p := range docPages {
 		s.mux.HandleFunc("GET "+p.Path, s.canonicalHost(staticPage(docsHTML[p.Path])))
 	}
+	// /bot: the short link the app gives users to pass on to a Discord
+	// server's admin: what the bot sees, and its Add to Discord button.
+	s.mux.HandleFunc("GET /bot", s.canonicalHost(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs/discord#add-the-bot", http.StatusFound)
+	}))
 	s.mux.HandleFunc("GET /docs/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs", http.StatusMovedPermanently)
 	})
@@ -218,6 +238,9 @@ func (s *Server) Run(ctx context.Context) {
 		// nobody is back.
 		_, err := os.Stat(s.cfg.LiveFile)
 		s.live.Store(err == nil)
+	}
+	if s.discord != nil {
+		go s.discord.bot.Run(ctx)
 	}
 	if s.cfg.StateFile != "" {
 		go func() {

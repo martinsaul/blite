@@ -36,7 +36,7 @@
 <ul>
   <li>Sharing the entire screen starts without sound: the sharer picks the sound in <em>Share options</em> (or clicks <em>No audio</em> on the home screen). Sharing a window shares that app's sound automatically.</li>
   <li>"This window's app audio isn't available" means Bellion Share couldn't find the app the window belongs to (for example an app running as administrator). Pick <em>Whole system</em> or <em>Only these apps...</em> instead. With <em>Only these apps...</em>, apps appear in the list while they play audio.</li>
-  <li>Check you're watching them (the eye next to their name), that you haven't muted them or turned their volume down, and pick the right device under <em>Share options &gt; Play the call on</em>.</li>
+  <li>Check you're watching them (the eye next to their name), that you haven't muted them (their speaker is struck through) or turned their volume down, and pick the right device under <em>Share options &gt; Play the call on</em>.</li>
   <li><em>Whole system</em> leaves out Bellion Share itself, so the call isn't sent back.</li>
 </ul>
 
@@ -48,6 +48,9 @@
 
 <h2>The safety codes don't match</h2>
 <p>If someone's safety code differs from yours, the connection may be intercepted. Leave the session and start a new one. Bellion Share also refuses to connect to anyone whose encryption keys don't match their identity, and warns about it.</p>
+
+<h2>"The server's certificate isn't from a trusted public authority"</h2>
+<p>Bellion Share accepts the bellion.app server's certificate only from the public authorities it is issued by (Let's Encrypt, Google Trust Services, SSL.com). This message means something between you and the server shows another certificate so that it can read the connection. Usually that is a company network's proxy or antivirus software that scans HTTPS. Exclude Bellion Share or bellion.app from the antivirus's HTTPS or web scanning, or use another network. On your own server, see <a href="/docs/self-hosting#pinning">certificate pinning</a>.</p>
 
 <h2>"Bellion Share ... is required"</h2>
 <p>Your version is too old to start or join sessions. Press <em>Install and restart</em> in the note (or use <em>Check for updates</em> in the gear menu). When the app only says a newer version is available, you can keep using it and update when convenient; installing during a call restarts the app and rejoins the call.</p>

@@ -262,12 +262,25 @@ type eyeToggle struct {
 	eye   feeds.Eye
 	hover bool
 	onTap func()
+	tips  *tooltips
+	tip   string // the tooltip: what a tap does, or why it can't
 }
 
-func newEyeToggle(onTap func()) *eyeToggle {
-	e := &eyeToggle{eye: feeds.EyeGrey, onTap: onTap}
+func newEyeToggle(tips *tooltips, onTap func()) *eyeToggle {
+	e := &eyeToggle{eye: feeds.EyeGrey, onTap: onTap, tips: tips}
 	e.ExtendBaseWidget(e)
 	return e
+}
+
+// SetTip sets the tooltip.
+func (e *eyeToggle) SetTip(tip string) {
+	if e.tip == tip {
+		return
+	}
+	e.tip = tip
+	if e.hover {
+		e.tips.Show(e, tip)
+	}
 }
 
 func (e *eyeToggle) SetEye(st feeds.Eye) {
@@ -299,8 +312,9 @@ func (e *eyeToggle) Cursor() desktop.Cursor {
 }
 
 func (e *eyeToggle) MouseIn(*desktop.MouseEvent) {
+	e.hover = true
+	e.tips.Show(e, e.tip)
 	if e.active() {
-		e.hover = true
 		e.Refresh()
 	}
 }
@@ -308,6 +322,7 @@ func (e *eyeToggle) MouseIn(*desktop.MouseEvent) {
 func (e *eyeToggle) MouseMoved(*desktop.MouseEvent) {}
 
 func (e *eyeToggle) MouseOut() {
+	e.tips.Hide(e)
 	if e.hover {
 		e.hover = false
 		e.Refresh()
@@ -360,7 +375,7 @@ func (r *eyeRenderer) Refresh() {
 }
 
 func (r *eyeRenderer) Objects() []fyne.CanvasObject { return r.objs }
-func (r *eyeRenderer) Destroy()                     {}
+func (r *eyeRenderer) Destroy()                     { r.e.tips.Hide(r.e) }
 
 // iconDotButton is a compact header icon button (Gear, "?") with an optional
 // notification dot at top right.

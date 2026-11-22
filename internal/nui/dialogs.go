@@ -66,26 +66,6 @@ func (u *UI) leave() {
 	})
 }
 
-func (u *UI) showLeaveStreamDialog() {
-	d := dialog.NewCustomConfirm(
-		i18n.L("Leave the session?"),
-		i18n.L("Leave"),
-		i18n.L("Cancel"),
-		label(i18n.L("You can rejoin with the link while the session is open.")),
-		func(ok bool) {
-			u.leaveDialogShown = false
-			if ok {
-				u.a.Leave()
-			} else {
-				u.a.DismissLeavePrompt()
-			}
-		},
-		u.win,
-	)
-	d.Resize(fyne.NewSize(420, 0))
-	d.Show()
-}
-
 func (u *UI) copyLink() {
 	if s := u.st.Session; s != nil {
 		u.ownLink = s.Link // not offered as "a link you copied" after leaving

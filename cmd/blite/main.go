@@ -44,6 +44,7 @@ import (
 	"blite/internal/identity"
 	"blite/internal/media"
 	"blite/internal/nui"
+	certpin "blite/internal/pin"
 	"blite/internal/portmap"
 	"blite/internal/proto"
 	"blite/internal/redact"
@@ -115,6 +116,8 @@ func main() {
 			app.BuiltInAliases = append(app.BuiltInAliases, h)
 		}
 	}
+	certpin.Install(http.DefaultTransport.(*http.Transport))
+	certpin.SetPinned(app.BuiltInPinned(*server))
 	ch, pin := updateChannel(*channel, *pinned, flagSet("channel"), molt.UpdateResult() != "")
 
 	log, logOut := newLogger(stderr{}, *jsonLog, clientMeta().Label())
@@ -355,11 +358,15 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	go diag.WatchModules(context.Background(), log)
 	cfg.Port = openPort() // after the hand-over: one instance maps the port
 	a := app.New(cfg, src)
+	certpin.SetPinned(a.PinnedHost)
 	if cfg.Port != nil {
 		defer cfg.Port.Close()
 		cfg.Port.Watch(a.Notify)
 	}
 	a.Updates = update.New(cfg.Client.AppVersion, int64(cfg.Client.Build), channel, pinChannel, log)
+	if a.Updates != nil {
+		a.Updates.OnChange = a.Notify
+	}
 	if cfg.Client.Build > 0 {
 		a.Exe = installDefaults(log)
 	}
@@ -659,4 +666,8 @@ func systemText(a *app.App) string {
 func logSystem(log *slog.Logger) {
 	log.Info("system", "os", runtime.GOOS+"/"+runtime.GOARCH, "osVersion", clientMeta().OSVersion,
 		"cpus", runtime.NumCPU(), "encoders", strings.Join(media.AvailableEncoders(), ","))
+	if err := noThrottle(); err != nil {
+		log.Warn("power throttling opt-out failed", "err", err)
+	}
+	media.PrepareVideo()
 }

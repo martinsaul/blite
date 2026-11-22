@@ -1,6 +1,9 @@
 package rtc
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestKeyGate(t *testing.T) {
 	idr := []byte{0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 1, 0x65, 9}
@@ -25,7 +28,26 @@ func TestKeyGate(t *testing.T) {
 	if !g.pass(idr, 0) {
 		t.Fatal("keyframe after loss")
 	}
-	if hasIDR(p) || !hasIDR(idr) {
-		t.Fatal("hasIDR")
+	if HasIDR(p) || !HasIDR(idr) {
+		t.Fatal("HasIDR")
+	}
+}
+
+// Without an IDR the gate stays shut however long it waits, asking again
+// every keyAsk.
+func TestKeyGateNeverOpensWithoutIDR(t *testing.T) {
+	p := []byte{0, 0, 0, 1, 0x41, 9, 9}
+	plis := 0
+	g := &keyGate{pli: func() { plis++ }}
+	g.lost()
+	g.since = time.Now().Add(-time.Minute)
+	for range 3 {
+		g.asked = time.Time{}
+		if g.pass(p, 0) {
+			t.Fatal("a P frame passed a long wait without an IDR")
+		}
+	}
+	if plis != 3 {
+		t.Fatalf("PLIs %d, want one per keyAsk", plis)
 	}
 }

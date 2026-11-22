@@ -137,8 +137,9 @@ func (f *fake) PopOut(string) error                                  { return ni
 func (f *fake) Pin(string) error                                     { return nil }
 func (f *fake) SetAutoWatch(on bool) error                           { f.autoWatch = append(f.autoWatch, on); return nil }
 func (f *fake) SetPlaySounds(bool) error                             { return nil }
+func (f *fake) SetVoiceInSystem(bool) error                          { return nil }
+func (f *fake) SetHideChangelog(bool) error                          { return nil }
 func (f *fake) SetPortMap(bool) error                                { return nil }
-func (f *fake) DismissLeavePrompt()                                  {}
 func (f *fake) SendLogsNow(context.Context) error                    { return nil }
 func (f *fake) OpenLogFolder() error                                 { return nil }
 func (f *fake) ProbeRecentRooms()                                    {}

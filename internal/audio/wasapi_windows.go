@@ -28,11 +28,13 @@ type Sharer struct {
 	mu    sync.Mutex
 	sel   Selection
 	shown shareLog
+	log   *slog.Logger
+	voice string // the voice apps whole-system sharing last left out
 }
 
 // NewSharer: log (nil = none) gets the processes each selection captures.
 func NewSharer(log *slog.Logger) (*Sharer, error) {
-	return &Sharer{sel: Selection{Mode: "none"}, shown: shareLog{log: orDiscard(log)}}, nil
+	return &Sharer{sel: Selection{Mode: "none"}, shown: shareLog{log: orDiscard(log)}, log: orDiscard(log)}, nil
 }
 
 func (s *Sharer) Select(sel Selection) error {
@@ -96,24 +98,77 @@ func (s *Sharer) Capture() CaptureSource {
 	s.mu.Unlock()
 	switch sel.Mode {
 	case "system":
+		if pids, ok := s.systemPIDs(); ok {
+			return mix(pids)
+		}
 		return CaptureSource(loopback("exclude-process-tree", os.Getpid()))
 	case "window", "apps":
-		pids := targetPIDs(sel)
-		switch len(pids) {
-		case 0:
-			return silence
-		case 1:
-			return CaptureSource(loopback("include-process-tree", pids[0]))
-		}
-		var b strings.Builder
-		b.WriteString("audiomixer name=amix ")
-		for _, pid := range pids {
-			fmt.Fprintf(&b, " %s ! audioconvert ! audioresample ! amix. ", loopback("include-process-tree", pid))
-		}
-		b.WriteString(" amix.")
-		return CaptureSource(b.String())
+		return mix(targetPIDs(sel))
 	}
 	return silence
+}
+
+// mix captures the process trees of pids, mixed.
+func mix(pids []int) CaptureSource {
+	switch len(pids) {
+	case 0:
+		return silence
+	case 1:
+		return CaptureSource(loopback("include-process-tree", pids[0]))
+	}
+	var b strings.Builder
+	b.WriteString("audiomixer name=amix ")
+	for _, pid := range pids {
+		fmt.Fprintf(&b, " %s ! audioconvert ! audioresample ! amix. ", loopback("include-process-tree", pid))
+	}
+	b.WriteString(" amix.")
+	return CaptureSource(b.String())
+}
+
+// systemPIDs: while a voice chat app has an audio session (and voice isn't
+// included), whole-system sharing is the mix of every other app with one
+// (ok); otherwise everything but us (!ok), which also catches apps that
+// start playing later. The session watches Capture for changes.
+func (s *Sharer) systemPIDs() ([]int, bool) {
+	if includeVoice.Load() {
+		s.noteVoice(nil)
+		return nil, false
+	}
+	pids, err := sessionPIDs()
+	if err != nil {
+		s.log.Warn("audio sessions", "err", err)
+		return nil, false
+	}
+	own := os.Getpid()
+	var keep []int
+	var voice []string
+	for _, pid := range pids {
+		name := exeName(uint32(pid))
+		switch {
+		case pid == own || name == "":
+		case isVoiceApp(name):
+			voice = append(voice, fmt.Sprintf("%s pid=%d", name, pid))
+		default:
+			keep = append(keep, pid)
+		}
+	}
+	sort.Ints(keep)
+	s.noteVoice(voice)
+	return keep, len(voice) > 0
+}
+
+func (s *Sharer) noteVoice(voice []string) {
+	sort.Strings(voice)
+	v := strings.Join(voice, ", ")
+	s.mu.Lock()
+	changed := v != s.voice
+	s.voice = v
+	s.mu.Unlock()
+	if changed && v != "" {
+		s.log.Info("whole-system audio leaves out voice chat", "apps", v)
+	} else if changed {
+		s.log.Info("whole-system audio: everything but Bellion Share")
+	}
 }
 
 var (

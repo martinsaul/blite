@@ -20,7 +20,9 @@ var tileSeq atomic.Uint64
 // Grid canvas: the window starts at this size and scales with the window.
 const (
 	gridW, gridH = 1920, 1080
-	gridFPS      = 30
+	GridFPS      = 30 // video windows' usual frame rate
+	// GridFastFPS is the frame rate for windows that show a faster stream.
+	GridFastFPS = 60
 )
 
 // Tile is one stream in a video window.
@@ -65,6 +67,9 @@ type GridConfig struct {
 	View       ViewKind // ViewWindow, or ViewCount for headless tests
 	// Width x Height is the canvas (the window's first size); 0 = 1920x1080.
 	Width, Height int
+	// FPS is the window's frame rate; 0 = GridFPS. Streams faster than it
+	// show at its rate.
+	FPS int
 	// OnControl gets the controls used on a tile with an ID (v: the
 	// volume for ControlVolume); nil = no controls. It runs on its own
 	// goroutine.
@@ -291,6 +296,10 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	if cw <= 0 || ch <= 0 {
 		cw, ch = gridW, gridH
 	}
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = GridFPS
+	}
 	rects, outW, outH := layoutRects(tiles, cw, ch, cfg.Rows, cfg.Cols)
 	controls := cfg.OnControl != nil
 	ovs := make([]tileOverlay, len(tiles))
@@ -351,34 +360,45 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		next++
 		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d sink_%d::zorder=%d", pad, r.x-pipFrame, pad, r.y-pipFrame, pad, next, i, next+1)
 		frame = fmt.Sprintf(" videotestsrc is-live=true pattern=solid-color foreground-color=%#x ! "+
-			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, gridFPS, pad)
+			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, fps, pad)
 	}
 	for _, l := range layers {
 		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d %s::alpha=0", l.pad, l.x, l.pad, l.y, l.pad, next+2, l.pad)
 	}
-	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, gridFPS, sink)
+	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, fps, sink)
+	// intervideosrc reports a latency of 0..0 and a live videotestsrc one
+	// frame..one frame: together the compositor's latency query fails
+	// (min > max), logging an error on every query, ~180 a second. A
+	// queue after each intervideosrc lifts its maximum.
+	inter := ""
+	for _, t := range tiles {
+		if t.Stopped || frame != "" {
+			inter = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
+		}
+	}
 	for i, t := range tiles {
 		r := rects[i]
 		if t.Stopped { // black, the text in the middle (showStateLocked sets it)
 			fmt.Fprintf(&b, " videotestsrc is-live=true pattern=black ! "+
 				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! "+
 				"textoverlay name=label%d valignment=center halignment=center font-desc=\"Sans 28\" ! mix.sink_%d",
-				r.w, r.h, gridFPS, i, i)
+				r.w, r.h, fps, i, i)
 			continue
 		}
 		wait := ""
 		if ovs[i].spinPad != "" {
 			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=%s valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i, launchQuote(i18n.L("Waiting for video")))
 		}
-		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! videoscale add-borders=true ! "+
-			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
+		// The framerate sets intervideosrc's, which is 30 unless asked.
+		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! videoscale add-borders=true ! "+
+			"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
 			"textoverlay name=label%d valignment=top halignment=left font-desc=\"%s\" shaded-background=true ! %smix.sink_%d",
-			t.Channel, interHold, r.w, r.h, i, labelFont(ovs[i].barPad == ""), wait, i)
+			t.Channel, interHold, inter, r.w, r.h, fps, i, labelFont(ovs[i].barPad == ""), wait, i)
 	}
 	b.WriteString(frame)
 	for _, l := range layers {
 		// intervideosrc repeats the last frame we drew, like the tiles.
-		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! videoconvert ! mix.%s", l.ch, interHold, l.pad)
+		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! mix.%s", l.ch, interHold, inter, l.pad)
 		fmt.Fprintf(&feed, " appsrc name=%s is-live=true format=time do-timestamp=true "+
 			"caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=0/1 ! intervideosink channel=%s sync=false ",
 			l.appsrc, l.w, l.h, l.ch)

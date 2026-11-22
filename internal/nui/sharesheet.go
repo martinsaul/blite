@@ -2,12 +2,14 @@ package nui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
@@ -37,9 +39,12 @@ type shareSheet struct {
 	audioSeg *segmented
 	// noWinAudioNote: the shared window's app audio can't be shared.
 	noWinAudioNote *widget.Label
-	outSel         *widget.Select
-	devByLabel     map[string]string
-	devKey         string
+	// voice: "Include voice apps", under Whole system only.
+	voice      *widget.Check
+	voiceSlide *slideBox
+	outSel     *widget.Select
+	devByLabel map[string]string
+	devKey     string
 
 	advBtn        *widget.Button
 	advOpen       bool
@@ -145,6 +150,16 @@ func newShareSheet(u *UI) *shareSheet {
 		apps := s.cur.Audio.Apps
 		u.do(func() error { return u.a.SetAudio(val, apps) })
 	})
+
+	s.voice = widget.NewCheck(i18n.L("Include voice apps (Discord, TeamSpeak...)"), func(on bool) {
+		if s.setting {
+			return
+		}
+		u.do(func() error { return u.a.SetVoiceInSystem(on) })
+	})
+	indent := canvas.NewRectangle(color.Transparent)
+	indent.SetMinSize(fyne.NewSize(12, 0))
+	s.voiceSlide = newSlideBox(container.NewBorder(nil, nil, indent, nil, s.voice))
 
 	s.outSel = widget.NewSelect(nil, func(sel string) {
 		if s.setting {
@@ -373,12 +388,14 @@ func newShareSheet(u *UI) *shareSheet {
 		s.resNote,
 		bold(i18n.L("Audio")),
 		s.audioSeg,
+		s.voiceSlide,
 		s.noWinAudioNote,
 		bold(i18n.L("Play the call on")),
 		outRow,
 		container.NewHBox(s.advBtn),
 		s.advBox,
 	)
+	s.voiceSlide.relayout = s.content.Refresh
 	s.root = container.NewVScroll(container.New(&insetLayout{pad: 4, padRight: 16}, s.content))
 	return s
 }
@@ -516,6 +533,7 @@ func (s *shareSheet) syncAudioSeg(sh app.ShareConfig) {
 	}
 	s.audioSeg.cols = 2
 	s.audioSeg.SetOptions(audioSegOptions(window), sel)
+	s.voiceSlide.SetOpen(sel == "system")
 }
 
 func normalizeShareState(st app.UIState) app.ShareConfig {
@@ -610,6 +628,7 @@ func (s *shareSheet) update(st app.UIState) {
 	}
 
 	s.syncAudioSeg(sh)
+	s.voice.SetChecked(st.VoiceInSystem)
 
 	// Output devices dropdown.
 	defLbl := i18n.L("System default")

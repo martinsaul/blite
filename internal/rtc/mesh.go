@@ -1245,9 +1245,9 @@ func (m *Mesh) receive(r *remote, t *webrtc.TrackRemote) {
 	}
 	var sb *samplebuilder.SampleBuilder
 	var kg *keyGate
-	newDecode := func() {
+	newDecode := func(origin string) {
 		sb = samplebuilder.New(512, &codecs.H264Packet{}, t.Codec().ClockRate)
-		kg = &keyGate{pli: func() {
+		kg = &keyGate{log: m.opt.Log, peer: m.name(origin), pli: func() {
 			r.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(t.SSRC())}})
 		}}
 	}
@@ -1274,7 +1274,7 @@ func (m *Mesh) receive(r *remote, t *webrtc.TrackRemote) {
 				if isSlot {
 					o.setSrc(src, r, t)
 				}
-				newDecode()
+				newDecode(oid)
 			}
 			last = o
 		}
