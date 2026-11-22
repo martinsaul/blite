@@ -1,5 +1,12 @@
 [
  {
+  "build": 214,
+  "date": "2026-11-22",
+  "changes": [
+   "The volume slider on a video moves again when you click or drag it, and the other buttons on that bar update again."
+  ]
+ },
+ {
   "build": 213,
   "date": "2026-11-22",
   "changes": [

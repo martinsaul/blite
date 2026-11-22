@@ -399,8 +399,11 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	for _, l := range layers {
 		// intervideosrc repeats the last frame we drew, like the tiles.
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! mix.%s", l.ch, interHold, inter, l.pad)
+		// async=false: a layer not drawn yet (the spinner until a stream
+		// waits) would hold the feed short of PLAYING, and the bar's sink
+		// would block on its first frame, never showing a redraw.
 		fmt.Fprintf(&feed, " appsrc name=%s is-live=true format=time do-timestamp=true "+
-			"caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=0/1 ! intervideosink channel=%s sync=false ",
+			"caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=0/1 ! intervideosink channel=%s sync=false async=false ",
 			l.appsrc, l.w, l.h, l.ch)
 	}
 	g := &Grid{win: win}

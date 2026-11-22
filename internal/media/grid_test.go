@@ -488,3 +488,66 @@ func TestStartGridViewCountWindowNoRace(t *testing.T) {
 		}
 	}
 }
+
+// Clicking a tile's volume slider redraws the slider in the composed
+// picture, not just the volume.
+func TestGridSliderRedraws(t *testing.T) {
+	Init()
+	got := make(chan float64, 16)
+	g, err := startGrid(GridConfig{
+		Tiles: []Tile{{Channel: NewPreviewChannel(), Label: "alice", ID: "a", Volume: 0.2}},
+		View:  ViewCount,
+		Width: 640, Height: 360,
+		OnControl: func(id string, c Control, v float64) {
+			if c == ControlVolume {
+				got <- v
+			}
+		},
+	}, "video/x-raw,format=RGBA ! appsink name=vsink sync=false max-buffers=1 drop=true", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	sink, err := g.element("vsink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := g.ctl.ov[0]
+	at := func(f float64) (int, int) {
+		return o.barX + int((barSliderX0+f*(barSliderX1-barSliderX0))*float64(o.barH)), o.barY + o.barH/2
+	}
+	luma := func(f float64) int {
+		t.Helper()
+		x, y := at(f)
+		var data []byte
+		for range 5 { // the newest frame
+			if d, _, err := sink.Pull(time.Second); err == nil {
+				data = d
+			}
+		}
+		if data == nil {
+			t.Fatal("no frame")
+		}
+		p := (y*640 + x) * 4
+		return int(data[p]) + int(data[p+1]) + int(data[p+2])
+	}
+	x, y := at(0.5)
+	sink.SendMouse(false, float64(x), float64(y)) // show the controls
+	time.Sleep(300 * time.Millisecond)
+	before := luma(0.7)
+	x, y = at(0.9)
+	sink.SendPress(float64(x), float64(y))
+	sink.SendMouse(true, float64(x), float64(y))
+	select {
+	case v := <-got:
+		t.Logf("volume %.2f", v)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no volume change")
+	}
+	time.Sleep(300 * time.Millisecond)
+	after := luma(0.7)
+	t.Logf("slider at 70%%: luma %d before, %d after", before, after)
+	if after <= before+60 {
+		t.Fatalf("the slider didn't redraw: luma %d before, %d after", before, after)
+	}
+}
