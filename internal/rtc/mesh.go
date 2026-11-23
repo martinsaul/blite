@@ -23,7 +23,6 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtcp"
-	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 
@@ -1246,7 +1245,7 @@ func (m *Mesh) receive(r *remote, t *webrtc.TrackRemote) {
 	var sb *samplebuilder.SampleBuilder
 	var kg *keyGate
 	newDecode := func(origin string) {
-		sb = samplebuilder.New(512, &codecs.H264Packet{}, t.Codec().ClockRate)
+		sb = newVideoSampleBuilder(t.Codec().ClockRate)
 		kg = &keyGate{log: m.opt.Log, peer: m.name(origin), pli: func() {
 			r.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(t.SSRC())}})
 		}}

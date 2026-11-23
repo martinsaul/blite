@@ -1,5 +1,16 @@
 [
  {
+  "build": 215,
+  "date": "2026-11-22",
+  "changes": [
+   "Stopping your share now stops its sound too. You can still share sound on its own.",
+   "4K streams now load: their picture could fail to appear.",
+   "When your computer briefly can't keep up at the start, Bellion no longer drops you to a lower quality for good, and it tries your chosen quality again later.",
+   "Bellion opens where you left it, at the same size, after an update or restart.",
+   "The scroll bar under the quality choices no longer covers them."
+  ]
+ },
+ {
   "build": 214,
   "date": "2026-11-22",
   "changes": [

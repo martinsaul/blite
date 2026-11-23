@@ -133,6 +133,9 @@ func Run(a ui.Backend, o Options) {
 	})
 	fa.Lifecycle().SetOnStarted(func() {
 		fyne.Do(u.refresh) // the first draw, on Fyne's thread
+		if o.Scene == "" {
+			u.keepWinGeom()
+		}
 		if o.Scene != "" {
 			go func() {
 				time.Sleep(250 * time.Millisecond)

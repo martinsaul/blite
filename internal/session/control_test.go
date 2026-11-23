@@ -562,8 +562,9 @@ func TestAudioOnlyAndStoppedVideoAudioWithAutoWatchOff(t *testing.T) {
 		return !m.Muted && m.Volume == 1.4 && m.Audio > aBefore+5
 	})
 
-	// Case 2: bob shares video + audio, viewer watches bob, then bob stops video
-	// while keeping audio (with AutoWatch still off on viewer).
+	// Case 2: bob shares video + audio, viewer watches bob, then bob stops
+	// video (which stops his audio too) and shares audio only (with AutoWatch
+	// still off on viewer).
 	bob, err := Join(ctx, Config{Server: ws, Name: "bob", View: media.ViewCount, Log: quiet}, viewer.sig.Welcome.Room, "")
 	if err != nil {
 		t.Fatal(err)
@@ -596,8 +597,16 @@ func TestAudioOnlyAndStoppedVideoAudioWithAutoWatchOff(t *testing.T) {
 	waitFor(t, "bob video stopped", 5*time.Second, func() bool {
 		return !member(viewer, "bob").Sharing
 	})
+	// Stopping the video stopped the audio with it.
+	if m := bob.State().Audio.Mode; m != "none" {
+		t.Fatalf("bob's audio is %q after he stopped his video, want none", m)
+	}
+	// Audio on its own again: the viewer hears it without video.
+	if err := bob.SetAudio(audio.Selection{Mode: "test"}); err != nil {
+		t.Fatal(err)
+	}
 	bobAudioAfterStop := member(viewer, "bob").Audio
-	waitFor(t, "viewer continues hearing bob after bob stops video", 5*time.Second, func() bool {
+	waitFor(t, "viewer hears bob's audio-only share after his video stopped", 5*time.Second, func() bool {
 		return member(viewer, "bob").Audio > bobAudioAfterStop+15
 	})
 }

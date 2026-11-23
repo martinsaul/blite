@@ -3,6 +3,9 @@ package rtc
 import (
 	"log/slog"
 	"time"
+
+	"github.com/pion/rtp/codecs"
+	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 )
 
 // keyGate keeps damaged video away from the decoders. After lost packets,
@@ -95,4 +98,19 @@ func HasIDR(au []byte) bool {
 		}
 	}
 	return false
+}
+
+// Frames of up to videoMaxPackets packets (about 5 MB) can be put together:
+// a 4K keyframe runs past 600 KB (512 packets, the old limit), and the
+// sample builder dropped the start of any larger frame, so its IDR never
+// reached the key gate and the picture never came. videoMaxDelay bounds the
+// wait for a lost packet instead (the frames of one picture share a
+// timestamp, so a big keyframe isn't cut by it).
+const (
+	videoMaxPackets = 4096
+	videoMaxDelay   = time.Second
+)
+
+func newVideoSampleBuilder(clockRate uint32) *samplebuilder.SampleBuilder {
+	return samplebuilder.New(videoMaxPackets, &codecs.H264Packet{}, clockRate, samplebuilder.WithMaxTimeDelay(videoMaxDelay))
 }

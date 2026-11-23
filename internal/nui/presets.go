@@ -64,10 +64,14 @@ type presetBar struct {
 func newPresetBar(onPick, onRemove func(app.QualityPreset), onAdd func()) *presetBar {
 	b := &presetBar{onPick: onPick, onRemove: onRemove}
 	b.box = container.NewHBox()
-	b.scroll = container.NewHScroll(b.box)
+	// Room under the chips for the scroll bar, which is drawn over the
+	// content: it would cover their lower half.
+	under := canvas.NewRectangle(nil)
+	under.SetMinSize(fyne.NewSize(0, theme.Size(theme.SizeNameScrollBar)+theme.Padding()))
+	b.scroll = container.NewHScroll(container.NewVBox(b.box, under))
 	b.add = widget.NewButtonWithIcon("", theme.ContentAddIcon(), onAdd)
 	b.add.Importance = widget.LowImportance
-	b.root = container.NewBorder(nil, nil, nil, b.add, b.scroll)
+	b.root = container.NewBorder(nil, nil, nil, container.NewVBox(b.add), b.scroll) // "+" level with the chips
 	return b
 }
 

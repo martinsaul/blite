@@ -3,6 +3,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -317,10 +318,15 @@ type Session struct {
 	bwFPS        int               // HIGH frame rate congested viewers take (0: full)
 	rends        []int             // rendition heights viewers were granted
 	resNote      string            // why we share below the chosen size
-	srcNote      string            // why sharing stopped on its own
-	keyAt        map[int]time.Time // last forced keyframe per layer
-	keys         keyStats
-	gridFast     atomic.Bool // video windows run at media.GridFastFPS
+	// resWant is the size chosen before a slow encoder stepped us down
+	// ("" = not stepped down); we try it again after resRetryWait, which
+	// doubles on each failed try.
+	resWant    media.Resolution
+	resRetries int
+	srcNote    string            // why sharing stopped on its own
+	keyAt      map[int]time.Time // last forced keyframe per layer
+	keys       keyStats
+	gridFast   atomic.Bool // video windows run at media.GridFastFPS
 	// srcMu serializes starting and stopping the capture. Two overlapping
 	// starts (a double-clicked source; a start takes ~8 s on Windows)
 	// each began a capture and the first was never stopped: two encoders
@@ -340,6 +346,9 @@ type Session struct {
 	asrcDesc string
 	alevel   *media.AudioLevel // asrc's level over the last 30 s
 	asel     audio.Selection
+	// audioBack is the audio that stopped with our video (Mode "": none):
+	// it comes back when we go live again, unless another was chosen.
+	audioBack audio.Selection
 	// noWinAudio: sharing a window keeps the audio chosen instead of
 	// sharing its app's (sound turned off, or other audio picked).
 	noWinAudio bool
@@ -1917,7 +1926,16 @@ func (s *Session) pushAudio(peer string, frame []byte) {
 
 // SetAudio chooses what audio we share. Mode "test" sends beeps
 // (media.TestAudio); "system", "apps" and "window" capture apps' audio.
+// Audio can go out without video.
 func (s *Session) SetAudio(sel audio.Selection) error {
+	s.mu.Lock()
+	s.audioBack = audio.Selection{}
+	s.mu.Unlock()
+	return s.setAudio(sel)
+}
+
+// setAudio is SetAudio for our own changes: it keeps audioBack.
+func (s *Session) setAudio(sel audio.Selection) error {
 	s.audioMu.Lock()
 	defer s.audioMu.Unlock()
 	var desc string // capture to run; "" = none
@@ -2006,7 +2024,7 @@ func (s *Session) RefreshAudio(force bool) {
 		return
 	}
 	if force || string(sharer.Capture()) != cur {
-		if err := s.SetAudio(sel); err != nil {
+		if err := s.setAudio(sel); err != nil {
 			s.cfg.Log.Warn("shared audio", "err", err)
 		}
 	}
@@ -2394,6 +2412,7 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 		s.srcGen++
 		gen := s.srcGen
 		s.previewOn = false
+		wasSharing := s.feeds.Sharing(feeds.Self)
 		s.feeds.Apply(feeds.Self, feeds.ShareStop)
 		s.mu.Unlock()
 		if old != nil {
@@ -2406,6 +2425,9 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 		s.reportSharing()
 		s.regrid() // the preview goes
 		s.windowAudio(kind)
+		if wasSharing {
+			s.stopAudioWithVideo()
+		}
 		s.changed()
 		return nil
 	}
@@ -2445,8 +2467,46 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 	s.syncMeshShareConfig()
 	s.reportSharing()
 	s.regrid() // the preview shows
+	if !wasSharing {
+		s.audioBackWithVideo()
+	}
 	s.windowAudio(kind)
 	return nil
+}
+
+// stopAudioWithVideo stops the audio we share as our video stops, so nobody
+// keeps sending sound without knowing; audioBackWithVideo brings it back.
+// Audio shared on its own (no video) isn't touched.
+func (s *Session) stopAudioWithVideo() {
+	s.mu.Lock()
+	cur := s.asel
+	s.mu.Unlock()
+	if cur.Mode == "" || cur.Mode == "none" {
+		return
+	}
+	if err := s.setAudio(audio.Selection{Mode: "none"}); err != nil {
+		s.cfg.Log.Warn("shared audio", "err", err)
+		return
+	}
+	s.mu.Lock()
+	if s.asel.Mode == "none" {
+		s.audioBack = cur
+	}
+	s.mu.Unlock()
+	s.cfg.Log.Info("shared audio stopped with the video", "mode", cur.Mode)
+}
+
+func (s *Session) audioBackWithVideo() {
+	s.mu.Lock()
+	back, cur := s.audioBack, s.asel
+	s.audioBack = audio.Selection{}
+	s.mu.Unlock()
+	if back.Mode == "" || (cur.Mode != "" && cur.Mode != "none") {
+		return
+	}
+	if err := s.setAudio(back); err != nil {
+		s.cfg.Log.Warn("shared audio", "err", err)
+	}
 }
 
 func (s *Session) clearMeshTop(gen uint64) bool {
@@ -2532,7 +2592,7 @@ func (s *Session) windowAudio(kind media.SourceKind) {
 	if want.Mode == cur.Mode && want.PID == cur.PID && slices.Equal(want.Apps, cur.Apps) {
 		return
 	}
-	if err := s.SetAudio(want); err != nil {
+	if err := s.setAudio(want); err != nil {
 		s.cfg.Log.Warn("window audio", "err", err)
 	}
 }
@@ -2750,7 +2810,45 @@ const (
 	encodeStrikes = 2
 	encodeChecks  = 6
 	keepUpShare   = 0.8
+	// A hardware encoder (NVENC, QSV, AMF, Media Foundation) gets a longer
+	// start: capture, a preview window or audio starting can stall the first
+	// seconds (a 32-thread PC with NVENC was stepped down to 720p after 23
+	// s). With the CPU mostly idle a slow window is more likely such a stall
+	// than the encoder: it takes encodeStrikesIdle in a row then.
+	encodeWarmupHW    = 15 * time.Second
+	encodeStrikesIdle = 4
+	encodeIdleBusy    = 0.5
+	// After a step down we try the chosen size again after resRetryWait,
+	// doubled after each try that stepped down again (up to resRetryMax).
+	resRetryWait = 5 * time.Minute
+	resRetryMax  = time.Hour
 )
+
+// hardwareEncoder reports whether a GStreamer encoder runs on the GPU.
+func hardwareEncoder(name string) bool {
+	return name != "" && name != "x264enc" && name != "openh264enc"
+}
+
+// strikesNeeded is how many slow windows in a row step down: more for a
+// hardware encoder on a mostly idle CPU.
+func strikesNeeded(encoder string, busy float64) int {
+	if hardwareEncoder(encoder) && busy >= 0 && busy < encodeIdleBusy {
+		return encodeStrikesIdle
+	}
+	return encodeStrikes
+}
+
+// resRetryAfter is how long to share at the lower size before trying the
+// chosen one again, after tries earlier tries.
+func resRetryAfter(tries int) time.Duration {
+	d := resRetryWait
+	for range tries {
+		if d *= 2; d >= resRetryMax {
+			return resRetryMax
+		}
+	}
+	return d
+}
 
 var cpuFPSSteps = []int{30, 20, 15}
 
@@ -2809,8 +2907,13 @@ func (s *Session) applyHighFPS() {
 // checkEncodeRate steps our resolution down if the encoder of src can't
 // keep up with res, and tells the sharer why.
 func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind, res media.Resolution, n *atomic.Int64) {
-	time.Sleep(encodeWarmup)
-	strikes := 0
+	enc := s.encoderName()
+	if hardwareEncoder(enc) {
+		time.Sleep(encodeWarmupHW)
+	} else {
+		time.Sleep(encodeWarmup)
+	}
+	strikes, need := 0, encodeStrikes
 	var fps, offeredFPS float64
 	for i := 0; i < encodeChecks; i++ {
 		a, ia := n.Load(), src.HighOfferedFrames()
@@ -2834,8 +2937,10 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 			continue
 		}
 		strikes++
-		s.cfg.Log.Info("encoder behind", "res", res, "fps", fps, "offeredFPS", offeredFPS, "targetFPS", target, "strike", strikes)
-		if strikes < encodeStrikes {
+		busy := cpuMeter.Busy()
+		need = strikesNeeded(enc, busy)
+		s.cfg.Log.Info("encoder behind", "res", res, "fps", fps, "offeredFPS", offeredFPS, "targetFPS", target, "strike", strikes, "of", need, "cpuBusy", fmt.Sprintf("%.0f", 100*busy))
+		if strikes < need {
 			continue
 		}
 		if s.cpuStep(res, src, fps) {
@@ -2844,7 +2949,8 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 		}
 		break
 	}
-	if strikes < encodeStrikes {
+	if strikes < need {
+		s.retryWantedRes(src, kind, res)
 		return
 	}
 	s.mu.Lock()
@@ -2863,6 +2969,11 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 	if !current || lower == "" {
 		s.mu.Unlock()
 		return
+	}
+	if s.resWant == "" {
+		s.resWant = res
+	} else {
+		s.resRetries++ // the chosen size failed again
 	}
 	s.res, s.rends = lower, nil
 	s.resNote = fmt.Sprintf("Your computer can't encode %s fast enough (%.0f fps); sharing at %s.", media.ResolutionLabel(res), fps, media.ResolutionLabel(lower))
@@ -2923,6 +3034,7 @@ func (s *Session) SetResolution(res media.Resolution) error {
 	s.mu.Lock()
 	changed := s.res != res
 	s.res, s.resNote = res, ""
+	s.resWant, s.resRetries = "", 0
 	kind := s.srcKind
 	if changed {
 		s.rends = nil // the ladder below the new top differs
@@ -3324,7 +3436,7 @@ func (s *Session) Rejoin() Rejoin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	opts := NormalizeShareOptions(s.shareOpts)
-	return Rejoin{Server: s.cfg.Server, Room: s.sig.Welcome.Room, Password: s.pw, Source: s.srcKind, Resolution: s.res, Mode: s.mode, ShareOptions: &opts, Audio: s.asel, Output: s.output}
+	return Rejoin{Server: s.cfg.Server, Room: s.sig.Welcome.Room, Password: s.pw, Source: s.srcKind, Resolution: orRes(cmp.Or(s.resWant, s.res)), Mode: s.mode, ShareOptions: &opts, Audio: s.asel, Output: s.output}
 }
 
 // CloseForUpdate is Close telling the server we restart into a new build
@@ -3428,4 +3540,41 @@ func buildOf(c *proto.ClientMeta) int {
 		return 0
 	}
 	return c.Build
+}
+
+// retryWantedRes shares at the size chosen before a slow encoder stepped us
+// down again, once the lower size ran well for resRetryAfter.
+func (s *Session) retryWantedRes(src *media.VideoSource, kind media.SourceKind, res media.Resolution) {
+	s.mu.Lock()
+	want, tries := s.resWant, s.resRetries
+	s.mu.Unlock()
+	if want == "" || want == res {
+		return
+	}
+	wait := resRetryAfter(tries)
+	for end := time.Now().Add(wait); time.Now().Before(end); {
+		select {
+		case <-s.done:
+			return
+		case <-time.After(encodeWindow):
+		}
+		s.mu.Lock()
+		current := s.src == src && orRes(s.res) == res && s.resWant == want
+		s.mu.Unlock()
+		if !current {
+			return
+		}
+	}
+	s.mu.Lock()
+	if s.src != src || orRes(s.res) != res || s.resWant != want {
+		s.mu.Unlock()
+		return
+	}
+	s.res, s.rends, s.resNote = want, nil, ""
+	s.mu.Unlock()
+	s.cfg.Log.Info("trying the chosen resolution again", "from", res, "to", want, "after", wait.String())
+	s.mesh.ResetRenditions()
+	if err := s.SetSource(kind); err != nil {
+		s.cfg.Log.Error("restart at the chosen resolution", "err", err)
+	}
 }

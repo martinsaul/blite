@@ -86,3 +86,36 @@ func TestShareOptionsSlowViewerPolicy(t *testing.T) {
 		t.Fatal("SlowResolution must lower resolution first, not cpuFPS")
 	}
 }
+
+// A hardware encoder on a mostly idle CPU needs more slow windows in a row
+// before we step down: such windows are more likely a stall at the start.
+func TestStrikesNeeded(t *testing.T) {
+	for _, c := range []struct {
+		enc  string
+		busy float64
+		want int
+	}{
+		{"nvh264enc", 0.01, encodeStrikesIdle},
+		{"amfh264enc", 0.3, encodeStrikesIdle},
+		{"nvh264enc", 0.9, encodeStrikes},
+		{"nvh264enc", -1, encodeStrikes}, // not measured yet
+		{"x264enc", 0.01, encodeStrikes},
+		{"openh264enc", 0.01, encodeStrikes},
+		{"", 0.01, encodeStrikes},
+	} {
+		if got := strikesNeeded(c.enc, c.busy); got != c.want {
+			t.Errorf("strikesNeeded(%q, %.2f) = %d, want %d", c.enc, c.busy, got, c.want)
+		}
+	}
+}
+
+// The chosen size is tried again after 5 minutes, then 10, 20, 40, and at
+// most hourly.
+func TestResRetryAfter(t *testing.T) {
+	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour, time.Hour}
+	for tries, w := range want {
+		if got := resRetryAfter(tries); got != w {
+			t.Errorf("resRetryAfter(%d) = %v, want %v", tries, got, w)
+		}
+	}
+}
