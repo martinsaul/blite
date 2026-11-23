@@ -47,3 +47,24 @@ chmod 755 "$pkg/DEBIAN/postinst"
 deb="$out/blite_${APP_VERSION}-${BUILD}_amd64.deb"
 dpkg-deb --root-owner-group --build "$pkg" "$deb" >/dev/null
 ls -l "$deb"
+
+# The per-user copy (update package blite-home): the same binary, which
+# /usr/bin/blite starts from ~/.local/share/bellion/app and molt-swap updates
+# without root.
+home=$(mktemp -d)
+trap 'rm -rf "$pkg" "$home"' EXIT
+install -Dm755 "$out/bin/blite" "$home/bin/blite"
+echo "$BUILD" > "$home/build"
+zip="$(realpath "$out")/blite-linux-home_${APP_VERSION}-${BUILD}.zip"
+rm -f "$zip"
+python3 - "$home" "$zip" <<'PY'
+import sys, zipfile
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+    for name, mode in (("bin/blite", 0o755), ("build", 0o644)):
+        info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+        info.external_attr = (0o100000 | mode) << 16  # a regular file; keeps the exec bit
+        info.compress_type = zipfile.ZIP_DEFLATED
+        z.writestr(info, open(f"{src}/{name}", "rb").read())
+PY
+ls -l "$zip"

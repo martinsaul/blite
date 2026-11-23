@@ -5,10 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"blite/internal/userinstall"
 )
 
-// Launcher is what the OS should start for Blite.
-func Launcher(exe string) string { return exe }
+// Launcher is what the OS should start for Blite: /usr/bin/blite for the
+// per-user copy, which it starts (and which an update may replace).
+func Launcher(exe string) string {
+	if userinstall.Inside(exe) {
+		if _, err := os.Stat(userinstall.SystemExe); err == nil {
+			return userinstall.SystemExe
+		}
+	}
+	return exe
+}
 
 func autostartFile() (string, error) {
 	dir := os.Getenv("XDG_CONFIG_HOME")

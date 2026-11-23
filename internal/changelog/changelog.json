@@ -1,5 +1,14 @@
 [
  {
+  "build": 217,
+  "date": "2026-11-23",
+  "changes": [
+   "Linux: updates no longer ask for your password. Bellion now keeps its own copy in your home folder and updates it there, and goes back to the version you had if an update doesn't start properly.",
+   "Linux: like on Windows, Bellion installs a waiting update as it starts, with a small window you can skip.",
+   "After an update, Bellion shows which build it updated to once, instead of a bare \"updated\" and then the same note again at the next start."
+  ]
+ },
+ {
   "build": 216,
   "date": "2026-11-23",
   "changes": [

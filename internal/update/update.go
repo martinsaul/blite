@@ -20,6 +20,8 @@ import (
 	"time"
 
 	molt "moltclient"
+
+	"blite/internal/userinstall"
 )
 
 // Stamped by the build (scripts/version.sh, from BLITE_UPDATE_URL and
@@ -70,6 +72,8 @@ type Updater struct {
 	// stopStage cancels a running Stage, so an Install takes the download
 	// over (it resumes the partial file).
 	stopStage context.CancelFunc
+	// seed, if set, prepares the install folder before molt-swap runs.
+	seed func() error
 
 	dl sync.Mutex // one download at a time: Stage and Install share the file
 }
@@ -94,6 +98,12 @@ func New(version string, build int64, channel string, pin bool, log *slog.Logger
 	u.info.Channel = channel
 	u.c.Progress = u.progress
 	u.opts, u.info.CanApply = installLayout()
+	if runtime.GOOS == "linux" && u.info.CanApply {
+		// The per-user copy is its own Molt package: "blite" on Linux is the
+		// .deb, for first installs and builds that update through apt.
+		u.c.Package = userPackage
+		u.seed = func() error { return userinstall.Seed(u.opts.InstallDir, systemExe(), build) }
+	}
 	// A channel chosen by hand survives the update; otherwise the new build
 	// uses its own stamped default.
 	if pin {
@@ -104,7 +114,8 @@ func New(version string, build int64, channel string, pin bool, log *slog.Logger
 
 // installLayout works out where this Blite is installed and how molt-swap
 // relaunches it. Only the layouts our releases produce can update themselves:
-// the Windows zip (<root>\bin\blite.exe) and the .deb (/usr/bin/blite).
+// the Windows zip (<root>\bin\blite.exe), and on Linux the .deb
+// (/usr/bin/blite) and the per-user copy it hands over to.
 func installLayout() (molt.ApplyOptions, bool) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -125,12 +136,29 @@ func installLayout() (molt.ApplyOptions, bool) {
 		}
 		return molt.ApplyOptions{InstallDir: root, Exe: rel}, true
 	case "linux":
-		if exe != "/usr/bin/blite" {
+		// The .deb's copy and the per-user one both update the per-user
+		// copy (kind=zip, no root needed).
+		if exe != userinstall.SystemExe && !userinstall.Inside(exe) {
 			return molt.ApplyOptions{}, false
 		}
-		return molt.ApplyOptions{Exe: exe}, true
+		root, err := userinstall.Root()
+		if err != nil {
+			return molt.ApplyOptions{}, false
+		}
+		return molt.ApplyOptions{InstallDir: root, Exe: userinstall.Exe}, true
 	}
 	return molt.ApplyOptions{}, false
+}
+
+// userPackage is the Molt package of the per-user Linux copy.
+const userPackage = "blite-home"
+
+// systemExe is the running program (the .deb's or the per-user copy), which
+// Seed copies when the per-user folder is still empty.
+func systemExe() string {
+	exe, _ := os.Executable()
+	exe, _ = filepath.EvalSymlinks(exe)
+	return exe
 }
 
 // Info returns the current update state.
@@ -157,13 +185,32 @@ func (u *Updater) Started() {
 	if err := molt.ReportHealthy(); err != nil {
 		u.log.Warn("update health report", "err", err)
 	}
+	env := molt.UpdateResult()
 	r, err := u.c.LastResult(u.opts)
-	if err != nil || r == nil {
-		if res := molt.UpdateResult(); res != "" {
-			u.setResult(res)
+	if err == nil && r == nil && env == "updated" {
+		// molt-swap records the outcome only once it has our health report:
+		// wait for it, or this start misses it and the next one shows it.
+		for i := 0; i < 40 && r == nil; i++ {
+			time.Sleep(250 * time.Millisecond)
+			r, _ = u.c.LastResult(u.opts)
 		}
+		if r == nil {
+			r = &molt.Result{Outcome: "updated", ToBuild: u.c.Build}
+		}
+	}
+	if r != nil {
+		u.showResult(r)
 		return
 	}
+	// A message handed on by the instance before us (Windows: the start
+	// under the crash guard), not molt-swap's bare outcome.
+	if env != "" && env != "updated" && env != "rolled-back" {
+		u.setResult(env)
+	}
+}
+
+// showResult puts the outcome of the last update in Info for the UI.
+func (u *Updater) showResult(r *molt.Result) {
 	switch r.Outcome {
 	case "updated":
 		u.setResult(fmt.Sprintf("Updated to build %d.", r.ToBuild))
@@ -275,6 +322,9 @@ func (u *Updater) install(ctx context.Context, args []string) error {
 	opts.Args = append(append([]string(nil), u.opts.Args...), args...)
 	err = retry(ctx, u.log, func() error {
 		path, err := u.c.Download(ctx, up.Payload, cache)
+		if err == nil && u.seed != nil {
+			err = u.seed()
+		}
 		if err == nil {
 			pruneStaged(cache, path, u.log)
 			err = u.c.Apply(ctx, up, path, opts)

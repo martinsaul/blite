@@ -307,3 +307,24 @@ func TestInstallTakesOverStage(t *testing.T) {
 		t.Fatalf("Skip shows a problem: %q", i.Problem)
 	}
 }
+
+// Started right after an update waits for molt-swap's record of it (written
+// once we report healthy), instead of showing molt-swap's bare "updated".
+func TestStartedWaitsForTheRecord(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	u := updater("http://127.0.0.1:1", pub)
+	u.opts.CacheDir = t.TempDir()
+	t.Setenv(molt.EnvUpdateResult, "updated")
+	t.Setenv(molt.EnvHealthFile, filepath.Join(t.TempDir(), "health"))
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		os.WriteFile(filepath.Join(u.opts.CacheDir, "last-update.json"), []byte(`{"outcome":"updated","fromBuild":16,"toBuild":17}`), 0o600)
+	}()
+	u.Started()
+	if i := u.Info(); i.Result != "Updated to build 17." || i.UpdatedFrom != 16 || i.UpdatedTo != 17 {
+		t.Fatalf("after the update: %+v", i)
+	}
+	if _, err := os.Stat(filepath.Join(u.opts.CacheDir, "last-update.json")); !os.IsNotExist(err) {
+		t.Fatal("the record is left for the next start")
+	}
+}

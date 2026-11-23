@@ -54,6 +54,7 @@ import (
 	"blite/internal/ui"
 	"blite/internal/uiscale"
 	"blite/internal/update"
+	"blite/internal/userinstall"
 )
 
 // Stamped by the build scripts (-X main.version=... etc.): a version name, a
@@ -78,6 +79,12 @@ func clientMeta() *proto.ClientMeta {
 }
 
 func main() {
+	// Linux: the .deb's copy starts the per-user one when that is newer.
+	if b, _ := strconv.ParseInt(build, 10, 64); b > 0 {
+		if err := userinstall.Handover(b); err != nil && err != userinstall.ErrNoCopy {
+			fmt.Fprintln(os.Stderr, "starting the per-user copy:", err)
+		}
+	}
 	var (
 		server    = flag.String("server", envOr("BLITE_SERVER", defaultServer), "signaling URL")
 		headless  = flag.Bool("headless", false, "no tray or UI; run one session from flags")
@@ -479,12 +486,11 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 }
 
 // updateAtStart reports whether this start installs an available update
-// before the main window: on Windows (on Linux the .deb would ask for the
-// admin password), when the install can update itself, and not when molt-swap
-// just started this build (a fresh update, or a rollback: that build is
-// tried again at the next start) or a call waits to be rejoined.
+// before the main window: when the install can update itself, and not when
+// molt-swap just started this build (a fresh update, or a rollback: that
+// build is tried again at the next start) or a call waits to be rejoined.
 func updateAtStart(u *update.Updater) bool {
-	return runtime.GOOS == "windows" && u != nil && u.Info().CanApply &&
+	return u != nil && u.Info().CanApply &&
 		os.Getenv(molt.EnvHealthFile) == "" && molt.UpdateResult() == "" && !app.ResumePending()
 }
 
