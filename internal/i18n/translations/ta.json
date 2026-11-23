@@ -4,7 +4,6 @@
  "(Select one)": "(ஒன்றைத் தேர்ந்தெடு)",
  "(you)": "(நீங்கள்)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "ஹோஸ்ட் செய்யப்பட்ட ரூமின் ஆப்பரேட்டர் இந்த கீயைப் பட்டியலில் சேர்த்து, நீங்கள் அந்த ரூமில் இருக்கும்போது உங்களை அதன் உரிமையாளர் ஆக்கலாம்.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Bellion Share-இன் புதிய பதிப்பு கிடைக்கிறது. முடிந்தபோது அப்டேட் செய்யவும் (அமைப்புகள் > அப்டேட்களைச் சரிபார்).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "பின் செய்யப்பட்ட சேவையகத்தின் சான்றிதழ் Let's Encrypt, Google Trust Services அல்லது SSL.com வழங்கியதாக இருக்க வேண்டும்; அதனால் நிறுவன ப்ராக்ஸியோ வைரஸ் தடுப்பு மென்பொருளோ இணைப்பைப் படிக்க முடியாது. Bellion Share சேவையகம் எப்போதும் பின் செய்யப்பட்டுள்ளது. உங்கள் சேவையகம் இவற்றில் ஒன்றைப் பயன்படுத்தினால் அதைப் பின் செய்யுங்கள்.",
  "A window": "ஒரு சாளரம்",
  "About Bellion Share": "Bellion Share பற்றி",
@@ -226,6 +225,7 @@
   "one": "{{.Where}}-இல் ஒருவர் பகிர்கிறார் ({{.Count}} நபர்).",
   "other": "{{.Where}}-இல் ஒருவர் பகிர்கிறார் ({{.Count}} பேர்)."
  },
+ "Skip": "தவிர்",
  "Something that went wrong or bothers you": "தவறாகப் போன அல்லது உங்களைத் தொந்தரவு செய்யும் ஏதாவது",
  "Sounds off": "ஒலிகள் அணைப்பில்",
  "Sounds on: a chime when someone joins or goes live": "ஒலிகள் இயக்கத்தில்: யாராவது சேரும்போது அல்லது நேரலைக்கு வரும்போது ஒலி",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "அப்டேட் சேனல்: {{.Channel}}, கடைசியாகச் சரிபார்த்தது {{.Time}}",
  "Update problem: {{.Err}}": "அப்டேட் சிக்கல்: {{.Err}}",
  "Updated to build {{.Build}}.": "பில்ட் {{.Build}}-க்கு அப்டேட் ஆனது.",
+ "Updating Bellion Share...": "Bellion Share புதுப்பிக்கப்படுகிறது...",
  "Upload limit": "பதிவேற்ற வரம்பு",
  "upload limit": "பதிவேற்ற வரம்பு",
  "use a host name like share.example.com or a wss:// address": "share.example.com போன்ற ஹோஸ்ட் பெயரையோ wss:// முகவரியையோ பயன்படுத்தவும்",

@@ -4,7 +4,6 @@
  "(Select one)": "(Selecione)",
  "(you)": "(você)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "O operador de uma sala hospedada pode cadastrar esta chave para tornar você o dono dela enquanto estiver nela.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Há uma versão mais nova do Bellion Share. Atualize quando puder (Configurações > Verificar atualizações).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "O certificado de um servidor fixado precisa vir do Let's Encrypt, Google Trust Services ou SSL.com, para que um proxy da empresa ou um antivírus não consiga ler a conexão. O servidor do Bellion Share é sempre fixado. Fixe seu próprio servidor se ele usar uma delas.",
  "A window": "Uma janela",
  "About Bellion Share": "Sobre o Bellion Share",
@@ -228,6 +227,7 @@
   "many": "Alguém está compartilhando em {{.Where}} ({{.Count}} de pessoas).",
   "other": "Alguém está compartilhando em {{.Where}} ({{.Count}} pessoas)."
  },
+ "Skip": "Pular",
  "Something that went wrong or bothers you": "Algo que deu errado ou que incomoda você",
  "Sounds off": "Sons desligados",
  "Sounds on: a chime when someone joins or goes live": "Sons ligados: um aviso quando alguém entra ou começa a transmitir",
@@ -288,6 +288,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Canal de atualização: {{.Channel}}, última verificação {{.Time}}",
  "Update problem: {{.Err}}": "Problema na atualização: {{.Err}}",
  "Updated to build {{.Build}}.": "Atualizado para a build {{.Build}}.",
+ "Updating Bellion Share...": "Atualizando o Bellion Share...",
  "Upload limit": "Limite de upload",
  "upload limit": "limite de upload",
  "use a host name like share.example.com or a wss:// address": "use um nome de host como share.example.com ou um endereço wss://",

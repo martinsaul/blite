@@ -4,7 +4,6 @@
  "(Select one)": "（请选择）",
  "(you)": "(你)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "托管房间的管理员可以登记此密钥，让你在房间内时成为房主。",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Bellion Share 有新版本，请尽快更新（设置 > 检查更新）。",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "固定的服务器的证书必须来自 Let's Encrypt、Google Trust Services 或 SSL.com，这样公司代理或杀毒软件就无法读取连接。Bellion Share 服务器始终固定。如果你自己的服务器使用其中之一，请固定它。",
  "A window": "单个窗口",
  "About Bellion Share": "关于 Bellion Share",
@@ -224,6 +223,7 @@
  "Someone is sharing in {{.Where}} ({{.Count}} people).": {
   "other": "有人正在 {{.Where}} 中共享（{{.Count}} 人）。"
  },
+ "Skip": "跳过",
  "Something that went wrong or bothers you": "出现的问题或让你不满的地方",
  "Sounds off": "声音已关闭",
  "Sounds on: a chime when someone joins or goes live": "声音已开启：有人加入或开播时提示",
@@ -284,6 +284,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "更新通道：{{.Channel}}，上次检查于 {{.Time}}",
  "Update problem: {{.Err}}": "更新出现问题：{{.Err}}",
  "Updated to build {{.Build}}.": "已更新到版本 {{.Build}}。",
+ "Updating Bellion Share...": "正在更新 Bellion Share...",
  "Upload limit": "上传上限",
  "upload limit": "上传上限",
  "use a host name like share.example.com or a wss:// address": "请使用 share.example.com 这样的主机名或 wss:// 地址",

@@ -63,25 +63,12 @@ func (n *notices) set(u *UI, st app.UIState) {
 		n.updText.Importance = widget.DangerImportance
 		show(n.updBtn, up.Available != "" && up.CanApply) // try again
 		show(n.update, true)
-	case up != nil && up.Available != "":
-		t := i18n.L("Bellion Share {{.Version}} is available.", i18n.D{"Version": up.Available})
-		if up.Mandatory {
-			t = i18n.L("Bellion Share {{.Version}} is required: you can't start or join a session until you install it.", i18n.D{"Version": up.Available})
-		}
-		if up.Notes != "" {
-			t += " " + up.Notes
-		}
-		if st.Session != nil {
-			t += " " + i18n.L("Installing restarts and rejoins the call in a few seconds.")
-		}
-		n.updText.SetText(t)
+	case up != nil && up.Available != "" && up.Mandatory:
+		// A plain update is the corner notice and the button by the gear;
+		// one we can't do without says so here.
+		n.updText.SetText(i18n.L("Bellion Share {{.Version}} is required: you can't start or join a session until you install it.", i18n.D{"Version": up.Available}))
 		n.updText.Importance = widget.MediumImportance
 		show(n.updBtn, up.CanApply)
-		show(n.update, true)
-	case st.Session != nil && st.Session.UpdateRecommended:
-		n.updText.SetText(i18n.L("A newer Bellion Share is available. Please update when you can (Settings > Check for updates)."))
-		n.updText.Importance = widget.WarningImportance
-		n.updBtn.Hide()
 		show(n.update, true)
 	default:
 		show(n.update, false)
@@ -101,6 +88,7 @@ type lobbyView struct {
 	root        fyne.CanvasObject
 	who         *widget.Label
 	gear        *iconDotButton
+	upd         *iconDotButton // shows while an update waits
 	help        *iconDotButton
 	notes       *notices
 	tileScreen  *sourceTile
@@ -142,7 +130,7 @@ func newLobby(u *UI) *lobbyView {
 	v := &lobbyView{u: u, who: widget.NewLabel(""), notes: newNotices(u)}
 	v.who.TextStyle.Bold = true
 	var chrome *fyne.Container
-	v.gear, v.help, chrome = u.newChromeButtons()
+	v.gear, v.upd, v.help, chrome = u.newChromeButtons()
 
 	v.tileScreen = newSourceTile(screenWhiteRes, screenAccentRes, i18n.L("Entire screen"), true, func() {
 		u.do(func() error { return u.a.SetSource("primary") })
@@ -285,7 +273,7 @@ func (v *lobbyView) checkClipboard(u *UI) {
 
 func (v *lobbyView) update(st app.UIState) {
 	v.who.SetText(i18n.L("You are {{.Name}}", i18n.D{"Name": displayName(st.Name, st.Tag)}))
-	v.gear.SetDot(updateWaiting(st))
+	setUpdateButton(v.upd, st)
 	v.notes.set(v.u, st)
 	v.server.update(st)
 	v.updateShareCard(st)
@@ -370,6 +358,7 @@ type callView struct {
 	room       *widget.Label
 	lockBadge  *chipButton
 	gear       *iconDotButton
+	upd        *iconDotButton
 	help       *iconDotButton
 	warn       *widget.Label
 	share      *widget.Button
@@ -405,7 +394,7 @@ func newCall(u *UI) *callView {
 	})
 
 	var chrome *fyne.Container
-	v.gear, v.help, chrome = u.newChromeButtons()
+	v.gear, v.upd, v.help, chrome = u.newChromeButtons()
 	copyBtn := widget.NewButtonWithIcon(i18n.L("Copy link"), theme.ContentCopyIcon(), u.copyLink)
 	leave := widget.NewButtonWithIcon(i18n.L("Leave"), theme.LogoutIcon(), u.leave)
 	header := container.NewBorder(nil, nil,
@@ -516,7 +505,7 @@ func bold(t string) *widget.Label {
 
 func (v *callView) update(st app.UIState) {
 	s := st.Session
-	v.gear.SetDot(updateWaiting(st))
+	setUpdateButton(v.upd, st)
 	v.notes.set(v.u, st)
 	v.room.SetText(s.Room)
 	v.sharing = s.Source != "" && s.Source != "none"

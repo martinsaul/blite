@@ -4,7 +4,6 @@
  "(Select one)": "(ఒకటి ఎంచుకోండి)",
  "(you)": "(మీరు)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "హోస్ట్ చేసిన రూమ్ నిర్వాహకులు ఈ కీని జాబితాలో చేర్చితే, మీరు ఆ రూమ్‌లో ఉన్నంతసేపు దానికి ఓనర్‌గా ఉంటారు.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Bellion Share కొత్త వెర్షన్ అందుబాటులో ఉంది. వీలైనప్పుడు అప్‌డేట్ చేయండి (సెట్టింగ్‌లు > అప్‌డేట్‌లు చెక్ చేయండి).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "పిన్ చేసిన సర్వర్ సర్టిఫికెట్ Let's Encrypt, Google Trust Services లేదా SSL.com నుండి రావాలి, అప్పుడు కంపెనీ ప్రాక్సీ లేదా యాంటీవైరస్ కనెక్షన్‌ను చదవలేవు. Bellion Share సర్వర్ ఎప్పుడూ పిన్ చేయబడి ఉంటుంది. మీ సర్వర్ వీటిలో ఒకదాన్ని వాడితే దాన్ని పిన్ చేయండి.",
  "A window": "ఒక విండో",
  "About Bellion Share": "Bellion Share గురించి",
@@ -226,6 +225,7 @@
   "one": "{{.Where}}లో ఎవరో షేర్ చేస్తున్నారు ({{.Count}} వ్యక్తి).",
   "other": "{{.Where}}లో ఎవరో షేర్ చేస్తున్నారు ({{.Count}} మంది)."
  },
+ "Skip": "దాటవేయి",
  "Something that went wrong or bothers you": "ఏదైనా తప్పు జరిగింది లేదా ఇబ్బంది పెడుతోంది",
  "Sounds off": "శబ్దాలు ఆఫ్",
  "Sounds on: a chime when someone joins or goes live": "శబ్దాలు ఆన్: ఎవరైనా చేరినప్పుడు లేదా లైవ్‌కి వచ్చినప్పుడు ఒక శబ్దం",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "అప్‌డేట్ ఛానెల్: {{.Channel}}, చివరిగా చెక్ చేసింది {{.Time}}",
  "Update problem: {{.Err}}": "అప్‌డేట్ సమస్య: {{.Err}}",
  "Updated to build {{.Build}}.": "build {{.Build}}కి అప్‌డేట్ అయింది.",
+ "Updating Bellion Share...": "Bellion Share అప్‌డేట్ అవుతోంది...",
  "Upload limit": "అప్‌లోడ్ పరిమితి",
  "upload limit": "అప్‌లోడ్ పరిమితి",
  "use a host name like share.example.com or a wss:// address": "share.example.com లాంటి హోస్ట్ పేరు లేదా wss:// అడ్రస్ వాడండి",

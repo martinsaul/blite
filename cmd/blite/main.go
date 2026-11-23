@@ -425,6 +425,7 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 
 	open := nui.Show
 	handOff := a.Updates != nil && guardedAfterUpdate(link)
+	atStart := !handOff && updateAtStart(a.Updates)
 	nui.Run(a, nui.Options{Hidden: true, OnReady: func() { // the flow below shows the window
 		if a.Updates != nil {
 			// The UI is listening and the tray is up: this is "healthy" for
@@ -434,9 +435,14 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 				go nui.Quit()
 				return
 			}
+			if atStart && installAtStart(a.Updates, log) {
+				go nui.Quit() // molt-swap takes it from here
+				return
+			}
 			go func() {
 				for {
 					a.CheckUpdate(context.Background())
+					stageUpdate(a, log)
 					time.Sleep(6 * time.Hour)
 				}
 			}()
@@ -470,6 +476,94 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		app.RemoveInstance(pid) // before the new instance looks for one
 		startGuarded(log, a.Updates.Info().Result)
 	}
+}
+
+// updateAtStart reports whether this start installs an available update
+// before the main window: on Windows (on Linux the .deb would ask for the
+// admin password), when the install can update itself, and not when molt-swap
+// just started this build (a fresh update, or a rollback: that build is
+// tried again at the next start) or a call waits to be rejoined.
+func updateAtStart(u *update.Updater) bool {
+	return runtime.GOOS == "windows" && u != nil && u.Info().CanApply &&
+		os.Getenv(molt.EnvHealthFile) == "" && molt.UpdateResult() == "" && !app.ResumePending()
+}
+
+// startCheckTimeout bounds the update check at start-up: offline or a slow
+// server must not hold the start up.
+const startCheckTimeout = 8 * time.Second
+
+// installAtStart checks for an update and, if there is one, installs it
+// with a small window that shows the download and offers Skip. true: molt-swap
+// runs and Blite must exit (it relaunches the new build, or this one if the
+// new build fails). false: no update, Skip, or a failure: start as usual.
+func installAtStart(u *update.Updater, log *slog.Logger) bool {
+	cctx, cancel := context.WithTimeout(context.Background(), startCheckTimeout)
+	u.Check(cctx)
+	cancel()
+	info := u.Info()
+	if info.Available == "" || !info.CanApply {
+		return false
+	}
+	log.Info("update at start", "build", info.Available)
+	ctx, skip := context.WithCancel(context.Background())
+	defer skip()
+	w := nui.ShowUpdating(func() {
+		log.Info("update at start: skipped")
+		skip()
+	})
+	defer w.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(250 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				w.Progress(u.Info().Progress)
+			}
+		}
+	}()
+	// The new build starts the way this one was started (a link,
+	// -background); -pin-channel is already in the updater's own args.
+	if err := u.InstallAtStart(ctx, startArgs(os.Args[1:])); err != nil {
+		if ctx.Err() == nil {
+			log.Warn("update at start failed; starting this build", "err", err)
+		}
+		return false
+	}
+	log.Info("update at start handed to molt-swap; exiting")
+	return true
+}
+
+// startArgs drops -pin-channel from args (the updater adds its own).
+func startArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimLeft(args[i], "-")
+		switch {
+		case a == "pin-channel" && strings.HasPrefix(args[i], "-"):
+			i++ // and its value
+		case strings.HasPrefix(a, "pin-channel=") && strings.HasPrefix(args[i], "-"):
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+// stageUpdate downloads an available update for the next start, once no
+// call is on (a download mid-call would compete with the stream).
+func stageUpdate(a *app.App, log *slog.Logger) {
+	if a.Updates.Info().Available == "" {
+		return
+	}
+	for a.State().(app.UIState).Session != nil {
+		time.Sleep(time.Minute)
+	}
+	a.Updates.Stage(context.Background())
 }
 
 func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, password string, src media.SourceKind, audioArg string, dur time.Duration, volunteer bool, res media.Resolution, mode media.ContentMode) {

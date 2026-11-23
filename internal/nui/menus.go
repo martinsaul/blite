@@ -27,7 +27,7 @@ func sub(label string, items ...*fyne.MenuItem) *fyne.MenuItem {
 	return i
 }
 
-// updateWaiting reports whether the gear button should show its update dot.
+// updateWaiting reports whether the update button shows.
 func updateWaiting(st app.UIState) bool {
 	if st.Update != nil && st.Update.Available != "" {
 		return true
@@ -35,16 +35,56 @@ func updateWaiting(st app.UIState) bool {
 	return st.Session != nil && st.Session.UpdateRecommended
 }
 
-// newChromeButtons creates the top-right Gear and "?" icon buttons shared by
-// the Home and Call headers.
-func (u *UI) newChromeButtons() (*iconDotButton, *iconDotButton, *fyne.Container) {
-	gear := newIconDotButton(theme.SettingsIcon(), func(b *iconDotButton) {
+// newChromeButtons creates the top-right Gear, update and "?" icon buttons
+// shared by the Home and Call headers. The update button shows only while an
+// update waits (setUpdateButton).
+func (u *UI) newChromeButtons() (gear, upd, help *iconDotButton, chrome *fyne.Container) {
+	gear = newIconDotButton(theme.SettingsIcon(), func(b *iconDotButton) {
 		showMenuBelow(b, u.gearMenuItems()...)
 	})
-	help := newIconDotButton(theme.HelpIcon(), func(b *iconDotButton) {
+	upd = newIconDotButton(theme.DownloadIcon(), func(*iconDotButton) { u.showUpdate() })
+	upd.tips = u.tips
+	upd.dot = true
+	upd.Hide()
+	help = newIconDotButton(theme.HelpIcon(), func(b *iconDotButton) {
 		showMenuBelow(b, u.helpMenuItems()...)
 	})
-	return gear, help, container.NewHBox(gear, help)
+	return gear, upd, help, container.NewHBox(gear, upd, help)
+}
+
+// setUpdateButton shows the update button while an update waits, its
+// tooltip saying which.
+func setUpdateButton(b *iconDotButton, st app.UIState) {
+	if !updateWaiting(st) {
+		b.Hide()
+		return
+	}
+	up := st.Update
+	switch {
+	case up == nil || up.Available == "":
+		b.SetTip(i18n.L("Check for updates")) // the server says ours is old
+	case up.Downloading:
+		b.SetTip(i18n.L("Downloading Bellion Share {{.Version}}: {{.Percent}}%", i18n.D{"Version": up.Available, "Percent": up.Progress}))
+	default:
+		b.SetTip(i18n.L("Bellion Share {{.Version}} is available.", i18n.D{"Version": up.Available}))
+	}
+	b.Show()
+}
+
+// showUpdate brings back the corner notice of the waiting update (or looks
+// for one, when only the server said ours is old).
+func (u *UI) showUpdate() {
+	up := u.st.Update
+	if up == nil || up.Available == "" {
+		u.do(func() error { return u.a.CheckUpdate(ctx()) })
+		return
+	}
+	if u.toasts == nil {
+		return
+	}
+	u.toasts.Objects = nil
+	u.toasts.Add(u.newUpdateNotice(up))
+	u.toasts.Refresh()
 }
 
 // gearMenuItems builds the Gear button's popup menu.

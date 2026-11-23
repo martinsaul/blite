@@ -4,7 +4,6 @@
  "(Select one)": "(Виберіть)",
  "(you)": "(ви)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Оператор кімнати на сервері може вказати цей ключ, щоб ви були її власником, поки перебуваєте в ній.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Доступна новіша версія Bellion Share. Оновіться, коли зможете (Налаштування > Перевірити оновлення).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Сертифікат закріпленого сервера має бути від Let's Encrypt, Google Trust Services або SSL.com, щоб корпоративний проксі чи антивірус не могли читати з'єднання. Сервер Bellion Share закріплено завжди. Закріпіть свій сервер, якщо він використовує один із них.",
  "A window": "Вікно",
  "About Bellion Share": "Про Bellion Share",
@@ -230,6 +229,7 @@
   "many": "У {{.Where}} хтось показує екран ({{.Count}} людей).",
   "other": "У {{.Where}} хтось показує екран ({{.Count}} людини)."
  },
+ "Skip": "Пропустити",
  "Something that went wrong or bothers you": "Щось пішло не так або заважає",
  "Sounds off": "Звуки вимкнено",
  "Sounds on: a chime when someone joins or goes live": "Звуки ввімкнено: сигнал, коли хтось приєднується або починає трансляцію",
@@ -290,6 +290,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Канал оновлень: {{.Channel}}, остання перевірка {{.Time}}",
  "Update problem: {{.Err}}": "Проблема з оновленням: {{.Err}}",
  "Updated to build {{.Build}}.": "Оновлено до збірки {{.Build}}.",
+ "Updating Bellion Share...": "Оновлення Bellion Share...",
  "Upload limit": "Ліміт відвантаження",
  "upload limit": "ліміт відвантаження",
  "use a host name like share.example.com or a wss:// address": "вкажіть ім'я хоста, наприклад share.example.com, або адресу wss://",

@@ -4,7 +4,6 @@
  "(Select one)": "(اختر واحدًا)",
  "(you)": "(أنت)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "يمكن لمشغّل الغرفة المستضافة إضافة هذا المفتاح لجعلك مالكها أثناء وجودك فيها.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "يتوفر إصدار أحدث من Bellion Share. يُرجى التحديث عندما تستطيع (الإعدادات > البحث عن تحديثات).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "يجب أن تصدر شهادة الخادم المثبّت من Let's Encrypt أو Google Trust Services أو SSL.com، حتى لا يتمكن وكيل الشركة أو برنامج مكافحة الفيروسات من قراءة الاتصال. خادم Bellion Share مثبّت دائمًا. ثبّت خادمك إذا كان يستخدم إحداها.",
  "A window": "نافذة",
  "About Bellion Share": "حول Bellion Share",
@@ -234,6 +233,7 @@
   "many": "أحدهم يشارك في {{.Where}} ({{.Count}} شخصًا).",
   "other": "أحدهم يشارك في {{.Where}} ({{.Count}} شخص)."
  },
+ "Skip": "تخطي",
  "Something that went wrong or bothers you": "شيء حدث بشكل خاطئ أو يزعجك",
  "Sounds off": "الأصوات متوقفة",
  "Sounds on: a chime when someone joins or goes live": "الأصوات مفعّلة: تنبيه عندما ينضم أحد أو يبدأ البث",
@@ -294,6 +294,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "قناة التحديث: {{.Channel}}، آخر تحقق {{.Time}}",
  "Update problem: {{.Err}}": "مشكلة في التحديث: {{.Err}}",
  "Updated to build {{.Build}}.": "تم التحديث إلى الإصدار {{.Build}}.",
+ "Updating Bellion Share...": "جارٍ تحديث Bellion Share...",
  "Upload limit": "حد الرفع",
  "upload limit": "حد الرفع",
  "use a host name like share.example.com or a wss:// address": "استخدم اسم مضيف مثل share.example.com أو عنوان wss://",

@@ -4,7 +4,6 @@
  "(Select one)": "(เลือกหนึ่งรายการ)",
  "(you)": "(คุณ)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "ผู้ดูแลห้องที่โฮสต์ไว้สามารถเพิ่มคีย์นี้ในรายชื่อ เพื่อให้คุณเป็นเจ้าของห้องขณะที่คุณอยู่ในห้องนั้น",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "มี Bellion Share เวอร์ชันใหม่แล้ว อัปเดตเมื่อสะดวกนะ (การตั้งค่า > ตรวจหาอัปเดต)",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "ใบรับรองของเซิร์ฟเวอร์ที่ปักหมุดต้องมาจาก Let's Encrypt, Google Trust Services หรือ SSL.com เพื่อให้พร็อกซีของบริษัทหรือโปรแกรมป้องกันไวรัสอ่านการเชื่อมต่อไม่ได้ เซิร์ฟเวอร์ Bellion Share ปักหมุดไว้เสมอ ปักหมุดเซิร์ฟเวอร์ของคุณหากใช้หนึ่งในนี้",
  "A window": "หน้าต่างเดียว",
  "About Bellion Share": "เกี่ยวกับ Bellion Share",
@@ -224,6 +223,7 @@
  "Someone is sharing in {{.Where}} ({{.Count}} people).": {
   "other": "มีคนกำลังแชร์ใน {{.Where}} ({{.Count}} คน)"
  },
+ "Skip": "ข้าม",
  "Something that went wrong or bothers you": "สิ่งที่ผิดพลาดหรือกวนใจคุณ",
  "Sounds off": "ปิดเสียง",
  "Sounds on: a chime when someone joins or goes live": "เปิดเสียง: มีเสียงเตือนเมื่อมีคนเข้าร่วมหรือเริ่มไลฟ์",
@@ -284,6 +284,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "ช่องทางอัปเดต: {{.Channel}}, ตรวจล่าสุด {{.Time}}",
  "Update problem: {{.Err}}": "ปัญหาการอัปเดต: {{.Err}}",
  "Updated to build {{.Build}}.": "อัปเดตเป็นบิลด์ {{.Build}} แล้ว",
+ "Updating Bellion Share...": "กำลังอัปเดต Bellion Share...",
  "Upload limit": "ขีดจำกัดอัปโหลด",
  "upload limit": "ขีดจำกัดอัปโหลด",
  "use a host name like share.example.com or a wss:// address": "ใช้ชื่อโฮสต์เช่น share.example.com หรือที่อยู่ wss://",

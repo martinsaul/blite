@@ -365,8 +365,11 @@ func TestControlWindowInteractions(t *testing.T) {
 	if u.win.MainMenu() != nil {
 		t.Fatal("control window should have no menu bar")
 	}
-	if !u.call.gear.dot {
-		t.Fatal("gear button should show update dot when update is available")
+	if !u.call.upd.Visible() || !u.call.upd.dot {
+		t.Fatal("the update button (by the gear) should show when an update is available")
+	}
+	if u.call.notes.update.Visible() {
+		t.Fatal("an optional update should not show the top banner (the corner notice and button do)")
 	}
 
 	// Verify Gear and "?" menu items cover all required settings and actions.

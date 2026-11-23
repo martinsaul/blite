@@ -4,7 +4,6 @@
  "(Select one)": "(Bitte wählen)",
  "(you)": "(du)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Der Betreiber eines gehosteten Raums kann diesen Schlüssel eintragen, damit du dort Besitzer bist, solange du drin bist.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Eine neuere Version von Bellion Share ist verfügbar. Bitte aktualisiere, wenn du kannst (Einstellungen > Nach Updates suchen).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Das Zertifikat eines gepinnten Servers muss von Let's Encrypt, Google Trust Services oder SSL.com stammen, damit ein Firmen-Proxy oder Antivirenprogramm die Verbindung nicht mitlesen kann. Der Bellion-Share-Server ist immer gepinnt. Pinne deinen eigenen Server, wenn er eine davon nutzt.",
  "A window": "Ein Fenster",
  "About Bellion Share": "Über Bellion Share",
@@ -226,6 +225,7 @@
   "one": "Jemand teilt in {{.Where}} ({{.Count}} Person).",
   "other": "Jemand teilt in {{.Where}} ({{.Count}} Personen)."
  },
+ "Skip": "Überspringen",
  "Something that went wrong or bothers you": "Etwas, das schiefging oder dich stört",
  "Sounds off": "Töne aus",
  "Sounds on: a chime when someone joins or goes live": "Töne an: ein Signal, wenn jemand beitritt oder live geht",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Update-Kanal: {{.Channel}}, zuletzt geprüft {{.Time}}",
  "Update problem: {{.Err}}": "Update-Problem: {{.Err}}",
  "Updated to build {{.Build}}.": "Auf Build {{.Build}} aktualisiert.",
+ "Updating Bellion Share...": "Bellion Share wird aktualisiert...",
  "Upload limit": "Upload-Limit",
  "upload limit": "Upload-Limit",
  "use a host name like share.example.com or a wss:// address": "gib einen Hostnamen wie share.example.com oder eine wss://-Adresse an",

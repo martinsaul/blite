@@ -4,7 +4,6 @@
  "(Select one)": "(Выберите)",
  "(you)": "(вы)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Оператор комнаты на сервере может указать этот ключ, чтобы вы были её владельцем, пока находитесь в ней.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Доступна новая версия Bellion Share. Обновитесь, когда сможете (Настройки > Проверить обновления).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Сертификат закреплённого сервера должен быть от Let's Encrypt, Google Trust Services или SSL.com, чтобы корпоративный прокси или антивирус не могли читать соединение. Сервер Bellion Share закреплён всегда. Закрепите свой сервер, если он использует один из них.",
  "A window": "Окно",
  "About Bellion Share": "О Bellion Share",
@@ -230,6 +229,7 @@
   "many": "В {{.Where}} кто-то показывает экран ({{.Count}} человек).",
   "other": "В {{.Where}} кто-то показывает экран ({{.Count}} человека)."
  },
+ "Skip": "Пропустить",
  "Something that went wrong or bothers you": "Что-то сломалось или мешает",
  "Sounds off": "Звуки выключены",
  "Sounds on: a chime when someone joins or goes live": "Звуки включены: сигнал, когда кто-то входит или начинает трансляцию",
@@ -290,6 +290,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Канал обновлений: {{.Channel}}, последняя проверка {{.Time}}",
  "Update problem: {{.Err}}": "Проблема с обновлением: {{.Err}}",
  "Updated to build {{.Build}}.": "Обновлено до сборки {{.Build}}.",
+ "Updating Bellion Share...": "Обновление Bellion Share...",
  "Upload limit": "Лимит отдачи",
  "upload limit": "лимит отдачи",
  "use a host name like share.example.com or a wss:// address": "укажите имя хоста, например share.example.com, или адрес wss://",

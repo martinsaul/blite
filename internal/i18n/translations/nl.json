@@ -4,7 +4,6 @@
  "(Select one)": "(Kies er een)",
  "(you)": "(jij)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "De beheerder van een gehoste ruimte kan deze sleutel opgeven om je eigenaar te maken zolang je erin zit.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Er is een nieuwere Bellion Share beschikbaar. Update wanneer het je uitkomt (Instellingen > Controleren op updates).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Het certificaat van een vastgezette server moet van Let's Encrypt, Google Trust Services of SSL.com komen, zodat een bedrijfsproxy of virusscanner de verbinding niet kan lezen. De Bellion Share-server is altijd vastgezet. Zet je eigen server vast als die er een van gebruikt.",
  "A window": "Een venster",
  "About Bellion Share": "Over Bellion Share",
@@ -226,6 +225,7 @@
   "one": "Iemand deelt in {{.Where}} ({{.Count}} persoon).",
   "other": "Iemand deelt in {{.Where}} ({{.Count}} mensen)."
  },
+ "Skip": "Overslaan",
  "Something that went wrong or bothers you": "Iets wat misging of je stoort",
  "Sounds off": "Geluid uit",
  "Sounds on: a chime when someone joins or goes live": "Geluid aan: een signaal als iemand binnenkomt of live gaat",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Updatekanaal: {{.Channel}}, laatst gecontroleerd {{.Time}}",
  "Update problem: {{.Err}}": "Updateprobleem: {{.Err}}",
  "Updated to build {{.Build}}.": "Bijgewerkt naar build {{.Build}}.",
+ "Updating Bellion Share...": "Bellion Share wordt bijgewerkt...",
  "Upload limit": "Uploadlimiet",
  "upload limit": "uploadlimiet",
  "use a host name like share.example.com or a wss:// address": "gebruik een hostnaam zoals share.example.com of een wss://-adres",

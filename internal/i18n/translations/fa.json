@@ -4,7 +4,6 @@
  "(Select one)": "(یکی را انتخاب کنید)",
  "(you)": "(شما)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "گرداننده‌ی یک اتاق میزبانی‌شده می‌تواند این کلید را ثبت کند تا وقتی در اتاق هستید، شما مالک آن باشید.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "نسخه‌ی جدیدتری از Bellion Share آمده است. لطفاً هر وقت توانستید به‌روزرسانی کنید (تنظیمات > بررسی به‌روزرسانی).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "گواهی سرور سنجاق‌شده باید از Let's Encrypt، Google Trust Services یا SSL.com باشد تا پراکسی شرکت یا آنتی‌ویروس نتواند اتصال را بخواند. سرور Bellion Share همیشه سنجاق شده است. اگر سرور خودتان از یکی از این‌ها استفاده می‌کند، آن را سنجاق کنید.",
  "A window": "یک پنجره",
  "About Bellion Share": "درباره‌ی Bellion Share",
@@ -226,6 +225,7 @@
   "one": "کسی در {{.Where}} اشتراک گذاشته است ({{.Count}} نفر).",
   "other": "کسی در {{.Where}} اشتراک گذاشته است ({{.Count}} نفر)."
  },
+ "Skip": "رد شدن",
  "Something that went wrong or bothers you": "چیزی که خراب شد یا اذیتتان می‌کند",
  "Sounds off": "صداها خاموش",
  "Sounds on: a chime when someone joins or goes live": "صداها روشن: زنگی وقتی کسی می‌پیوندد یا پخش زنده را شروع می‌کند",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "کانال به‌روزرسانی: {{.Channel}}، آخرین بررسی {{.Time}}",
  "Update problem: {{.Err}}": "مشکل به‌روزرسانی: {{.Err}}",
  "Updated to build {{.Build}}.": "به نسخه‌ی {{.Build}} به‌روزرسانی شد.",
+ "Updating Bellion Share...": "در حال به‌روزرسانی Bellion Share...",
  "Upload limit": "محدودیت آپلود",
  "upload limit": "محدودیت آپلود",
  "use a host name like share.example.com or a wss:// address": "از نام میزبانی مثل share.example.com یا آدرس wss:// استفاده کنید",

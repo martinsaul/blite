@@ -4,7 +4,6 @@
  "(Select one)": "(एक निवडा)",
  "(you)": "(तुम्ही)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "होस्ट केलेल्या रूमचा ऑपरेटर ही की यादीत टाकून, तुम्ही त्या रूममध्ये असेपर्यंत तुम्हाला तिचा मालक बनवू शकतो.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Bellion Share ची नवीन आवृत्ती उपलब्ध आहे. जमेल तेव्हा अपडेट करा (सेटिंग्ज > अपडेट तपासा).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "पिन केलेल्या सर्व्हरचे प्रमाणपत्र Let's Encrypt, Google Trust Services किंवा SSL.com कडून असले पाहिजे, म्हणजे कंपनीचा प्रॉक्सी किंवा अँटीव्हायरस कनेक्शन वाचू शकत नाही. Bellion Share सर्व्हर नेहमी पिन असतो. तुमचा सर्व्हर यांपैकी एक वापरत असल्यास तो पिन करा.",
  "A window": "एक विंडो",
  "About Bellion Share": "Bellion Share बद्दल",
@@ -226,6 +225,7 @@
   "one": "{{.Where}} मध्ये कोणीतरी शेअर करत आहे ({{.Count}} व्यक्ती).",
   "other": "{{.Where}} मध्ये कोणीतरी शेअर करत आहे ({{.Count}} लोक)."
  },
+ "Skip": "वगळा",
  "Something that went wrong or bothers you": "काहीतरी बिघडले किंवा तुम्हाला खटकते",
  "Sounds off": "आवाज बंद",
  "Sounds on: a chime when someone joins or goes live": "आवाज चालू: कोणी सामील झाल्यावर किंवा लाइव्ह गेल्यावर एक ध्वनी",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "अपडेट चॅनल: {{.Channel}}, शेवटची तपासणी {{.Time}}",
  "Update problem: {{.Err}}": "अपडेटमध्ये समस्या: {{.Err}}",
  "Updated to build {{.Build}}.": "बिल्ड {{.Build}} वर अपडेट झाले.",
+ "Updating Bellion Share...": "Bellion Share अपडेट होत आहे...",
  "Upload limit": "अपलोड मर्यादा",
  "upload limit": "अपलोड मर्यादा",
  "use a host name like share.example.com or a wss:// address": "share.example.com सारखे होस्ट नाव किंवा wss:// पत्ता वापरा",

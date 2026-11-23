@@ -67,6 +67,11 @@ type Updater struct {
 	info       Info
 	pending    *molt.Update
 	installing bool
+	// stopStage cancels a running Stage, so an Install takes the download
+	// over (it resumes the partial file).
+	stopStage context.CancelFunc
+
+	dl sync.Mutex // one download at a time: Stage and Install share the file
 }
 
 // New returns an Updater for the running build, or nil when this build can't
@@ -223,7 +228,16 @@ func (u *Updater) Check(ctx context.Context) {
 // One install runs at a time: another call meanwhile gets ErrInstalling.
 // The download has no deadline (a slow link takes as long as it takes);
 // a stalled one is resumed.
-func (u *Updater) Install(ctx context.Context) error {
+func (u *Updater) Install(ctx context.Context) error { return u.install(ctx, nil) }
+
+// InstallAtStart is Install for an update right at start-up: molt-swap
+// relaunches the new build with args too (the link, -background), so it
+// carries on the start the user asked for.
+func (u *Updater) InstallAtStart(ctx context.Context, args []string) error {
+	return u.install(ctx, args)
+}
+
+func (u *Updater) install(ctx context.Context, args []string) error {
 	u.mu.Lock()
 	up, canApply := u.pending, u.info.CanApply
 	if up == nil {
@@ -240,7 +254,12 @@ func (u *Updater) Install(ctx context.Context) error {
 	}
 	u.installing = true
 	u.info.Downloading, u.info.Progress, u.info.Problem = true, 0, ""
+	if u.stopStage != nil {
+		u.stopStage()
+	}
 	u.mu.Unlock()
+	u.dl.Lock()
+	defer u.dl.Unlock()
 	u.changed()
 	defer func() {
 		u.mu.Lock()
@@ -252,13 +271,19 @@ func (u *Updater) Install(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	opts := u.opts
+	opts.Args = append(append([]string(nil), u.opts.Args...), args...)
 	err = retry(ctx, u.log, func() error {
 		path, err := u.c.Download(ctx, up.Payload, cache)
 		if err == nil {
-			err = u.c.Apply(ctx, up, path, u.opts)
+			pruneStaged(cache, path, u.log)
+			err = u.c.Apply(ctx, up, path, opts)
 		}
 		return err
 	})
+	if err != nil && ctx.Err() != nil {
+		return err // given up (Skip at start-up): not a problem to show
+	}
 	if err != nil {
 		u.mu.Lock()
 		u.info.Problem = "Installing the update failed: " + err.Error()
@@ -266,6 +291,72 @@ func (u *Updater) Install(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Stage downloads the pending update into the Molt cache without
+// installing it, so the next start (or an Install) finds it on disk. It
+// shows no progress and gives way to an Install. A newer update replaces
+// what an earlier Stage left. Errors are only logged: the next check
+// tries again, and Install resumes a partial download.
+func (u *Updater) Stage(ctx context.Context) {
+	u.mu.Lock()
+	up := u.pending
+	if up == nil || !u.info.CanApply || u.installing || u.stopStage != nil {
+		u.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	u.stopStage = cancel
+	u.mu.Unlock()
+	defer func() {
+		u.mu.Lock()
+		u.stopStage = nil
+		u.mu.Unlock()
+	}()
+
+	u.dl.Lock()
+	defer u.dl.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	cache, err := u.c.CacheDir(u.opts)
+	if err != nil {
+		u.log.Info("update: pre-download", "err", err)
+		return
+	}
+	quiet := *u.c
+	quiet.Progress = nil
+	path, err := quiet.Download(ctx, up.Payload, cache)
+	if err != nil {
+		u.log.Info("update: pre-download", "build", up.Build, "err", err)
+		return
+	}
+	pruneStaged(cache, path, u.log)
+	u.log.Info("update: pre-downloaded", "build", up.Build, "file", path)
+}
+
+// pruneStaged removes the update payloads in cache other than keep, and
+// their partial downloads: a build downloaded but never installed, which a
+// newer one has replaced. molt-swap's own files (rollback, swap, status,
+// log) stay.
+func pruneStaged(cache, keep string, log *slog.Logger) {
+	ents, err := os.ReadDir(cache)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if !e.Type().IsRegular() || filepath.Join(cache, n) == keep {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(n))
+		if ext == ".zip" || ext == ".deb" || ext == ".part" { // a .part left now is another build's
+			if err := os.Remove(filepath.Join(cache, n)); err == nil {
+				log.Info("update: removed an older download", "file", n)
+			}
+		}
+	}
 }
 
 // progress notes how much of the update is downloaded (whole percents).

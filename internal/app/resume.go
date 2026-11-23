@@ -138,3 +138,9 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 	}
 	return true, nil
 }
+
+// ResumePending reports whether an in-call update left a call to rejoin.
+func ResumePending() bool {
+	_, ok := readResume(time.Now())
+	return ok
+}

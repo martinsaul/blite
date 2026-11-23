@@ -4,7 +4,6 @@
  "(Select one)": "(Elige una opción)",
  "(you)": "(tú)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "El operador de una sala alojada puede registrar esta clave para que seas su propietario mientras estés en ella.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Hay una versión más nueva de Bellion Share. Actualiza cuando puedas (Ajustes > Buscar actualizaciones).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "El certificado de un servidor fijado debe venir de Let's Encrypt, Google Trust Services o SSL.com, para que un proxy de empresa o un antivirus no pueda leer la conexión. El servidor de Bellion Share siempre está fijado. Fija tu propio servidor si usa una de ellas.",
  "A window": "Una ventana",
  "About Bellion Share": "Acerca de Bellion Share",
@@ -228,6 +227,7 @@
   "many": "Alguien está compartiendo en {{.Where}} ({{.Count}} personas).",
   "other": "Alguien está compartiendo en {{.Where}} ({{.Count}} personas)."
  },
+ "Skip": "Omitir",
  "Something that went wrong or bothers you": "Algo que salió mal o que te molesta",
  "Sounds off": "Sonidos desactivados",
  "Sounds on: a chime when someone joins or goes live": "Sonidos activados: un aviso cuando alguien entra o empieza a transmitir",
@@ -288,6 +288,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Canal de actualizaciones: {{.Channel}}, última comprobación {{.Time}}",
  "Update problem: {{.Err}}": "Problema de actualización: {{.Err}}",
  "Updated to build {{.Build}}.": "Actualizado a la build {{.Build}}.",
+ "Updating Bellion Share...": "Actualizando Bellion Share...",
  "Upload limit": "Límite de subida",
  "upload limit": "límite de subida",
  "use a host name like share.example.com or a wss:// address": "usa un nombre de host como share.example.com o una dirección wss://",

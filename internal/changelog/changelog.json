@@ -1,5 +1,14 @@
 [
  {
+  "build": 216,
+  "date": "2026-11-23",
+  "changes": [
+   "Updates have their own button between the settings gear and the help button; a dot shows when one is ready. The bar at the top now only appears for a required update, a download in progress, or a problem.",
+   "On Windows, Bellion installs a waiting update as it starts, with a small window you can skip. If the new version doesn't start properly, you're back on the one you had.",
+   "Updates found while Bellion is open are downloaded in the background when you're not in a call, so they're ready for the next start."
+  ]
+ },
+ {
   "build": 215,
   "date": "2026-11-22",
   "changes": [

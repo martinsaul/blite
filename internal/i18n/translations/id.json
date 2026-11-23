@@ -4,7 +4,6 @@
  "(Select one)": "(Pilih satu)",
  "(you)": "(kamu)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Operator ruang yang di-host dapat mencantumkan kunci ini agar kamu menjadi pemiliknya selama kamu ada di dalamnya.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Bellion Share versi baru tersedia. Perbarui jika sempat (Pengaturan > Periksa pembaruan).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Sertifikat server yang disematkan harus dari Let's Encrypt, Google Trust Services, atau SSL.com, agar proxy kantor atau antivirus tidak bisa membaca koneksi. Server Bellion Share selalu disematkan. Sematkan server Anda sendiri jika memakai salah satunya.",
  "A window": "Satu jendela",
  "About Bellion Share": "Tentang Bellion Share",
@@ -224,6 +223,7 @@
  "Someone is sharing in {{.Where}} ({{.Count}} people).": {
   "other": "Seseorang sedang berbagi di {{.Where}} ({{.Count}} orang)."
  },
+ "Skip": "Lewati",
  "Something that went wrong or bothers you": "Sesuatu yang bermasalah atau mengganggumu",
  "Sounds off": "Suara mati",
  "Sounds on: a chime when someone joins or goes live": "Suara aktif: bunyi saat seseorang bergabung atau mulai siaran",
@@ -284,6 +284,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Kanal pembaruan: {{.Channel}}, terakhir diperiksa {{.Time}}",
  "Update problem: {{.Err}}": "Masalah pembaruan: {{.Err}}",
  "Updated to build {{.Build}}.": "Diperbarui ke build {{.Build}}.",
+ "Updating Bellion Share...": "Memperbarui Bellion Share...",
  "Upload limit": "Batas unggah",
  "upload limit": "batas unggah",
  "use a host name like share.example.com or a wss:// address": "gunakan nama host seperti share.example.com atau alamat wss://",

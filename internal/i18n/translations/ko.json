@@ -4,7 +4,6 @@
  "(Select one)": "(선택하세요)",
  "(you)": "(나)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "호스팅된 방의 운영자가 이 키를 등록하면 방에 있는 동안 방장이 될 수 있어요.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "새 버전의 Bellion Share가 있어요. 가능할 때 업데이트해 주세요(설정 > 업데이트 확인).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "고정된 서버의 인증서는 Let's Encrypt, Google Trust Services 또는 SSL.com에서 발급한 것이어야 하므로 회사 프록시나 백신 프로그램이 연결을 읽을 수 없습니다. Bellion Share 서버는 항상 고정됩니다. 내 서버가 이 중 하나를 사용하면 고정하세요.",
  "A window": "창 하나",
  "About Bellion Share": "Bellion Share 정보",
@@ -224,6 +223,7 @@
  "Someone is sharing in {{.Where}} ({{.Count}} people).": {
   "other": "{{.Where}}에서 누군가 공유 중이에요({{.Count}}명)."
  },
+ "Skip": "건너뛰기",
  "Something that went wrong or bothers you": "잘못됐거나 불편한 점",
  "Sounds off": "소리 꺼짐",
  "Sounds on: a chime when someone joins or goes live": "소리 켜짐: 누군가 참여하거나 방송을 시작하면 알림음",
@@ -284,6 +284,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "업데이트 채널: {{.Channel}}, 마지막 확인 {{.Time}}",
  "Update problem: {{.Err}}": "업데이트 문제: {{.Err}}",
  "Updated to build {{.Build}}.": "빌드 {{.Build}}(으)로 업데이트했어요.",
+ "Updating Bellion Share...": "Bellion Share 업데이트 중...",
  "Upload limit": "업로드 제한",
  "upload limit": "업로드 제한",
  "use a host name like share.example.com or a wss:// address": "share.example.com 같은 호스트 이름이나 wss:// 주소를 사용하세요",

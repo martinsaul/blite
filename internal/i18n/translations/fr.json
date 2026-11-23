@@ -4,7 +4,6 @@
  "(Select one)": "(Choisir)",
  "(you)": "(vous)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "L'administrateur d'un salon hébergé peut ajouter cette clé pour vous en rendre propriétaire quand vous y êtes.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "Une version plus récente de Bellion Share est disponible. Mettez à jour dès que possible (Paramètres > Rechercher des mises à jour).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Le certificat d'un serveur épinglé doit venir de Let's Encrypt, Google Trust Services ou SSL.com, pour qu'un proxy d'entreprise ou un antivirus ne puisse pas lire la connexion. Le serveur Bellion Share est toujours épinglé. Épingle ton propre serveur s'il utilise l'une d'elles.",
  "A window": "Une fenêtre",
  "About Bellion Share": "À propos de Bellion Share",
@@ -228,6 +227,7 @@
   "many": "Quelqu'un partage dans {{.Where}} ({{.Count}} personnes).",
   "other": "Quelqu'un partage dans {{.Where}} ({{.Count}} personnes)."
  },
+ "Skip": "Passer",
  "Something that went wrong or bothers you": "Un problème ou quelque chose qui vous gêne",
  "Sounds off": "Sons désactivés",
  "Sounds on: a chime when someone joins or goes live": "Sons activés : un signal quand quelqu'un arrive ou passe en direct",
@@ -288,6 +288,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Canal de mise à jour : {{.Channel}}, dernière vérification {{.Time}}",
  "Update problem: {{.Err}}": "Problème de mise à jour : {{.Err}}",
  "Updated to build {{.Build}}.": "Mis à jour vers le build {{.Build}}.",
+ "Updating Bellion Share...": "Mise à jour de Bellion Share...",
  "Upload limit": "Limite d'envoi",
  "upload limit": "limite d'envoi",
  "use a host name like share.example.com or a wss:// address": "utilisez un nom d'hôte comme share.example.com ou une adresse wss://",

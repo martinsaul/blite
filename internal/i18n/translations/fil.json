@@ -4,7 +4,6 @@
  "(Select one)": "(Pumili ng isa)",
  "(you)": "(ikaw)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Puwedeng ilista ng operator ng isang hosted room ang key na ito para ikaw ang maging may-ari habang nandoon ka.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "May bagong Bellion Share na. Mag-update ka kapag puwede na (Mga setting > Tingnan kung may update).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Dapat galing sa Let's Encrypt, Google Trust Services o SSL.com ang certificate ng naka-pin na server, para hindi mabasa ng proxy ng kumpanya o antivirus ang koneksyon. Laging naka-pin ang server ng Bellion Share. I-pin ang sarili mong server kung gumagamit ito ng isa sa mga ito.",
  "A window": "Isang window",
  "About Bellion Share": "Tungkol sa Bellion Share",
@@ -226,6 +225,7 @@
   "one": "May nagshe-share sa {{.Where}} ({{.Count}} tao).",
   "other": "May nagshe-share sa {{.Where}} ({{.Count}} tao)."
  },
+ "Skip": "Laktawan",
  "Something that went wrong or bothers you": "May nagkamali o may nakakainis sa iyo",
  "Sounds off": "Naka-off ang tunog",
  "Sounds on: a chime when someone joins or goes live": "Naka-on ang tunog: may tunog kapag may sumali o nag-live",
@@ -286,6 +286,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Update channel: {{.Channel}}, huling tiningnan {{.Time}}",
  "Update problem: {{.Err}}": "Problema sa update: {{.Err}}",
  "Updated to build {{.Build}}.": "Na-update sa build {{.Build}}.",
+ "Updating Bellion Share...": "Ina-update ang Bellion Share...",
  "Upload limit": "Limitasyon sa upload",
  "upload limit": "limitasyon sa upload",
  "use a host name like share.example.com or a wss:// address": "gumamit ng host name gaya ng share.example.com o ng wss:// na address",

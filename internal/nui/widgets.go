@@ -385,6 +385,19 @@ type iconDotButton struct {
 	dot   bool
 	hover bool
 	onTap func(*iconDotButton)
+	tips  *tooltips // nil: no tooltip
+	tip   string
+}
+
+// SetTip sets the tooltip (with tips set).
+func (b *iconDotButton) SetTip(tip string) {
+	if b.tip == tip {
+		return
+	}
+	b.tip = tip
+	if b.hover && b.tips != nil {
+		b.tips.Show(b, tip)
+	}
 }
 
 func newIconDotButton(icon fyne.Resource, onTap func(*iconDotButton)) *iconDotButton {
@@ -412,6 +425,9 @@ func (b *iconDotButton) Cursor() desktop.Cursor { return desktop.PointerCursor }
 func (b *iconDotButton) MouseIn(*desktop.MouseEvent) {
 	b.hover = true
 	b.Refresh()
+	if b.tips != nil && b.tip != "" {
+		b.tips.Show(b, b.tip)
+	}
 }
 
 func (b *iconDotButton) MouseMoved(*desktop.MouseEvent) {}
@@ -419,6 +435,9 @@ func (b *iconDotButton) MouseMoved(*desktop.MouseEvent) {}
 func (b *iconDotButton) MouseOut() {
 	b.hover = false
 	b.Refresh()
+	if b.tips != nil {
+		b.tips.Hide(b)
+	}
 }
 
 func (b *iconDotButton) CreateRenderer() fyne.WidgetRenderer {

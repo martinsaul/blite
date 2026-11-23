@@ -160,6 +160,9 @@ func (u *UI) newUpdateNotice(up *update.Info) fyne.CanvasObject {
 	if up.Notes != "" {
 		body.Add(label(up.Notes))
 	}
+	if u.st.Session != nil {
+		body.Add(caption(i18n.L("Installing restarts and rejoins the call in a few seconds.")))
+	}
 	btns := container.NewHBox()
 	if up.CanApply {
 		install := widget.NewButtonWithIcon(i18n.L("Install and restart"), theme.DownloadIcon(), func() {

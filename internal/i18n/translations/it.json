@@ -4,7 +4,6 @@
  "(Select one)": "(Scegli)",
  "(you)": "(tu)",
  "A hosted room's operator can list this key to make you its owner while you're in it.": "Il gestore di una stanza ospitata può registrare questa chiave per renderti proprietario mentre ci sei dentro.",
- "A newer Bellion Share is available. Please update when you can (Settings > Check for updates).": "È disponibile una versione più recente di Bellion Share. Aggiorna appena puoi (Impostazioni > Cerca aggiornamenti).",
  "A pinned server's certificate must come from Let's Encrypt, Google Trust Services or SSL.com, so a company proxy or antivirus software can't read the connection. The Bellion Share server is always pinned. Pin your own server if it uses one of them.": "Il certificato di un server fissato deve provenire da Let's Encrypt, Google Trust Services o SSL.com, così un proxy aziendale o un antivirus non può leggere la connessione. Il server di Bellion Share è sempre fissato. Fissa il tuo server se usa una di queste.",
  "A window": "Una finestra",
  "About Bellion Share": "Informazioni su Bellion Share",
@@ -228,6 +227,7 @@
   "many": "Qualcuno sta condividendo in {{.Where}} ({{.Count}} persone).",
   "other": "Qualcuno sta condividendo in {{.Where}} ({{.Count}} persone)."
  },
+ "Skip": "Salta",
  "Something that went wrong or bothers you": "Qualcosa che non va o che ti dà fastidio",
  "Sounds off": "Suoni disattivati",
  "Sounds on: a chime when someone joins or goes live": "Suoni attivi: un segnale quando qualcuno entra o va in diretta",
@@ -288,6 +288,7 @@
  "Update channel: {{.Channel}}, last checked {{.Time}}": "Canale di aggiornamento: {{.Channel}}, ultimo controllo {{.Time}}",
  "Update problem: {{.Err}}": "Problema di aggiornamento: {{.Err}}",
  "Updated to build {{.Build}}.": "Aggiornato alla build {{.Build}}.",
+ "Updating Bellion Share...": "Aggiornamento di Bellion Share...",
  "Upload limit": "Limite di upload",
  "upload limit": "limite di upload",
  "use a host name like share.example.com or a wss:// address": "usa un nome host come share.example.com o un indirizzo wss://",

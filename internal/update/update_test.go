@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -209,5 +210,100 @@ func TestInstallSingleFlight(t *testing.T) {
 	}
 	if changes.Load() < 3 {
 		t.Fatalf("%d change notifications", changes.Load())
+	}
+}
+
+// Stage downloads the update for the next start without showing progress,
+// and removes what older builds left in the cache (not molt-swap's files).
+func TestStage(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	body := []byte(strings.Repeat("y", 1000))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+	u := updater(srv.URL, pub)
+	cache := t.TempDir()
+	u.opts.CacheDir = cache
+	u.info.CanApply = true
+	p := payload(23, 0)
+	sum := sha256.Sum256(body)
+	p.URL, p.Size, p.SHA256, p.Filename = srv.URL+"/blob", int64(len(body)), hex.EncodeToString(sum[:]), "blite-23.deb"
+	u.pending = &molt.Update{Payload: p}
+	u.c.Progress = u.progress
+	var changes atomic.Int32
+	u.OnChange = func() { changes.Add(1) }
+	for _, n := range []string{"blite-21.deb", ".molt-dl-old.part", "last-update.json", "molt-swap.log"} {
+		os.WriteFile(filepath.Join(cache, n), []byte("old"), 0o600)
+	}
+
+	u.Stage(context.Background())
+	if b, err := os.ReadFile(filepath.Join(cache, "blite-23.deb")); err != nil || string(b) != string(body) {
+		t.Fatalf("staged file: %q %v", b, err)
+	}
+	for n, want := range map[string]bool{"blite-21.deb": false, ".molt-dl-old.part": false, "last-update.json": true, "molt-swap.log": true} {
+		if _, err := os.Stat(filepath.Join(cache, n)); (err == nil) != want {
+			t.Errorf("%s: kept=%v, want %v", n, err == nil, want)
+		}
+	}
+	if i := u.Info(); changes.Load() != 0 || i.Downloading || i.Progress != 0 {
+		t.Fatalf("Stage showed progress: %d changes, %+v", changes.Load(), i)
+	}
+}
+
+// An Install while Stage downloads takes the download over (Stage stops),
+// and an Install given up on (Skip at start) is no problem to show.
+func TestInstallTakesOverStage(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	body := []byte(strings.Repeat("z", 1000))
+	var reqs atomic.Int32
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/blob" {
+			http.NotFound(w, r) // Apply fails after the download
+			return
+		}
+		if reqs.Add(1) == 1 { // the Stage: hangs until dropped
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+			w.Write(body[:100])
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		w.Write(body)
+	}))
+	defer srv.Close()
+	u := updater(srv.URL, pub)
+	u.opts.CacheDir = t.TempDir()
+	u.info.CanApply = true
+	p := payload(23, 0)
+	sum := sha256.Sum256(body)
+	p.URL, p.Size, p.SHA256 = srv.URL+"/blob", int64(len(body)), hex.EncodeToString(sum[:])
+	u.pending = &molt.Update{Payload: p}
+
+	staged := make(chan struct{})
+	go func() { u.Stage(context.Background()); close(staged) }()
+	<-started
+	if err := u.Install(context.Background()); err == nil {
+		t.Fatal("Install: Apply should fail without an install layout")
+	}
+	select {
+	case <-staged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stage still running")
+	}
+	if _, err := os.Stat(filepath.Join(u.opts.CacheDir, "b.deb")); err != nil {
+		t.Fatalf("Install didn't finish the download: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	u.info.Problem = ""
+	if err := u.InstallAtStart(ctx, []string{"-background"}); err == nil {
+		t.Fatal("a cancelled install succeeded")
+	}
+	if i := u.Info(); i.Problem != "" {
+		t.Fatalf("Skip shows a problem: %q", i.Problem)
 	}
 }
