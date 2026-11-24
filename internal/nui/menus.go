@@ -87,6 +87,34 @@ func (u *UI) showUpdate() {
 	u.toasts.Refresh()
 }
 
+// checkUpdate is the menu's "Check for updates": it always answers, with the
+// update's notice or a note that this is the newest build.
+func (u *UI) checkUpdate() {
+	u.do(func() error {
+		if err := u.a.CheckUpdate(ctx()); err != nil {
+			return err
+		}
+		st, ok := u.a.State().(app.UIState)
+		if !ok || st.Update == nil {
+			return nil
+		}
+		up := *st.Update
+		u.later(func() {
+			switch {
+			case up.Available != "":
+				u.st.Update = &up
+				u.showUpdate()
+			case up.Problem != "": // the banner shows it
+			case up.Offline:
+				u.info(i18n.L("Update"), i18n.L("Couldn't reach the update server. Check your connection and try again."), nil)
+			default:
+				u.info(i18n.L("Update"), i18n.L("Bellion Share is up to date."), nil)
+			}
+		})
+		return nil
+	})
+}
+
 // gearMenuItems builds the Gear button's popup menu.
 func (u *UI) gearMenuItems() []*fyne.MenuItem {
 	up := u.st.Update
@@ -97,9 +125,7 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 	if up != nil && up.Available != "" {
 		install.Label = i18n.L("Install {{.Version}} and restart", i18n.D{"Version": up.Available})
 	}
-	checkUp := disabled(fyne.NewMenuItem(i18n.L("Check for updates"), func() {
-		u.do(func() error { return u.a.CheckUpdate(ctx()) })
-	}), up == nil || up.Checking)
+	checkUp := disabled(fyne.NewMenuItem(i18n.L("Check for updates"), u.checkUpdate), up == nil || up.Checking)
 
 	autostart := check(i18n.L("Open at sign-in"), u.st.Autostart != nil && *u.st.Autostart, func() {
 		on := !(u.st.Autostart != nil && *u.st.Autostart)

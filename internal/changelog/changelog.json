@@ -1,5 +1,14 @@
 [
  {
+  "build": 219,
+  "date": "2026-11-24",
+  "changes": [
+   "Windows: fixed a crash when a video window opened or switched to 60 fps, for example when watching a 4K stream.",
+   "Names and notes on videos are now drawn by Bellion itself, on a soft dark panel.",
+   "Check for updates now always answers, also when you already have the newest version."
+  ]
+ },
+ {
   "build": 218,
   "date": "2026-11-24",
   "changes": [

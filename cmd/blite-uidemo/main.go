@@ -367,8 +367,8 @@ func main() {
 	case "picker":
 		d.inCall = true
 		scene = "picker"
-	case "video", "video-tile":
-		videoScene(arg == "video-tile", *quitAfter)
+	case "video", "video-tile", "video-states":
+		videoScene(arg == "video-tile", arg == "video-states", *quitAfter)
 		return
 	}
 	opts := nui.Options{Scene: scene, Targets: demoTargets, TargetIcons: demoIcons}

@@ -3,6 +3,7 @@ package media
 import (
 	"errors"
 	"fmt"
+	"image"
 	"math"
 	"slices"
 	"strings"
@@ -197,40 +198,51 @@ type Grid struct {
 	win  Window
 	// dropClicks stops the window handing its clicks to the sink (nil: it doesn't).
 	unclick func()
-	// The controls and spinners; ctl guards them.
+	// The controls, spinners and texts; ctl guards them.
 	ctl struct {
 		sync.Mutex
-		tiles  []Tile
-		rects  []rect
-		labels []*gst.Element
-		ov     []tileOverlay
-		mix    *gst.Element
-		on     func(id string, c Control, v float64)
-		shown  int     // tile whose controls show (-1 none)
-		alpha  float64 // their opacity, 0..1
-		hover  Control
-		moved  time.Time
-		moves  uint    // the nav move counter last seen
-		drag   int     // tile whose slider is being dragged (-1 none)
-		phase  float64 // spinner
-		fades  []fade  // per tile: fading out (Fade)
-		big    []bool  // per tile: the name shows at full size
-		done   bool    // Stop began: the elements may go
+		tiles []Tile
+		rects []rect
+		ov    []tileOverlay
+		mix   *gst.Element
+		on    func(id string, c Control, v float64)
+		shown int     // tile whose controls show (-1 none)
+		alpha float64 // their opacity, 0..1
+		hover Control
+		moved time.Time
+		moves uint    // the nav move counter last seen
+		drag  int     // tile whose slider is being dragged (-1 none)
+		phase float64 // spinner
+		fades []fade  // per tile: fading out (Fade)
+		big   []bool  // per tile: the name shows at full size
+		done  bool    // Stop began: the elements may go
 	}
 }
 
-// tileOverlay is one tile's drawn layers: the control bar and the spinner,
-// each fed through its own appsrc into a compositor pad.
+// tileOverlay is one tile's drawn layers: the control bar, the spinner and
+// the texts, each fed through its own appsrc into a compositor pad.
 type tileOverlay struct {
 	bar, spin       *gst.Element // appsrcs (nil: the tile has no controls)
 	barPad, spinPad string
 	barW, barH      int
 	barX, barY      int // the bar's place on the canvas
 	spinS           int
-	wait            *gst.Element // "Waiting for video" text
-	waiting         bool
-	drawn           string // the bar state last pushed
-	spinShown       bool
+	// label is the name (on a stopped tile: that they stopped), wait
+	// "Waiting for video" under the spinner.
+	label, wait textLayer
+	waiting     bool
+	drawn       string // the bar state last pushed
+	spinShown   bool
+}
+
+// textLayer is a text drawn over a tile.
+type textLayer struct {
+	src        *gst.Element // appsrc (nil: no text)
+	pad        string
+	x, y, w, h int // its place on the canvas
+	tileW      int // the tile's width: the text scales with it
+	text       string
+	drawn      string // the text and size last pushed
 }
 
 type rect struct{ x, y, w, h int }
@@ -309,15 +321,31 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		fmt.Fprintf(&b, " sink_%d::xpos=%d sink_%d::ypos=%d", i, r.x, i, r.y)
 	}
 	// Drawn layers: two pads per tile with controls, above everything,
-	// hidden (alpha 0) until shown.
+	// hidden (alpha 0) until shown; the texts over their tiles.
 	type layer struct {
 		pad, ch string
 		x, y    int
 		w, h    int
 		appsrc  string
+		z       int // zTile, zPiP or zTop
+		hidden  bool
 	}
+	const (
+		zTile = iota // over the tiles, under a corner picture
+		zPiP         // over the corner picture
+		zTop         // over everything
+	)
 	var layers []layer
 	next := len(tiles)
+	seq := overlaySeq.Add(1)
+	add := func(l layer, i, k int) string {
+		l.pad = fmt.Sprintf("sink_%d", next)
+		l.ch = fmt.Sprintf("blite-ov-%d-%d-%d", seq, i, k)
+		l.appsrc = fmt.Sprintf("ov%d_%d", i, k)
+		next++
+		layers = append(layers, l)
+		return l.pad
+	}
 	for i, t := range tiles {
 		if !controls || t.ID == "" || t.Stopped {
 			continue
@@ -327,30 +355,55 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		o.barW, o.barH = barSize(r.w, r.h, t)
 		o.barX, o.barY = r.x+(r.w-o.barW)/2, r.y+r.h-o.barH-o.barH/3
 		o.spinS = spinnerSize(r.w, r.h)
-		seq := overlaySeq.Add(1)
-		for k, l := range []layer{
-			{x: o.barX, y: o.barY, w: o.barW, h: o.barH},
-			{x: r.x + (r.w-o.spinS)/2, y: r.y + (r.h-o.spinS)/2, w: o.spinS, h: o.spinS},
-		} {
-			if t.Self && k == 1 {
-				// Our own preview comes from local capture, so no network spinner.
-				continue
+		o.barPad = add(layer{x: o.barX, y: o.barY, w: o.barW, h: o.barH, z: zTop, hidden: true}, i, 0)
+		if !t.Self { // our own preview comes from local capture, so no network spinner
+			o.spinPad = add(layer{x: r.x + (r.w-o.spinS)/2, y: r.y + (r.h-o.spinS)/2, w: o.spinS, h: o.spinS, z: zTop, hidden: true}, i, 1)
+		}
+	}
+	// The texts, sized for the longest they get.
+	for i, t := range tiles {
+		r := rects[i]
+		o := &ovs[i]
+		z := zTile
+		if overPiP(tiles, i) {
+			z = zPiP
+		}
+		m := textMargin(r)
+		maxW := r.w - 2*m
+		l := &o.label
+		l.tileW = r.w
+		if t.Stopped {
+			if box := textBox(tileText(t), textPx(stoppedPx, r.w), maxW, false); box != nil {
+				l.w, l.h = box.Rect.Dx(), box.Rect.Dy()
+				l.x, l.y = r.x+(r.w-l.w)/2, r.y+(r.h-l.h)/2
 			}
-			l.pad = fmt.Sprintf("sink_%d", next)
-			l.ch = fmt.Sprintf("blite-ov-%d-%d", seq, k)
-			l.appsrc = fmt.Sprintf("ov%d_%d", i, k)
-			next++
-			layers = append(layers, l)
-			if k == 0 {
-				o.barPad = l.pad
-			} else {
-				o.spinPad = l.pad
+		} else {
+			muted := t
+			muted.Muted = !t.Muted
+			for _, tt := range []Tile{t, muted} {
+				if box := textBox(tileText(tt), labelPx(true, r.w), maxW, true); box != nil {
+					l.w, l.h = max(l.w, box.Rect.Dx()), max(l.h, box.Rect.Dy())
+				}
+			}
+			l.x, l.y = r.x+m, r.y+m
+		}
+		if l.w > 0 {
+			l.pad = add(layer{x: l.x, y: l.y, w: l.w, h: l.h, z: z}, i, 2)
+		}
+		if o.spinPad != "" {
+			w := &o.wait
+			w.tileW, w.text = r.w, i18n.L("Waiting for video")
+			if box := textBox(w.text, textPx(waitPx, r.w), maxW, true); box != nil {
+				w.w, w.h = box.Rect.Dx(), box.Rect.Dy()
+				w.x, w.y = r.x+(r.w-w.w)/2, r.y+r.h*66/100-w.h/2
+				w.pad = add(layer{x: w.x, y: w.y, w: w.w, h: w.h, z: z, hidden: true}, i, 3)
 			}
 		}
 	}
 	// A corner picture goes over the other tiles, on a frame that sets it
 	// apart from them, under the controls.
 	var frame string // the frame's source (none: "")
+	top := next      // zorders from here up: over every tile
 	for i, t := range tiles {
 		if !overPiP(tiles, i) || t.Stopped {
 			continue
@@ -358,12 +411,16 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		r := rects[i]
 		pad := fmt.Sprintf("sink_%d", next)
 		next++
-		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d sink_%d::zorder=%d", pad, r.x-pipFrame, pad, r.y-pipFrame, pad, next, i, next+1)
+		top = next
+		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d sink_%d::zorder=%d", pad, r.x-pipFrame, pad, r.y-pipFrame, pad, top+1, i, top+2)
 		frame = fmt.Sprintf(" videotestsrc is-live=true pattern=solid-color foreground-color=%#x ! "+
 			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, fps, pad)
 	}
 	for _, l := range layers {
-		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d %s::alpha=0", l.pad, l.x, l.pad, l.y, l.pad, next+2, l.pad)
+		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d", l.pad, l.x, l.pad, l.y, l.pad, top+[]int{0, 3, 4}[l.z])
+		if l.hidden {
+			fmt.Fprintf(&b, " %s::alpha=0", l.pad)
+		}
 	}
 	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, fps, sink)
 	// intervideosrc reports a latency of 0..0 and a live videotestsrc one
@@ -378,27 +435,23 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	}
 	for i, t := range tiles {
 		r := rects[i]
-		if t.Stopped { // black, the text in the middle (showStateLocked sets it)
+		if t.Stopped { // black, the text in the middle (its label layer)
 			fmt.Fprintf(&b, " videotestsrc is-live=true pattern=black ! "+
-				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! "+
-				"textoverlay name=label%d valignment=center halignment=center font-desc=\"Sans 28\" ! mix.sink_%d",
-				r.w, r.h, fps, i, i)
+				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! mix.sink_%d",
+				r.w, r.h, fps, i)
 			continue
-		}
-		wait := ""
-		if ovs[i].spinPad != "" {
-			wait = fmt.Sprintf("textoverlay name=wait%d silent=true text=%s valignment=position ypos=0.66 halignment=center font-desc=\"Sans 16\" shaded-background=true ! ", i, launchQuote(i18n.L("Waiting for video")))
 		}
 		// The framerate sets intervideosrc's, which is 30 unless asked.
 		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! videoscale add-borders=true ! "+
-			"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1,interlace-mode=progressive ! "+
-			"textoverlay name=label%d valignment=top halignment=left font-desc=\"%s\" shaded-background=true ! %smix.sink_%d",
-			t.Channel, interHold, inter, r.w, r.h, fps, i, labelFont(ovs[i].barPad == ""), wait, i)
+			"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1,interlace-mode=progressive ! mix.sink_%d",
+			t.Channel, interHold, inter, r.w, r.h, fps, i)
 	}
 	b.WriteString(frame)
 	for _, l := range layers {
-		// intervideosrc repeats the last frame we drew, like the tiles.
-		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! mix.%s", l.ch, interHold, inter, l.pad)
+		// intervideosrc repeats the last frame we drew, like the tiles. Its
+		// caps are the layer's, so before that it is transparent, not black.
+		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! video/x-raw,format=RGBA,width=%d,height=%d ! %svideoconvert ! mix.%s",
+			l.ch, interHold, l.w, l.h, inter, l.pad)
 		// async=false: a layer not drawn yet (the spinner until a stream
 		// waits) would hold the feed short of PLAYING, and the bar's sink
 		// would block on its first frame, never showing a redraw.
@@ -414,16 +467,19 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		}
 		g.feed = fp
 		for i := range ovs {
-			if ovs[i].barPad == "" {
-				continue
-			}
-			ovs[i].bar, err = fp.element(fmt.Sprintf("ov%d_0", i))
-			if err == nil && ovs[i].spinPad != "" {
-				ovs[i].spin, err = fp.element(fmt.Sprintf("ov%d_1", i))
-			}
-			if err != nil {
-				fp.Stop()
-				return nil, err
+			o := &ovs[i]
+			for _, e := range []struct {
+				pad string
+				src **gst.Element
+				k   int
+			}{{o.barPad, &o.bar, 0}, {o.spinPad, &o.spin, 1}, {o.label.pad, &o.label.src, 2}, {o.wait.pad, &o.wait.src, 3}} {
+				if e.pad == "" {
+					continue
+				}
+				if *e.src, err = fp.element(fmt.Sprintf("ov%d_%d", i, e.k)); err != nil {
+					fp.Stop()
+					return nil, err
+				}
 			}
 		}
 		if err := fp.start(); err != nil {
@@ -449,20 +505,18 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	g.Pipeline = p
 	g.Sink = strings.Fields(sink)[0]
 	g.ctl.tiles, g.ctl.rects, g.ctl.on, g.ctl.shown, g.ctl.drag = slices.Clone(tiles), rects, cfg.OnControl, -1, -1
-	g.ctl.labels, g.ctl.ov = make([]*gst.Element, len(tiles)), ovs
+	g.ctl.ov = ovs
 	g.ctl.fades = make([]fade, len(tiles))
 	g.ctl.big = make([]bool, len(tiles))
 	if g.ctl.mix, err = p.element("mix"); err != nil {
 		return fail(err)
 	}
 	for i := range tiles {
-		if g.ctl.labels[i], err = p.element(fmt.Sprintf("label%d", i)); err != nil {
-			return fail(err)
+		g.ctl.big[i] = ovs[i].barPad == "" // no controls: always full size
+		if w := &ovs[i].wait; w.src != nil {
+			w.src.Push(placed(w.w, w.h, textBox(w.text, textPx(waitPx, w.tileW), w.w, true), true).Pix)
 		}
 		if ovs[i].spinPad != "" {
-			if g.ctl.ov[i].wait, err = p.element(fmt.Sprintf("wait%d", i)); err != nil {
-				return fail(err)
-			}
 			g.pushSpinnerLocked(i)
 		}
 		if ovs[i].barPad != "" {
@@ -530,14 +584,27 @@ const (
 	spinTurn    = 1200 * time.Millisecond // one spinner turn
 )
 
-// labelFont is a tile's name: full size while its controls show, a quarter
+// The tiles' texts' heights in pixels on a tile 640 wide; they scale with
+// its width.
+const (
+	namePx    = 18.67 // a name while its controls show
+	stoppedPx = 37.33 // they stopped sharing
+	waitPx    = 21.33 // waiting for video
+)
+
+func textPx(px float64, tileW int) float64 { return px * float64(tileW) / 640 }
+
+// labelPx is a tile's name: full size while its controls show, a quarter
 // of that otherwise so it covers little of the picture.
-func labelFont(big bool) string {
+func labelPx(big bool, tileW int) float64 {
 	if big {
-		return "Sans 14"
+		return textPx(namePx, tileW)
 	}
-	return "Sans 3.5"
+	return textPx(namePx/4, tileW)
 }
+
+// textMargin is the space between a tile's edge and its name.
+func textMargin(r rect) int { return min(24, r.w/20, r.h/20) &^ 1 }
 
 // tick handles the pointer events since the last call, fades the controls
 // and the tiles going away, and turns the spinners.
@@ -575,7 +642,7 @@ func (g *Grid) tick(nav *gst.Nav, now time.Time) {
 		}
 		if big := i == g.ctl.shown && a > 0; big != g.ctl.big[i] {
 			g.ctl.big[i] = big
-			g.ctl.labels[i].SetString("font-desc", labelFont(big))
+			g.pushLabelLocked(i)
 		}
 	}
 	// tiles going away
@@ -591,6 +658,9 @@ func (g *Grid) tick(nav *gst.Nav, now time.Time) {
 		if math.Abs(a-f.alpha) > 0.01 || a == 0 {
 			f.alpha = a
 			g.ctl.mix.SetPadDouble(fmt.Sprintf("sink_%d", i), "alpha", a)
+			if pad := g.ctl.ov[i].label.pad; pad != "" {
+				g.ctl.mix.SetPadDouble(pad, "alpha", a)
+			}
 		}
 	}
 	// spinners
@@ -737,7 +807,9 @@ func (g *Grid) pushSpinnerLocked(i int) {
 			a = 1
 		}
 		g.ctl.mix.SetPadDouble(o.spinPad, "alpha", a)
-		o.wait.SetBool("silent", !o.waiting)
+		if o.wait.pad != "" {
+			g.ctl.mix.SetPadDouble(o.wait.pad, "alpha", a)
+		}
 	}
 }
 
@@ -809,10 +881,30 @@ func (g *Grid) Fade(id string, d time.Duration) {
 
 // showStateLocked writes tile i's state into its label and controls.
 func (g *Grid) showStateLocked(i int) {
-	t := g.ctl.tiles[i]
-	label := tileText(t)
-	g.ctl.labels[i].SetString("text", label) // a property, so no escaping in the launch line
+	g.pushLabelLocked(i)
 	g.pushBarLocked(i)
+}
+
+// pushLabelLocked draws tile i's label if its text or size changed.
+func (g *Grid) pushLabelLocked(i int) {
+	l := &g.ctl.ov[i].label
+	if l.src == nil {
+		return
+	}
+	t := g.ctl.tiles[i]
+	text, big := tileText(t), g.ctl.big[i]
+	key := fmt.Sprintf("%t %s", big, text)
+	if key == l.drawn {
+		return
+	}
+	l.text, l.drawn = text, key
+	var img *image.NRGBA
+	if t.Stopped {
+		img = placed(l.w, l.h, textBox(text, textPx(stoppedPx, l.tileW), l.w, false), true)
+	} else {
+		img = placed(l.w, l.h, textBox(text, labelPx(big, l.tileW), l.w, true), false)
+	}
+	l.src.Push(img.Pix)
 }
 
 // tileText is the tile's label: their name and whether playback is muted.
@@ -824,11 +916,6 @@ func tileText(t Tile) string {
 		return t.Label + "  " + i18n.L("(muted)")
 	}
 	return t.Label
-}
-
-// launchQuote quotes s as a property value in a gst-launch line.
-func launchQuote(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 // Tiles is what the grid shows.

@@ -44,6 +44,7 @@ type Info struct {
 	Mandatory bool   `json:"mandatory,omitempty"` // below the channel's minimum: no sessions until updated
 	CanApply  bool   `json:"canApply"`            // this install can update itself
 	Problem   string `json:"problem,omitempty"`   // tampering or a failed install; never "offline"
+	Offline   bool   `json:"offline,omitempty"`   // the last check didn't reach the server
 	Result    string `json:"result,omitempty"`    // outcome of the last update, shown once
 	// UpdatedFrom/UpdatedTo: Result is a successful update between these
 	// builds (the UI shows the changes in between).
@@ -253,6 +254,7 @@ func (u *Updater) Check(ctx context.Context) {
 	u.info.Checking = false
 	switch {
 	case err == nil, errors.Is(err, molt.ErrNoRelease):
+		u.info.Offline = false
 		u.pending = up
 		u.info.Checked = time.Now().UTC().Format("2006-01-02 15:04")
 		u.info.Available, u.info.Notes, u.info.Mandatory = "", "", false
@@ -267,6 +269,7 @@ func (u *Updater) Check(ctx context.Context) {
 		u.log.Error("update manifest failed verification", "err", err)
 		u.info.Problem = "The update server sent an update that failed its signature check, so it was ignored."
 	default: // ErrCouldNotCheck and anything else: stay quiet
+		u.info.Offline = true
 		u.log.Info("update check", "err", err)
 	}
 }

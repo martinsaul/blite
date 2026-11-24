@@ -6,13 +6,16 @@ import (
 	"time"
 
 	"blite/internal/media"
+	"blite/internal/nui"
 )
 
 // videoScene shows the main video window as a call draws it: two people's
 // streams and our own preview, in the corner (or as a tile), with working
-// controls (logged). It runs until quitAfter (0: until killed).
-func videoScene(tile bool, quitAfter time.Duration) {
+// controls (logged). states adds a tile whose sharer stopped and has the
+// second stream wait for video. It runs until quitAfter (0: until killed).
+func videoScene(tile, states bool, quitAfter time.Duration) {
 	media.Init()
+	nui.SetVideoText()
 	var tiles []media.Tile
 	for _, p := range []struct{ name, id, pattern string }{{"Bob#2926", "a", "smpte"}, {"Carol#0815", "b", "pinwheel"}} {
 		ch := media.NewPreviewChannel()
@@ -35,6 +38,9 @@ func videoScene(tile bool, quitAfter time.Duration) {
 	if tile {
 		ch = media.PreviewBigChannel(self)
 	}
+	if states {
+		tiles = append(tiles, media.Tile{Label: "Dave#4711", ID: "c", Stopped: true})
+	}
 	tiles = append(tiles, media.Tile{Channel: ch, Label: "You", ID: "self", Self: true, PiP: !tile})
 	win, err := media.OpenVideoWindow("Bellion Share", 1280, 720)
 	if err != nil {
@@ -47,6 +53,9 @@ func videoScene(tile bool, quitAfter time.Duration) {
 		log.Fatal(err)
 	}
 	defer g.Stop()
+	if states {
+		g.SetWaiting("b", true)
+	}
 	log.Printf("video window drawn by %s", g.Sink)
 	if quitAfter <= 0 {
 		quitAfter = 24 * time.Hour

@@ -6,10 +6,15 @@ import (
 	"math"
 )
 
-// The controls on a video tile and its waiting spinner
+// The controls on a video tile, its waiting spinner and its texts
 // are drawn here, at the size they show on the canvas, and
 // composed over the tile: crisp, of even size, and faded through the
 // compositor pad's alpha.
+
+// DrawText draws text white on transparent, px pixels high: as wide as it
+// advances, as high as the font's line (nil: no text). The UI sets it
+// (fonts for every script); without it the tiles show no texts.
+var DrawText func(text string, px float64) *image.NRGBA
 
 // The bar, in units of its height h: eye, pop-out/pop-in and pin on every
 // tile, plus mute and the volume slider (0..maxVolume, a tick at 100%) on
@@ -126,6 +131,18 @@ func (cv canvas) fill(c color.NRGBA, sdf func(x, y float64) float64) {
 
 func circle(cx, cy, r float64) func(x, y float64) float64 {
 	return func(x, y float64) float64 { return math.Hypot(x-cx, y-cy) - r }
+}
+
+// roundRect is the rectangle x0,y0 - x1,y1 with corners of radius r.
+func roundRect(x0, y0, x1, y1, r float64) func(x, y float64) float64 {
+	return func(x, y float64) float64 {
+		dx := max(x0+r-x, x-(x1-r), 0)
+		dy := max(y0+r-y, y-(y1-r), 0)
+		if dx > 0 && dy > 0 {
+			return math.Hypot(dx, dy) - r
+		}
+		return max(x0-x, x-x1, y0-y, y-y1)
+	}
 }
 
 // capsule is a segment a-b with round ends of radius r.
@@ -293,5 +310,70 @@ func drawSpinner(s int, phase float64) *image.NRGBA {
 	cv.fill(dimWhite, arc(0.5, 0.5, 0.3, 0.05, -math.Pi, math.Pi))
 	a := phase * 2 * math.Pi
 	cv.fill(white, arc(0.5, 0.5, 0.3, 0.05, a, a+1.6))
+	return cv.img
+}
+
+// textBox draws text px pixels high, on a shaded rounded panel when shade,
+// no wider than maxW: a text too wide for it is drawn smaller (nil: no
+// DrawText, or no text).
+func textBox(text string, px float64, maxW int, shade bool) *image.NRGBA {
+	if DrawText == nil {
+		return nil
+	}
+	t := DrawText(text, px)
+	if t == nil {
+		return nil
+	}
+	padX, padY := int(math.Ceil(px*0.4)), int(math.Ceil(px*0.1))
+	if w := t.Rect.Dx() + 2*padX; w > maxW && maxW > 2*padX {
+		px *= float64(maxW) / float64(w)
+		if t = DrawText(text, px); t == nil {
+			return nil
+		}
+		padX, padY = int(math.Ceil(px*0.4)), int(math.Ceil(px*0.1))
+	}
+	w := min((t.Rect.Dx()+2*padX+1)&^1, max(maxW&^1, 2))
+	h := (t.Rect.Dy() + 2*padY + 1) &^ 1
+	cv := canvas{image.NewNRGBA(image.Rect(0, 0, w, h)), 1}
+	if shade {
+		cv.fill(panel, roundRect(0, 0, float64(w), float64(h), min(float64(h)/2, px*0.35)))
+	}
+	cv.over(t, padX, (h-t.Rect.Dy())/2)
+	return cv.img
+}
+
+// over draws src over the canvas with its top left at x, y.
+func (cv canvas) over(src *image.NRGBA, x, y int) {
+	r := src.Rect.Add(image.Pt(x, y)).Intersect(cv.img.Rect)
+	for py := r.Min.Y; py < r.Max.Y; py++ {
+		for px := r.Min.X; px < r.Max.X; px++ {
+			s := src.Pix[src.PixOffset(px-x, py-y):]
+			a := float64(s[3]) / 255
+			if a <= 0 {
+				continue
+			}
+			p := cv.img.Pix[cv.img.PixOffset(px, py):]
+			da := float64(p[3]) / 255
+			oa := a + da*(1-a)
+			for k := range 3 {
+				p[k] = uint8((float64(s[k])*a + float64(p[k])*da*(1-a)) / oa)
+			}
+			p[3] = uint8(oa*255 + 0.5)
+		}
+	}
+}
+
+// placed is a w x h layer with box in it: in its top left corner, or
+// centred.
+func placed(w, h int, box *image.NRGBA, centre bool) *image.NRGBA {
+	cv := canvas{image.NewNRGBA(image.Rect(0, 0, w, h)), 1}
+	if box == nil {
+		return cv.img
+	}
+	x, y := 0, 0
+	if centre {
+		x, y = (w-box.Rect.Dx())/2, (h-box.Rect.Dy())/2
+	}
+	cv.over(box, x, y)
 	return cv.img
 }

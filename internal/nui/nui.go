@@ -96,6 +96,7 @@ func Run(a ui.Backend, o Options) {
 	}
 	setFyneLanguage()
 	fa.Settings().SetTheme(themeFor())
+	SetVideoText()
 	curMu.Lock()
 	cur = u
 	curMu.Unlock()

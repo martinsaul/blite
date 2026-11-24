@@ -1,8 +1,10 @@
 package media
 
 import (
+	"image"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"blite/internal/i18n"
 )
@@ -375,6 +377,7 @@ func TestGridPinnedWithPreviewTile(t *testing.T) {
 // keep coming, and Fade takes it out.
 func TestGridStoppedTile(t *testing.T) {
 	Init()
+	fakeText(t)
 	pl, err := StartPlayer(ViewGrid)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +403,10 @@ func TestGridStoppedTile(t *testing.T) {
 	}
 	frames(10)
 	// In the language the tests run in (BLITE_LANG, the locale).
-	if got, want := g.ctl.labels[1].GetString("text"), i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": `bob "quoted" ! name`}); got != want {
+	g.ctl.Lock()
+	label := g.ctl.ov[1].label
+	g.ctl.Unlock()
+	if got, want := label.text, i18n.L("{{.Name}} stopped sharing", i18n.D{"Name": `bob "quoted" ! name`}); got != want {
 		t.Fatalf("stopped tile says %q", got)
 	}
 	if g.ctl.ov[1].bar != nil {
@@ -436,8 +442,88 @@ func TestGridLabelText(t *testing.T) {
 			t.Errorf("tileText(%+v) = %q, want %q", c.t, got, c.want)
 		}
 	}
-	if got := launchQuote(`a "b" \ c`); got != `"a \"b\" \\ c"` {
-		t.Error(got)
+}
+
+// fakeText stands in for the UI's DrawText: an opaque box px high and half
+// that wide per character.
+func fakeText(t *testing.T) {
+	old := DrawText
+	DrawText = func(s string, px float64) *image.NRGBA {
+		img := image.NewNRGBA(image.Rect(0, 0, max(int(px/2)*utf8.RuneCountInString(s), 1), max(int(px*1.4), 1)))
+		for i := range img.Pix {
+			img.Pix[i] = 255
+		}
+		return img
+	}
+	t.Cleanup(func() { DrawText = old })
+}
+
+// A text too wide for its tile is drawn smaller; the box is even and on a
+// panel.
+func TestTextBox(t *testing.T) {
+	if textBox("Bob", 20, 600, true) != nil {
+		t.Fatal("a box without DrawText")
+	}
+	fakeText(t)
+	b := textBox("Bob", 20, 600, true)
+	if w, h := b.Rect.Dx(), b.Rect.Dy(); w != 46 || h != 32 || w%2 != 0 || h%2 != 0 {
+		t.Fatalf("box %dx%d", w, h)
+	}
+	if b.NRGBAAt(1, b.Rect.Dy()/2).A == 0 {
+		t.Fatal("no panel at the edge")
+	}
+	if b := textBox("a long name, longer than its tile", 20, 120, true); b.Rect.Dx() > 120 || b.Rect.Dy() >= 32 {
+		t.Fatalf("too wide a text: %v", b.Rect)
+	}
+	if p := placed(100, 40, b, false); p.Rect.Dx() != 100 || p.NRGBAAt(99, 39).A != 0 || p.NRGBAAt(2, 2).A == 0 {
+		t.Fatal("placed wrong")
+	}
+}
+
+// The names are drawn layers: pushed again only when the text or size
+// changes, and none without DrawText.
+func TestGridLabels(t *testing.T) {
+	Init()
+	pl, err := StartPlayer(ViewGrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pl.Stop()
+	cfg := GridConfig{Tiles: []Tile{{Channel: pl.Channel, Label: "alice", ID: "a", Volume: 1}}, View: ViewCount, Width: 1280, Height: 720,
+		OnControl: func(string, Control, float64) {}}
+	g, err := StartGrid(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.ctl.ov[0].label.src != nil || g.ctl.ov[0].wait.src != nil {
+		t.Fatal("texts without DrawText")
+	}
+	g.Stop()
+
+	fakeText(t)
+	g, err = StartGrid(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	g.ctl.Lock()
+	l, w := g.ctl.ov[0].label, g.ctl.ov[0].wait
+	g.ctl.Unlock()
+	if l.src == nil || l.text != "alice" || l.drawn != "false alice" || w.src == nil {
+		t.Fatalf("label %+v, wait %+v", l, w)
+	}
+	// wide enough for "alice  (muted)" at full size, inside the tile
+	if want := textBox(tileText(Tile{Label: "alice", Muted: true}), labelPx(true, 1280), 1280, true).Rect.Dx(); l.w != want || l.x != 24 || l.y != 24 {
+		t.Fatalf("label at %d,%d %dx%d, want %d wide", l.x, l.y, l.w, l.h, want)
+	}
+	g.SetState("a", true, 1, false, false)
+	g.ctl.Lock()
+	g.ctl.big[0] = true
+	g.pushLabelLocked(0)
+	got := g.ctl.ov[0].label.drawn
+	g.ctl.Unlock()
+	if want := "true " + tileText(Tile{Label: "alice", Muted: true}); got != want {
+		t.Fatalf("label drawn %q, want %q", got, want)
 	}
 }
 
