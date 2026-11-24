@@ -69,7 +69,7 @@ type GridConfig struct {
 	// Width x Height is the canvas (the window's first size); 0 = 1920x1080.
 	Width, Height int
 	// FPS is the window's frame rate; 0 = GridFPS. Streams faster than it
-	// show at its rate.
+	// show at its rate. Grid.SetFPS changes it while the window runs.
 	FPS int
 	// OnControl gets the controls used on a tile with an ID (v: the
 	// volume for ControlVolume); nil = no controls. It runs on its own
@@ -196,6 +196,12 @@ type Grid struct {
 	// Sink is the video sink drawing the window (for the log).
 	Sink string
 	win  Window
+	// The frame rate (see SetFPS): the compositor's output caps (outCaps
+	// with %d for it) and the tiles' videorates. ctl guards them.
+	rate    *gst.Element
+	outCaps string
+	thin    []*gst.Element
+	fps     int
 	// dropClicks stops the window handing its clicks to the sink (nil: it doesn't).
 	unclick func()
 	// The controls, spinners and texts; ctl guards them.
@@ -414,7 +420,7 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 		top = next
 		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d sink_%d::zorder=%d", pad, r.x-pipFrame, pad, r.y-pipFrame, pad, top+1, i, top+2)
 		frame = fmt.Sprintf(" videotestsrc is-live=true pattern=solid-color foreground-color=%#x ! "+
-			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, fps, pad)
+			"video/x-raw,width=%d,height=%d,framerate=%d/1 ! mix.%s", pipFrameColor, r.w+2*pipFrame, r.h+2*pipFrame, GridFPS, pad)
 	}
 	for _, l := range layers {
 		fmt.Fprintf(&b, " %s::xpos=%d %s::ypos=%d %s::zorder=%d", l.pad, l.x, l.pad, l.y, l.pad, top+[]int{0, 3, 4}[l.z])
@@ -422,7 +428,10 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 			fmt.Fprintf(&b, " %s::alpha=0", l.pad)
 		}
 	}
-	fmt.Fprintf(&b, " ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! identity name=out ! videoconvert ! %s", outW, outH, fps, sink)
+	// SetFPS sets the window's rate on this capsfilter: the compositor
+	// renegotiates and the sink takes the new caps, nothing restarts.
+	outCaps := fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%%d/1", outW, outH)
+	fmt.Fprintf(&b, ` ! capsfilter name=rate caps="%s" ! identity name=out ! videoconvert ! %s`, fmt.Sprintf(outCaps, fps), sink)
 	// intervideosrc reports a latency of 0..0 and a live videotestsrc one
 	// frame..one frame: together the compositor's latency query fails
 	// (min > max), logging an error on every query, ~180 a second. A
@@ -435,16 +444,24 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	}
 	for i, t := range tiles {
 		r := rects[i]
+		// Solid sources (here and the corner picture's frame) stay at
+		// GridFPS: the compositor repeats their last frame when faster.
 		if t.Stopped { // black, the text in the middle (its label layer)
 			fmt.Fprintf(&b, " videotestsrc is-live=true pattern=black ! "+
 				"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! mix.sink_%d",
-				r.w, r.h, fps, i)
+				r.w, r.h, GridFPS, i)
 			continue
 		}
-		// The framerate sets intervideosrc's, which is 30 unless asked.
-		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! %svideoconvert ! videoscale add-borders=true ! "+
-			"video/x-raw,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1,interlace-mode=progressive ! mix.sink_%d",
-			t.Channel, interHold, inter, r.w, r.h, fps, i)
+		// intervideosrc always runs at the fast rate (its own is 30) and a
+		// videorate drops frames down to the window's, which SetFPS changes.
+		// intervideosrc doesn't take a new rate while it runs: the tile
+		// stalls or fails to negotiate. drop-only: a videorate that may
+		// also repeat frames adds a frame of latency, and the compositor's
+		// latency query fails again (see above).
+		fmt.Fprintf(&b, " intervideosrc channel=%s %s ! video/x-raw,framerate=%d/1 ! videorate name=rate_%d drop-only=true max-rate=%d ! "+
+			"%svideoconvert ! videoscale add-borders=true ! "+
+			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1,interlace-mode=progressive ! mix.sink_%d",
+			t.Channel, interHold, GridFastFPS, i, fps, inter, r.w, r.h, i)
 	}
 	b.WriteString(frame)
 	for _, l := range layers {
@@ -510,6 +527,20 @@ func startGrid(cfg GridConfig, sink string, win Window, embed bool) (*Grid, erro
 	g.ctl.big = make([]bool, len(tiles))
 	if g.ctl.mix, err = p.element("mix"); err != nil {
 		return fail(err)
+	}
+	g.fps, g.outCaps = fps, outCaps
+	if g.rate, err = p.element("rate"); err != nil {
+		return fail(err)
+	}
+	for i, t := range tiles {
+		if t.Stopped {
+			continue
+		}
+		el, err := p.element(fmt.Sprintf("rate_%d", i))
+		if err != nil {
+			return fail(err)
+		}
+		g.thin = append(g.thin, el)
 	}
 	for i := range tiles {
 		g.ctl.big[i] = ovs[i].barPad == "" // no controls: always full size
@@ -937,6 +968,32 @@ func (g *Grid) Frames() int {
 		return -1
 	}
 	return g.out.Load()
+}
+
+// SetFPS changes the window's frame rate (0: GridFPS) while it runs: the
+// tiles drop more or fewer frames and the compositor renegotiates its
+// output. Nothing restarts, so the window doesn't flash black.
+func (g *Grid) SetFPS(fps int) {
+	if fps <= 0 {
+		fps = GridFPS
+	}
+	g.ctl.Lock()
+	defer g.ctl.Unlock()
+	if g.ctl.done || fps == g.fps {
+		return
+	}
+	g.fps = fps
+	for _, e := range g.thin {
+		e.SetInt("max-rate", fps)
+	}
+	g.rate.SetCaps("caps", fmt.Sprintf(g.outCaps, fps))
+}
+
+// FPS is the window's frame rate.
+func (g *Grid) FPS() int {
+	g.ctl.Lock()
+	defer g.ctl.Unlock()
+	return g.fps
 }
 
 // Stop closes the grid. A Window of the caller's stays open.

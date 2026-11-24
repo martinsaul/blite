@@ -1,5 +1,24 @@
 [
  {
+  "build": 221,
+  "date": "2026-11-24",
+  "changes": [
+   "Screen sharing no longer lowers its resolution when your screen is simply not changing much.",
+   "Clearer dialogs: buttons now say what they do, like Leave and Stay, and Send logs confirms properly."
+  ]
+ },
+ {
+  "build": 220,
+  "date": "2026-11-24",
+  "changes": [
+   "Video windows no longer flash black when a 60 fps stream starts.",
+   "Screen sharing no longer keeps lowering its resolution when that doesn't help: if a lower resolution isn't faster, Bellion goes back to the one you chose and stays there.",
+   "New option under Share options > Advanced: Keep my chosen resolution, so Bellion never lowers it when your computer seems slow.",
+   "Windows: 60 fps screen shares now capture up to 60 frames a second, not 30.",
+   "Windows: screen sharing now resizes the picture on the graphics card, so large screens share more smoothly."
+  ]
+ },
+ {
   "build": 219,
   "date": "2026-11-24",
   "changes": [

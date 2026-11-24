@@ -18,12 +18,16 @@
 //	updated       Home screen with the changes since the last update
 //	update-notice Home screen with a new update's notice in the corner
 //	picker        "Share a monitor or window" with made-up displays and windows
+//	leave         In-call control window asking "Leave the session?"
+//	logs-sent     In-call control window after Help > Send logs
+//	logs-failed   The same when sending the logs fails
 //	video         The main video window: two streams and our preview in its corner
 //	video-tile    The main video window with our preview expanded to a tile
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"image"
 	"image/color"
@@ -56,6 +60,8 @@ type demo struct {
 	bobWatch      bool
 	carolWatch    bool
 	relay         bool
+	logsFail      bool   // Send logs fails
+	logsReport    string // what the last Send logs reported
 	presets       []app.QualityPreset
 	ch            chan struct{}
 	// servers: the user's own signaling servers; def and pick: the default
@@ -111,6 +117,9 @@ func (d *demo) State() any {
 		},
 		Update: up,
 		Reach:  &app.Reach{OK: true, Text: "Others can reach you directly."}}
+	if d.logsReport != "" {
+		st.Logs = map[string]string{"Report": d.logsReport}
+	}
 	switch d.dc {
 	case "login":
 		st.Discord = &app.Discord{Status: "login"}
@@ -214,7 +223,7 @@ func orDemoSrc(s string, inCall bool) string {
 
 func (d *demo) SetResolution(string) error { return nil }
 func (d *demo) SetMode(string) error       { return nil }
-func (d *demo) SetShareOptions(fps int, _ string, _ int, _ bool, upKbps int) error {
+func (d *demo) SetShareOptions(fps int, _ string, _ int, _, _ bool, upKbps int) error {
 	d.fps = fps
 	d.uploadKbps = upKbps
 	d.changed()
@@ -243,14 +252,23 @@ func (d *demo) ToggleWatch(id string) error {
 	d.changed()
 	return nil
 }
-func (d *demo) PopOut(string) error                                  { return nil }
-func (d *demo) Pin(string) error                                     { return nil }
-func (d *demo) SetAutoWatch(on bool) error                           { d.autoWatch = on; d.changed(); return nil }
-func (d *demo) SetPlaySounds(on bool) error                          { d.playSounds = on; d.changed(); return nil }
-func (d *demo) SetVoiceInSystem(bool) error                          { return nil }
-func (d *demo) SetHideChangelog(bool) error                          { return nil }
-func (d *demo) SetPortMap(on bool) error                             { d.portMap = on; d.changed(); return nil }
-func (d *demo) SendLogsNow(context.Context) error                    { return nil }
+func (d *demo) PopOut(string) error         { return nil }
+func (d *demo) Pin(string) error            { return nil }
+func (d *demo) SetAutoWatch(on bool) error  { d.autoWatch = on; d.changed(); return nil }
+func (d *demo) SetPlaySounds(on bool) error { d.playSounds = on; d.changed(); return nil }
+func (d *demo) SetVoiceInSystem(bool) error { return nil }
+func (d *demo) SetHideChangelog(bool) error { return nil }
+func (d *demo) SetPortMap(on bool) error    { d.portMap = on; d.changed(); return nil }
+func (d *demo) SendLogsNow(context.Context) error {
+	if d.logsFail {
+		d.logsReport = "could not send: connection refused"
+		d.changed()
+		return errors.New("connection refused")
+	}
+	d.logsReport = "sent " + time.Now().Format("15:04")
+	d.changed()
+	return nil
+}
 func (d *demo) OpenLogFolder() error                                 { return nil }
 func (d *demo) Diagnostics() string                                  { return "demo" }
 func (d *demo) Feedback(context.Context, string, string, bool) error { return nil }
@@ -367,6 +385,13 @@ func main() {
 	case "picker":
 		d.inCall = true
 		scene = "picker"
+	case "leave":
+		d.inCall = true
+		scene = "leave"
+	case "logs-sent", "logs-failed":
+		d.inCall = true
+		d.logsFail = arg == "logs-failed"
+		scene = "send-logs"
 	case "video", "video-tile", "video-states":
 		videoScene(arg == "video-tile", arg == "video-states", *quitAfter)
 		return

@@ -42,7 +42,9 @@ import (
 	"blite/internal/capture"
 	"blite/internal/diag"
 	"blite/internal/identity"
+	"blite/internal/logbuf"
 	"blite/internal/media"
+	"blite/internal/metrics"
 	"blite/internal/nui"
 	certpin "blite/internal/pin"
 	"blite/internal/portmap"
@@ -127,8 +129,16 @@ func main() {
 	certpin.SetPinned(app.BuiltInPinned(*server))
 	ch, pin := updateChannel(*channel, *pinned, flagSet("channel"), molt.UpdateResult() != "")
 
-	log, logOut := newLogger(stderr{}, *jsonLog, clientMeta().Label())
-	defer logOut.Flush()
+	logw = logbuf.New(stderr{}, 0, 0, 0)
+	log, logOut := newLogger(logw, *jsonLog, clientMeta().Label())
+	logRedact = logOut
+	defer closeLogs()
+	defer func() { // a panic here (the UI's loop runs on this goroutine) keeps the lines before it
+		if r := recover(); r != nil {
+			flushLogs()
+			panic(r)
+		}
+	}()
 	slog.SetDefault(log)
 	media.Log = log
 	if addr := os.Getenv("BLITE_PPROF"); addr != "" { // e.g. 127.0.0.1:6060 (memory investigations)
@@ -160,7 +170,7 @@ func main() {
 	}
 	if *cameras {
 		if camera.Report(os.Stdout) != 0 {
-			logOut.Flush()
+			closeLogs()
 			os.Exit(1)
 		}
 		return
@@ -266,12 +276,58 @@ type stderr struct{}
 
 func (stderr) Write(b []byte) (int, error) { return os.Stderr.Write(b) }
 
+// Our log lines go redact.Writer -> logw -> stderr: a log call only appends
+// to memory, and logw's goroutine writes batches, so no media goroutine
+// waits for the disk. Errors are written before the call returns.
+var (
+	logw      *logbuf.Writer
+	logRedact *redact.Writer
+)
+
+// flushLogs writes out every log line so far (before reading the log
+// files, or exiting).
+func flushLogs() {
+	if logRedact != nil {
+		logRedact.Flush()
+	}
+	if logw != nil {
+		logw.Flush()
+	}
+}
+
+// metricsRec writes the per-second share readings next to the logs (nil:
+// no log folder).
+var metricsRec *metrics.Recorder
+
+// closeLogs flushes the logs and the readings for an exit.
+func closeLogs() {
+	metricsRec.Close()
+	flushLogs()
+	if logw != nil {
+		logw.Close()
+	}
+}
+
+// swapStderr runs fn, which changes where stderr goes, between two batches.
+func swapStderr(fn func()) {
+	if logw == nil {
+		fn()
+		return
+	}
+	logw.Swap(fn)
+}
+
 func newLogger(dst io.Writer, jsonLog bool, ver string) (*slog.Logger, *redact.Writer) {
 	rw := redact.NewWriter(dst)
 	opts := &slog.HandlerOptions{ReplaceAttr: redact.ReplaceAttr}
 	var h slog.Handler = slog.NewTextHandler(rw, opts)
 	if jsonLog {
 		h = slog.NewJSONHandler(rw, opts)
+	}
+	if lw, ok := dst.(*logbuf.Writer); ok {
+		// Not at Warn: some come from the encoder and packet loops (a few
+		// a minute at most, but each would wait for the disk).
+		h = logbuf.Handler(h, lw, slog.LevelError)
 	}
 	return slog.New(h).With("version", ver), rw
 }
@@ -345,6 +401,10 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		fatal(log, "join", err)
 	}
 	logToFiles(log)
+	if d := logState().Dir; d != "" {
+		metricsRec = metrics.NewRecorder(d)
+		cfg.Metrics = metricsRec
+	}
 	// Before Fyne starts: on X11 Fyne ignores the desktop's scaling.
 	uiscale.Apply(app.LoadUIScale(), log)
 	if unguarded != "" {
@@ -390,7 +450,10 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		return fmt.Sprintf("version: %s, os: %s/%s %s, cpus: %d, encoders: %s\n", clientMeta().Label(), runtime.GOOS, runtime.GOARCH,
 			clientMeta().OSVersion, runtime.NumCPU(), strings.Join(media.AvailableEncoders(), ","))
 	}
-	a.RecentLog = func() string { return recentLog(logState().File, 40) }
+	a.RecentLog = func() string {
+		flushLogs()
+		return recentLog(logState().File, 40)
+	}
 	a.OpenLogs = func() error {
 		d := logState().Dir
 		if d == "" {
@@ -585,6 +648,7 @@ func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, 
 	}
 	if !create && join == "" {
 		fmt.Fprintln(os.Stderr, "headless needs -create, -join CODE or -link URL")
+		closeLogs()
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -740,6 +804,7 @@ func hostname() string {
 
 func fatal(log *slog.Logger, msg string, err error) {
 	log.Error(msg, "err", err)
+	closeLogs()
 	os.Exit(1)
 }
 

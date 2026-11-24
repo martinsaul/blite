@@ -115,11 +115,33 @@ static int blite_force_keyframe(GstElement *sink) {
 static void blite_set_double(GstElement *e, const char *name, double v) { g_object_set(e, name, v, NULL); }
 
 static void blite_set_uint(GstElement *e, const char *name, unsigned int v) { g_object_set(e, name, v, NULL); }
+static void blite_set_int(GstElement *e, const char *name, int v) { g_object_set(e, name, v, NULL); }
 
 static void blite_set_string(GstElement *e, const char *name, const char *v) { g_object_set(e, name, v, NULL); }
 static char *blite_get_string(GstElement *e, const char *name) { char *v = NULL; g_object_get(e, name, &v, NULL); return v; }
 
 static void blite_set_bool(GstElement *e, const char *name, int v) { g_object_set(e, name, (gboolean)v, NULL); }
+
+// Sets a GstCaps property (e.g. capsfilter's "caps") from its string form.
+static int blite_set_caps(GstElement *e, const char *name, const char *v) {
+	GstCaps *c = gst_caps_from_string(v);
+	if (c == NULL) return 0;
+	g_object_set(e, name, c, NULL);
+	gst_caps_unref(c);
+	return 1;
+}
+
+// The caps on e's pad now (g_free them; NULL if none).
+static char *blite_pad_caps(GstElement *e, const char *pad) {
+	GstPad *p = gst_element_get_static_pad(e, pad);
+	if (p == NULL) return NULL;
+	GstCaps *c = gst_pad_get_current_caps(p);
+	gst_object_unref(p);
+	if (c == NULL) return NULL;
+	char *s = gst_caps_to_string(c);
+	gst_caps_unref(c);
+	return s;
+}
 
 // Makes a video sink draw into an existing native window.
 static int blite_set_window(GstElement *e, guintptr h) {
@@ -222,6 +244,65 @@ static void blite_meter_take(blite_meter *mt, gint *peak, double *sum, guint64 *
 static void blite_meter_free(blite_meter *mt) {
 	g_mutex_clear(&mt->m);
 	free(mt);
+}
+
+// The gaps between consecutive buffers leaving an element, by arrival
+// (monotonic clock, us) and by timestamp (ns, -1 without one), up to cap.
+typedef struct {
+	GMutex m;
+	gint64 last_wall;
+	GstClockTime last_pts;
+	guint n, cap;
+	gint64 *wall, *pts;
+} blite_gaps;
+
+static GstPadProbeReturn blite_gaps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
+	blite_gaps *g = d;
+	GstBuffer *b = GST_PAD_PROBE_INFO_BUFFER(info);
+	gint64 now = g_get_monotonic_time();
+	GstClockTime pts = b ? GST_BUFFER_PTS(b) : GST_CLOCK_TIME_NONE;
+	g_mutex_lock(&g->m);
+	if (g->last_wall > 0 && g->n < g->cap) {
+		g->wall[g->n] = now - g->last_wall;
+		g->pts[g->n] = GST_CLOCK_TIME_IS_VALID(pts) && GST_CLOCK_TIME_IS_VALID(g->last_pts) ? (gint64)(pts - g->last_pts) : -1;
+		g->n++;
+	}
+	g->last_wall = now;
+	g->last_pts = pts;
+	g_mutex_unlock(&g->m);
+	return GST_PAD_PROBE_OK;
+}
+
+static blite_gaps *blite_gaps_add(GstElement *e, guint cap) {
+	GstPad *pad = gst_element_get_static_pad(e, "src");
+	if (pad == NULL) return NULL;
+	blite_gaps *g = calloc(1, sizeof(blite_gaps));
+	g_mutex_init(&g->m);
+	g->last_pts = GST_CLOCK_TIME_NONE;
+	g->cap = cap;
+	g->wall = calloc(cap, sizeof(gint64));
+	g->pts = calloc(cap, sizeof(gint64));
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, blite_gaps_probe, g, NULL);
+	gst_object_unref(pad);
+	return g;
+}
+
+// Copies the gaps so far into wall and pts (cap entries each) and starts over.
+static guint blite_gaps_take(blite_gaps *g, gint64 *wall, gint64 *pts) {
+	g_mutex_lock(&g->m);
+	guint n = g->n;
+	memcpy(wall, g->wall, n * sizeof(gint64));
+	memcpy(pts, g->pts, n * sizeof(gint64));
+	g->n = 0;
+	g_mutex_unlock(&g->m);
+	return n;
+}
+
+static void blite_gaps_free(blite_gaps *g) {
+	g_mutex_clear(&g->m);
+	free(g->wall);
+	free(g->pts);
+	free(g);
 }
 
 // Pointer events a video sink sends upstream (GstNavigation), collected
@@ -327,6 +408,18 @@ static int blite_nav_button(GstElement *e, int press, int button, double x, doub
 }
 
 static void blite_unref(GstElement *e) { gst_object_unref(e); }
+
+// The file of the plugin that provides factory (g_free it), or NULL.
+static char *blite_factory_file(const char *name) {
+	GstElementFactory *f = gst_element_factory_find(name);
+	if (f == NULL) return NULL;
+	GstPlugin *p = gst_plugin_feature_get_plugin(GST_PLUGIN_FEATURE(f));
+	gst_object_unref(f);
+	if (p == NULL) return NULL;
+	char *s = g_strdup(gst_plugin_get_filename(p));
+	gst_object_unref(p);
+	return s;
+}
 static void blite_init(void) { gst_init(NULL, NULL); }
 */
 import "C"
@@ -496,6 +589,13 @@ func (e *Element) SetUint(name string, v uint) {
 	C.blite_set_uint(e.p, cs, C.uint(v))
 }
 
+// SetInt sets a gint property (e.g. videorate's "max-rate").
+func (e *Element) SetInt(name string, v int) {
+	cs := C.CString(name)
+	defer C.free(unsafe.Pointer(cs))
+	C.blite_set_int(e.p, cs, C.int(v))
+}
+
 // SetBool sets a boolean property (e.g. valve's "drop").
 func (e *Element) SetBool(name string, v bool) {
 	cs := C.CString(name)
@@ -519,6 +619,27 @@ func (e *Element) SetString(name, v string) {
 	C.blite_set_string(e.p, cs, cv)
 }
 
+// SetCaps sets a caps property (e.g. capsfilter's "caps") from its string
+// form. It reports false if v doesn't parse.
+func (e *Element) SetCaps(name, v string) bool {
+	cs, cv := C.CString(name), C.CString(v)
+	defer C.free(unsafe.Pointer(cs))
+	defer C.free(unsafe.Pointer(cv))
+	return C.blite_set_caps(e.p, cs, cv) == 1
+}
+
+// PadCaps is the caps on e's pad now, e.g. "src" ("" if not negotiated).
+func (e *Element) PadCaps(pad string) string {
+	cp := C.CString(pad)
+	defer C.free(unsafe.Pointer(cp))
+	v := C.blite_pad_caps(e.p, cp)
+	if v == nil {
+		return ""
+	}
+	defer C.g_free(C.gpointer(v))
+	return C.GoString(v)
+}
+
 // GetString reads a string property ("" if unset).
 func (e *Element) GetString(name string) string {
 	cs := C.CString(name)
@@ -529,6 +650,32 @@ func (e *Element) GetString(name string) string {
 	}
 	defer C.g_free(C.gpointer(v))
 	return C.GoString(v)
+}
+
+// SrcCaps is what e's src pad negotiated ("" before it has).
+func (e *Element) SrcCaps() string { return e.PadCaps("src") }
+
+// Version is the GStreamer library's version, e.g. "GStreamer 1.28.8".
+func Version() string {
+	Init()
+	return takeString(C.gst_version_string())
+}
+
+// FactoryFile is the plugin file that provides factory ("" if none).
+func FactoryFile(factory string) string {
+	Init()
+	cs := C.CString(factory)
+	defer C.free(unsafe.Pointer(cs))
+	return takeString(C.blite_factory_file(cs))
+}
+
+// takeString converts and frees a g_malloc'd string.
+func takeString(s *C.char) string {
+	if s == nil {
+		return ""
+	}
+	defer C.g_free(C.gpointer(s))
+	return C.GoString(s)
 }
 
 // BusError is an error message from a pipeline's bus, with its GError
@@ -667,6 +814,43 @@ func dBFS(v float64) float64 {
 
 // Free releases it.
 func (m *Meter) Free() { C.blite_meter_free(m.m) }
+
+// Gaps records the time between consecutive buffers leaving an element,
+// to catch stalls an average frame rate hides.
+type Gaps struct {
+	g   *C.blite_gaps
+	cap int
+}
+
+// WatchGaps starts recording e's output gaps, up to max of them between
+// Takes. Free it only once the pipeline is in NULL.
+func (e *Element) WatchGaps(max int) (*Gaps, bool) {
+	g := C.blite_gaps_add(e.p, C.guint(max))
+	if g == nil {
+		return nil, false
+	}
+	return &Gaps{g: g, cap: max}, true
+}
+
+// Take returns the gaps since the last Take: by arrival, and by buffer
+// timestamp (-1 where a buffer had none).
+func (g *Gaps) Take() (arrival, pts []time.Duration) {
+	wall := make([]C.gint64, g.cap)
+	ts := make([]C.gint64, g.cap)
+	n := int(C.blite_gaps_take(g.g, &wall[0], &ts[0]))
+	arrival, pts = make([]time.Duration, n), make([]time.Duration, n)
+	for i := 0; i < n; i++ {
+		arrival[i] = time.Duration(wall[i]) * time.Microsecond
+		pts[i] = time.Duration(ts[i])
+		if ts[i] < 0 {
+			pts[i] = -1
+		}
+	}
+	return arrival, pts
+}
+
+// Free releases it.
+func (g *Gaps) Free() { C.blite_gaps_free(g.g) }
 
 // Nav is the pointer state of a video window (see WatchNav).
 type Nav struct{ n *C.blite_nav }

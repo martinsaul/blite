@@ -27,6 +27,7 @@ type shareOptCall struct {
 	slowViewer  string
 	minHeight   int
 	smallerCopy bool
+	keepQuality bool
 	uploadKbps  int
 }
 
@@ -148,13 +149,14 @@ func (f *fakeBackend) SetOutput(device string) error {
 	return nil
 }
 
-func (f *fakeBackend) SetShareOptions(fps int, slow string, minH int, smaller bool, upKbps int) error {
+func (f *fakeBackend) SetShareOptions(fps int, slow string, minH int, smaller, keep bool, upKbps int) error {
 	f.mu.Lock()
 	f.shareCalls = append(f.shareCalls, shareOptCall{
 		fps:         fps,
 		slowViewer:  slow,
 		minHeight:   minH,
 		smallerCopy: smaller,
+		keepQuality: keep,
 		uploadKbps:  upKbps,
 	})
 	f.mu.Unlock()

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"blite/internal/metrics"
 )
 
 // Log segments: a new one at start, every hour and past segMax. Kept a week,
@@ -72,7 +74,8 @@ func newSegment(dir string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := redirectStderr(f); err != nil {
+	swapStderr(func() { err = redirectStderr(f) })
+	if err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -81,8 +84,10 @@ func newSegment(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// pruneLogs deletes segments older than keepFor, then the oldest beyond keepMax.
+// pruneLogs deletes segments older than keepFor, then the oldest beyond
+// keepMax, and old metrics files.
 func pruneLogs(dir string, now time.Time) {
+	metrics.Prune(dir, now)
 	es, err := os.ReadDir(dir)
 	if err != nil {
 		return

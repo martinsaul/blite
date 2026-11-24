@@ -1,7 +1,11 @@
 package media
 
 import (
+	"fmt"
 	"image"
+	"math"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -635,5 +639,148 @@ func TestGridSliderRedraws(t *testing.T) {
 	t.Logf("slider at 70%%: luma %d before, %d after", before, after)
 	if after <= before+60 {
 		t.Fatalf("the slider didn't redraw: luma %d before, %d after", before, after)
+	}
+}
+
+// SetFPS switches a running window 30 -> 60 -> 30 in place: the same
+// pipeline keeps composing, without a pause, at the new rate, and the
+// tiles follow, without a bus error.
+func TestGridSetFPS(t *testing.T) {
+	Init()
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprint("full=", full), func(t *testing.T) {
+			pl, err := StartPlayer(ViewGrid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pl.Stop()
+			tiles := []Tile{{Channel: pl.Channel, Label: "alice", ID: "a", Volume: 1}}
+			if full { // a stopped tile and a corner picture too
+				tiles = append(tiles, Tile{Label: "bob", ID: "b", Stopped: true},
+					Tile{Channel: NewPreviewChannel(), Label: "You", ID: "self", Self: true, PiP: true})
+			}
+			g, err := StartGrid(GridConfig{Tiles: tiles, View: ViewCount, Width: 1280, Height: 720,
+				OnControl: func(string, Control, float64) {}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer g.Stop()
+			checkSetFPS(t, g, "out", "src", !full) // a full window is slow on a loaded machine
+		})
+	}
+}
+
+// checkSetFPS switches g 30 -> 60 -> 30 -> 60 -> 30 and checks each switch:
+// the pipeline stays, frames keep coming, the caps on el's pad carry the
+// new rate and, if exact, the window and its first tile run at it (else
+// frames just flow: a loaded machine or a software GL sink falls behind).
+func checkSetFPS(t *testing.T, g *Grid, el, pad string, exact bool) {
+	t.Helper()
+	p := g.Pipeline
+	e, err := g.element(el)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tile, ok := g.thin[0].CountBuffers() // the first tile's frames into the compositor
+	if !ok {
+		t.Fatal("no counter")
+	}
+	defer func() {
+		g.Stop() // before the counter goes
+		tile.Free()
+	}()
+	for _, fps := range []int{GridFPS, GridFastFPS, GridFPS, GridFastFPS, GridFPS} {
+		g.SetFPS(fps)
+		if g.Pipeline != p || g.FPS() != fps {
+			t.Fatalf("SetFPS(%d): pipeline replaced or rate %d", fps, g.FPS())
+		}
+		// No pause around the switch: a rebuild would leave a gap.
+		var gap time.Duration
+		last, lastAt := g.Frames(), time.Now()
+		for end := lastAt.Add(700 * time.Millisecond); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if n := g.Frames(); n != last {
+				last, lastAt = n, time.Now()
+			}
+			gap = max(gap, time.Since(lastAt))
+		}
+		if gap > 250*time.Millisecond {
+			t.Fatalf("%d fps: no frame for %v", fps, gap)
+		}
+		n, nt, at := g.Frames(), tile.Load(), time.Now()
+		time.Sleep(time.Second)
+		sec := time.Since(at).Seconds()
+		r, rt := float64(g.Frames()-n)/sec, float64(tile.Load()-nt)/sec
+		select {
+		case err := <-g.Err:
+			t.Fatalf("%d fps: %v", fps, err)
+		case <-g.Done():
+			t.Fatal("grid stopped")
+		default:
+		}
+		want := fmt.Sprintf("framerate=(fraction)%d/1", fps)
+		if caps := e.PadCaps(pad); !strings.Contains(caps, want) {
+			t.Fatalf("%d fps: the caps on %s:%s are %s", fps, el, pad, caps)
+		}
+		lo, hi := 10.0, math.Inf(1) // behind, it catches up faster
+		if exact {
+			lo, hi = float64(fps)*0.8, float64(fps)*1.3
+		}
+		if r < lo || r > hi || rt < lo || rt > hi {
+			t.Fatalf("%d fps: the window composes %.1f frames a second, the tile %.1f", fps, r, rt)
+		}
+		t.Logf("%d fps: %.1f frames a second, the tile %.1f, gap %v", fps, r, rt, gap.Round(time.Millisecond))
+	}
+}
+
+// The tiles show their streams, before and after the frame rate changes,
+// also with a stopped tile and a corner picture in the window.
+func TestGridSetFPSShows(t *testing.T) {
+	Init()
+	var tiles []Tile
+	for _, id := range []string{"a", "self"} {
+		ch := NewPreviewChannel()
+		pp, err := StartPattern(ch, "white", 1280, 720)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pp.Stop()
+		tiles = append(tiles, Tile{Channel: ch, Label: id, ID: id, Volume: 1, Self: id == "self", PiP: id == "self"})
+	}
+	tiles = slices.Insert(tiles, 1, Tile{Label: "bob", ID: "b", Stopped: true})
+	const w, h = 640, 360
+	g, err := startGrid(GridConfig{Tiles: tiles, View: ViewCount, Width: w, Height: h,
+		OnControl: func(string, Control, float64) {}},
+		"video/x-raw,format=RGBA ! appsink name=vsink sync=false max-buffers=1 drop=true", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop()
+	sink, err := g.element("vsink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.ctl.Lock()
+	rects := slices.Clone(g.ctl.rects)
+	g.ctl.Unlock()
+	for _, fps := range []int{GridFPS, GridFastFPS, GridFPS} {
+		g.SetFPS(fps)
+		time.Sleep(time.Second)
+		var data []byte
+		for range 5 { // the newest frame
+			if d, _, err := sink.Pull(time.Second); err == nil {
+				data = d
+			}
+		}
+		if data == nil {
+			t.Fatalf("%d fps: no frame", fps)
+		}
+		for i, r := range rects {
+			x, y := r.x+r.w/2, r.y+r.h/2
+			p := (y*w + x) * 4
+			white := data[p] > 200 && data[p+1] > 200 && data[p+2] > 200
+			if white == tiles[i].Stopped {
+				t.Errorf("%d fps: tile %s at %d,%d is %v", fps, tiles[i].ID, x, y, data[p:p+3])
+			}
+		}
 	}
 }

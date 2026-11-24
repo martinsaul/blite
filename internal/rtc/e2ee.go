@@ -234,11 +234,14 @@ var decryptLog struct {
 // are normal for a moment after a join; tampered frames are not.
 func (m *Mesh) logDecrypt(err error) {
 	decryptLog.Lock()
-	defer decryptLog.Unlock()
-	if time.Since(decryptLog.at) < 10*time.Second {
+	quiet := time.Since(decryptLog.at) < 10*time.Second
+	if !quiet {
+		decryptLog.at = time.Now()
+	}
+	decryptLog.Unlock() // every undecryptable frame takes it
+	if quiet {
 		return
 	}
-	decryptLog.at = time.Now()
 	if errors.Is(err, e2ee.ErrNoKey) {
 		m.opt.Log.Info("e2ee: dropping frames until the sender's key arrives")
 	} else {

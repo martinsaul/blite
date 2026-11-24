@@ -25,6 +25,7 @@ import (
 	"blite/internal/identity"
 	"blite/internal/load"
 	"blite/internal/media"
+	"blite/internal/metrics"
 	"blite/internal/proto"
 	"blite/internal/redact"
 	"blite/internal/rtc"
@@ -74,7 +75,10 @@ type Config struct {
 	// Port is our UDP port for peers, shared by all sessions (nil = a
 	// random port per connection).
 	Port *rtc.Port
-	Log  *slog.Logger
+	// Metrics gets a reading every second while we share or watch; nil:
+	// none.
+	Metrics *metrics.Recorder
+	Log     *slog.Logger
 }
 
 // Member is a remote peer as the UI sees it.
@@ -205,13 +209,16 @@ const (
 )
 
 // ShareOptions controls outgoing video frame rate, slow-viewer degradation,
-// lowest resolution floor, smaller copy, and mesh/relay upload budget.
+// lowest resolution floor, smaller copy, mesh/relay upload budget, and
+// whether a slow encoder may lower the resolution.
 type ShareOptions struct {
 	FPS         int    `json:"fps"`                  // 10..60 in steps of 5 (default 30)
 	SlowViewer  string `json:"slowViewer,omitempty"` // "" (auto), "resolution", or "fps"
 	MinHeight   int    `json:"minHeight"`            // 360, 540, or 720 (default 360)
 	SmallerCopy bool   `json:"smallerCopy"`          // send LOW / renditions to slow viewers (default true)
 	UploadKbps  int    `json:"uploadKbps,omitempty"` // 0 = Automatic, >0 = total upload limit in kbit/s
+	// KeepQuality: a slow encoder never lowers the resolution (default off).
+	KeepQuality bool `json:"keepQuality,omitempty"`
 }
 
 // DefaultShareOptions returns the default outgoing share options.
@@ -327,6 +334,16 @@ type Session struct {
 	keyAt      map[int]time.Time // last forced keyframe per layer
 	keys       keyStats
 	gridFast   atomic.Bool // video windows run at media.GridFastFPS
+	// resTrial is the last step down until checkEncodeRate knows whether
+	// the lower size encodes faster. If not (resNoStep), we go back and
+	// keep the size for this share; resHelped allows going below 1080p.
+	resTrial  *resTrial
+	resNoStep bool
+	resHelped bool
+	resOKNote string // resNote of the step down that helped
+	// headroom is canEncode's last software encoder answer, logged when
+	// it changes or headroomLogEvery passed.
+	headroom headroomLog
 	// srcMu serializes starting and stopping the capture. Two overlapping
 	// starts (a double-clicked source; a start takes ~8 s on Windows)
 	// each began a capture and the first was never stopped: two encoders
@@ -364,6 +381,8 @@ type Session struct {
 	// regrid skips no-op rebuilds.
 	grids    map[string]*media.Grid
 	gridKeys map[string]string
+	nGrids   atomic.Int32 // len(grids), for the share stats without gridMu
+	meter    atomic.Pointer[shareMeter]
 	// wins are our native video windows by the same key: they stay open
 	// across rebuilds. openWindow opens one (tests replace it); nil: no
 	// own windows.
@@ -628,6 +647,9 @@ func (s *Session) start(sig *sigclient.Client) (*Session, error) {
 	go s.watchHearing()
 	go s.watchAudioCapture()
 	cpuMeterOnce.Do(func() { cpuMeter = load.NewMeter(10 * time.Second) })
+	if s.cfg.Metrics != nil {
+		go s.recordMetrics()
+	}
 	return s, nil
 }
 
@@ -656,8 +678,34 @@ func (s *Session) canEncode() bool {
 	}
 	cpuMeterOnce.Do(func() { cpuMeter = load.NewMeter(10 * time.Second) })
 	busy := cpuMeter.Busy()
-	s.cfg.Log.Info("encoder headroom", "encoder", enc, "busy", busy)
-	return busy < 0.5
+	ok := busy < 0.5
+	if s.headroom.changed(ok, time.Now()) {
+		s.cfg.Log.Info("encoder headroom", "encoder", enc, "busy", busy, "ok", ok)
+	}
+	return ok
+}
+
+const headroomLogEvery = time.Minute
+
+// headroomLog decides when canEncode logs: it asks every second with a
+// software encoder.
+type headroomLog struct {
+	mu     sync.Mutex
+	logged bool
+	ok     bool
+	at     time.Time
+}
+
+// changed reports whether to log answer ok at now: the first, one that
+// differs from the last logged, or headroomLogEvery after it.
+func (h *headroomLog) changed(ok bool, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.logged && h.ok == ok && now.Sub(h.at) < headroomLogEvery {
+		return false
+	}
+	h.logged, h.ok, h.at = true, ok, now
+	return true
 }
 
 // setRenditions (mesh, as a provider of our own video) restarts our source
@@ -1125,6 +1173,7 @@ const (
 func (s *Session) regrid() {
 	s.gridMu.Lock()
 	defer s.gridMu.Unlock()
+	defer func() { s.nGrids.Store(int32(len(s.grids))) }()
 
 	s.mu.Lock()
 	src := s.src
@@ -1357,6 +1406,7 @@ func (s *Session) watchWindow(w media.Window, stop <-chan struct{}) {
 				delete(s.grids, k)
 				delete(s.gridKeys, k)
 				delete(s.wins, k)
+				s.nGrids.Store(int32(len(s.grids)))
 				s.cfg.Log.Info("video window closed", "window", k)
 			}
 			if wasOpen {
@@ -1395,15 +1445,15 @@ func (s *Session) regridLocked(k string, cfg media.GridConfig) bool {
 	for _, t := range cfg.Tiles {
 		what = append(what, shown{t.Channel, t.Label, t.ID, t.Self, t.Pinned, t.Stopped, t.PiP, t.Self && t.PoppedOut})
 	}
-	if s.gridFast.Load() {
-		cfg.FPS = media.GridFastFPS
-	}
-	key := fmt.Sprint(cfg.Rows, cfg.Cols, cfg.FPS, what, fmt.Sprintf("%p", cfg.Window))
+	// The frame rate changes in place (SetFPS), so it isn't in the key.
+	cfg.FPS = windowRate(s.gridFast.Load())
+	key := fmt.Sprint(cfg.Rows, cfg.Cols, what, fmt.Sprintf("%p", cfg.Window))
 	if g := s.grids[k]; g != nil {
 		if key == s.gridKeys[k] {
 			for _, t := range cfg.Tiles {
 				g.SetState(t.ID, t.Muted, t.Volume, t.Pinned, t.PoppedOut)
 			}
+			g.SetFPS(cfg.FPS)
 			return false
 		}
 		g.Stop()
@@ -1487,6 +1537,7 @@ func (s *Session) watchGridWindow(k string, g *media.Grid) {
 	g.Stop()
 	delete(s.grids, k)
 	delete(s.gridKeys, k)
+	s.nGrids.Store(int32(len(s.grids)))
 	s.mu.Lock()
 	s.closeWindowFeedsLocked(k)
 	s.mu.Unlock()
@@ -2233,12 +2284,17 @@ func (s *Session) watchWaiting() {
 			shown[k] = g.Frames()
 		}
 		s.gridMu.Unlock()
-		if fast, ok := vr.update(s.cfg.Log, decoded, shown, s.gridFast.Load()); ok {
+		fast, ok := vr.update(s.cfg.Log, time.Now(), decoded, shown, s.gridFast.Load())
+		if ok {
 			s.gridFast.Store(fast)
 			s.cfg.Log.Info("video windows frame rate", "fps", windowRate(fast))
-			go s.regrid()
 		}
 		s.gridMu.Lock()
+		if ok { // in place: a rebuild flashes the windows black
+			for _, g := range s.grids {
+				g.SetFPS(windowRate(fast))
+			}
+		}
 		for _, g := range s.grids {
 			for id, w := range waiting {
 				g.SetWaiting(id, w)
@@ -2412,6 +2468,7 @@ func (s *Session) SetSource(kind media.SourceKind) error {
 		s.srcGen++
 		gen := s.srcGen
 		s.previewOn = false
+		s.resetResTrials()
 		wasSharing := s.feeds.Sharing(feeds.Self)
 		s.feeds.Apply(feeds.Self, feeds.ShareStop)
 		s.mu.Unlock()
@@ -2634,12 +2691,13 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 	s.srcGen++
 	gen := s.srcGen
 	res, opts, rends := s.res, NormalizeShareOptions(s.shareOpts), slices.Clone(s.rends)
+	trial := s.resTrial != nil
 	s.cpuFPS = 0 // a restart (new size or options) gets a fresh check
 	s.mu.Unlock()
 	if old != nil {
 		old.Stop()
 	}
-	var highAUs atomic.Int64
+	var highAUs, maxSend, maxSendSec atomic.Int64
 	sc := opts.SmallerCopy
 	src, enc, err := media.StartVideoSourceOpts(kind, media.LayerOpts{
 		Resolution:  res,
@@ -2648,11 +2706,17 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 		SmallerCopy: &sc,
 		Renditions:  rends,
 	}, s.cfg.Encoder, s.selfCh, func(layer int, au media.AccessUnit) {
+		// The encoders wait for this (the appsinks don't drop), so the
+		// share stats keep the longest one.
+		start := time.Now()
 		if layer == media.High {
 			highAUs.Add(1)
 		}
 		s.keys.sent(s.cfg.Log, layer, rtc.HasIDR(au.Data))
 		s.mesh.WriteVideo(layer, au.Data, au.Duration)
+		took := int64(time.Since(start))
+		storeMax(&maxSend, took)
+		storeMax(&maxSendSec, took)
 	})
 	if err != nil {
 		return gen, err
@@ -2664,6 +2728,7 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 		return gen, errors.New("session closed")
 	}
 	s.src, s.srcKind, s.encoder = src, kind, enc
+	s.meter.Store(&shareMeter{src, &highAUs, &maxSendSec})
 	s.srcGen++
 	gen = s.srcGen
 	preview := s.feeds.Watched(feeds.Self) && s.cfg.View != "none" && !s.cfg.NoPlayback
@@ -2688,10 +2753,10 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 		}
 	}
 	s.applyHighFPS()
-	if orRes(res) != media.Res720 || opts.FPS > 30 {
+	if orRes(res) != media.Res720 || opts.FPS > 30 || trial {
 		go s.checkEncodeRate(src, kind, orRes(res), &highAUs)
 	}
-	go s.watchSource(src, kind, orRes(res), enc, &highAUs)
+	go s.watchSource(src, kind, orRes(res), enc, &highAUs, &maxSend)
 	s.changed()
 	return gen, nil
 }
@@ -2702,13 +2767,14 @@ func (s *Session) startSourceLocked(kind media.SourceKind) (uint64, error) {
 // encoder keeps up.
 const shareStatsEvery = 30 * time.Second
 
-func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res media.Resolution, enc string, encoded *atomic.Int64) {
+func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res media.Resolution, enc string, encoded, maxSend *atomic.Int64) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	idleT := time.NewTicker(idleCheckEvery)
 	defer idleT.Stop()
 	var note string
-	lastAt, lastOut, lastIn := time.Now(), encoded.Load(), src.OfferedFrames()
+	lastAt, lastOut, last := time.Now(), encoded.Load(), src.Counts()
+	maxSend.Store(0)
 	for note == "" {
 		select {
 		case err := <-src.Err:
@@ -2735,14 +2801,23 @@ func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res
 				note = "Sharing stopped: the window you shared was closed."
 			}
 			if dt := time.Since(lastAt); dt >= shareStatsEvery {
-				out, in := encoded.Load(), src.OfferedFrames()
+				out, c := encoded.Load(), src.Counts()
 				cpuMeterOnce.Do(func() { cpuMeter = load.NewMeter(10 * time.Second) })
 				busy := 100 * cpuMeter.Busy()
-				s.cfg.Log.Info("share stats", "source", kind, "res", res, "encoder", enc,
-					"offeredFPS", fmt.Sprintf("%.1f", float64(in-lastIn)/dt.Seconds()),
-					"encodedFPS", fmt.Sprintf("%.1f", float64(out-lastOut)/dt.Seconds()),
-					"cpuBusy", fmt.Sprintf("%.0f", busy), "lowKbps", s.mesh.LowKbps(), "highFPS", s.HighFPS(), "idle", src.Idle())
-				lastAt, lastOut, lastIn = time.Now(), out, in
+				s.mu.Lock()
+				preview := s.previewOn
+				s.mu.Unlock()
+				fps := func(a, b int) string { return perSec(countDiff(a, b), dt) }
+				s.cfg.Log.Info("share stats", "source", kind, "res", res, "encoder", enc, "convert", src.Chain(),
+					"capturedFPS", fps(last.Captured, c.Captured),
+					"offeredFPS", fps(last.Offered, c.Offered),
+					"queueInFPS", fps(last.HighIn, c.HighIn),
+					"queueOutFPS", fps(last.HighOut, c.HighOut),
+					"encodedFPS", fps(int(lastOut), int(out)),
+					"maxSendMs", fmt.Sprintf("%.1f", float64(maxSend.Swap(0))/float64(time.Millisecond)),
+					"cpuBusy", fmt.Sprintf("%.0f", busy), "lowKbps", s.mesh.LowKbps(), "highFPS", s.HighFPS(), "idle", src.Idle(),
+					"preview", preview, "videoWindows", s.nGrids.Load(), "captureCaps", media.ShortCaps(c.CaptureCaps))
+				lastAt, lastOut, last = time.Now(), out, c
 			}
 		case <-s.done:
 			return
@@ -2759,6 +2834,32 @@ func (s *Session) watchSource(src *media.VideoSource, kind media.SourceKind, res
 	s.srcNote = note
 	s.mu.Unlock()
 	s.changed()
+}
+
+// perSec is n frames in dt as a frame rate for a log ("?": n < 0, unknown).
+func perSec(n int, dt time.Duration) string {
+	if n < 0 {
+		return "?"
+	}
+	return fmt.Sprintf("%.1f", float64(n)/dt.Seconds())
+}
+
+// countDiff is b-a for counter readings (-1 if either is unknown).
+func countDiff(a, b int) int {
+	if a < 0 || b < 0 {
+		return -1
+	}
+	return b - a
+}
+
+// storeMax raises m to v if v is larger.
+func storeMax(m *atomic.Int64, v int64) {
+	for {
+		old := m.Load()
+		if v <= old || m.CompareAndSwap(old, v) {
+			return
+		}
+	}
 }
 
 // idleCheckEvery is how often a share looks for viewers coming or going,
@@ -2797,36 +2898,59 @@ func windowClosed(kind media.SourceKind) bool {
 
 // The encoder must keep up with HIGH. After encodeWarmup we compare, over
 // windows of encodeWindow, the frames the encoder put out with the frames
-// it was handed: a still window offers few frames, and that is not the
-// encoder's fault. Only encodeStrikes bad windows in a row (under
-// keepUpShare of the frame rate we run HIGH at, and of what was offered)
-// count as too slow (x264 on a 2012 Xeon does 4K at 9 fps). Then a desktop
-// share first lowers the frame rate (cpuFPSSteps, text stays sharp), a game
-// share the size; at 720p a game share drops to 30 fps. We watch for
+// captured: a still screen captures few frames, and that is not the
+// encoder's fault. Only encodeStrikes bad windows in a row (the capture at
+// keepUpShare of the frame rate we run HIGH at or more, the encoder under
+// keepUpShare of that and of what was offered, with HIGH's leaky queue
+// dropping at least half of what's missing: encodeCheck) count as too
+// slow (x264 on a 2012 Xeon does 4K at 9 fps). Then a desktop share first
+// lowers the frame rate (cpuFPSSteps, text stays sharp), a game share the
+// size; at 720p a game share drops to 30 fps. We watch for
 // encodeChecks windows after each (re)start or step.
+//
+// A step down is a trial: the lower size must encode resHelpGain times the
+// frames (or keep up), else we go back and keep the size for this share.
+// In the field NVENC and AMF put out 2-16 of 60 fps at 2160p, 1080p and
+// 720p alike: the size wasn't what held them back, and each step only
+// made the picture worse. Below 1080p we only go once a step to 1080p
+// helped.
 const (
-	encodeWarmup  = 3 * time.Second
+	encodeWarmup  = 5 * time.Second
 	encodeWindow  = 10 * time.Second
-	encodeStrikes = 2
+	encodeStrikes = 3
 	encodeChecks  = 6
 	keepUpShare   = 0.8
-	// A hardware encoder (NVENC, QSV, AMF, Media Foundation) gets a longer
-	// start: capture, a preview window or audio starting can stall the first
-	// seconds (a 32-thread PC with NVENC was stepped down to 720p after 23
-	// s). With the CPU mostly idle a slow window is more likely such a stall
-	// than the encoder: it takes encodeStrikesIdle in a row then.
-	encodeWarmupHW    = 15 * time.Second
-	encodeStrikesIdle = 4
+	// A hardware encoder (NVENC, QSV, AMF, Media Foundation, VA) gets a
+	// longer start: capture, a preview window or audio starting can stall
+	// the first seconds (a 32-thread PC with NVENC was stepped down to 720p
+	// after 23 s). With the CPU mostly idle a slow window is more likely
+	// such a stall than the encoder: it takes encodeStrikesIdle in a row
+	// then. It keeps up at keepUpShareHW.
+	encodeWarmupHW    = 30 * time.Second
+	encodeStrikesIdle = 6
 	encodeIdleBusy    = 0.5
-	// After a step down we try the chosen size again after resRetryWait,
-	// doubled after each try that stepped down again (up to resRetryMax).
-	resRetryWait = 5 * time.Minute
-	resRetryMax  = time.Hour
+	keepUpShareHW     = 0.6
+	resHelpGain       = 1.3
+	// After a step down that helped we try the chosen size again after
+	// resRetryWait, doubled after each try that stepped down again (up to
+	// resRetryMax).
+	resRetryWait = 2 * time.Minute
+	resRetryMax  = 15 * time.Minute
 )
 
-// hardwareEncoder reports whether a GStreamer encoder runs on the GPU.
+// hardwareEncoder reports whether a GStreamer encoder runs on the GPU:
+// all but the software ones (nvh264enc, nvd3d11h264enc, qsvh264enc,
+// amfh264enc, mfh264enc, vah264enc, vah264lpenc, d3d12h264enc, ...).
 func hardwareEncoder(name string) bool {
 	return name != "" && name != "x264enc" && name != "openh264enc"
+}
+
+// keepUp is the share of the frames encoder must put out to keep up.
+func keepUp(encoder string) float64 {
+	if hardwareEncoder(encoder) {
+		return keepUpShareHW
+	}
+	return keepUpShare
 }
 
 // strikesNeeded is how many slow windows in a row step down: more for a
@@ -2850,6 +2974,36 @@ func resRetryAfter(tries int) time.Duration {
 	return d
 }
 
+// resTrial is a step down from a slow encoder, from from (which encoded
+// fromFPS) to to. note tells the sharer why, once to proved faster.
+type resTrial struct {
+	from, to media.Resolution
+	fromFPS  float64
+	note     string
+}
+
+// stepHelped reports whether a step down from a size that encoded fromFPS
+// helped: the lower size encodes toFPS, resHelpGain times as many, or
+// isn't behind any more.
+func stepHelped(fromFPS, toFPS float64, behind bool) bool {
+	return !behind || toFPS >= resHelpGain*fromFPS
+}
+
+// stepDownBlock is why a slow encoder may not step down to lower ("": it
+// may): the sharer keeps the chosen size, a step down didn't help this
+// share, or lower is below 1080p and no step to 1080p helped.
+func stepDownBlock(lower media.Resolution, keep, noStep, helped bool) string {
+	switch {
+	case keep:
+		return "keep my chosen resolution"
+	case noStep:
+		return "a lower resolution didn't help"
+	case lower == media.Res720 && !helped:
+		return "not below 1080p unless 1080p helped"
+	}
+	return ""
+}
+
 var cpuFPSSteps = []int{30, 20, 15}
 
 func fpsDropNote(res media.Resolution, target int, fps float64, next int) string {
@@ -2863,14 +3017,72 @@ func fpsDropNote(res media.Resolution, target int, fps float64, next int) string
 	}
 }
 
-// encoderBehind reports whether out encoded frames in a window fall short
-// of fps, our frame rate, and of the in frames offered (in < 0: unknown,
-// judge by the rate alone).
-func encoderBehind(in, out, fps int, window time.Duration) bool {
-	if float64(out)/window.Seconds() >= keepUpShare*float64(fps) {
+// encoderBehind reports whether out encoded frames in a window fall short,
+// by more than share, of fps, our frame rate, and of the in frames offered
+// (in < 0: unknown, judge by the rate alone), with HIGH's leaky queue
+// dropping at least half the frames missing: it passed on queued of the in
+// (queued < 0: unknown, don't ask). A slow encoder, or a send that holds
+// it up, makes the queue drop. Frames the queue passed on and the encoder
+// didn't put out went missing for another reason, which a lower size
+// won't fix.
+func encoderBehind(in, queued, out, fps int, window time.Duration, share float64) bool {
+	if float64(out)/window.Seconds() >= share*float64(fps) {
 		return false
 	}
-	return in < 0 || float64(out) < keepUpShare*float64(in)
+	if in < 0 {
+		return true
+	}
+	if float64(out) >= share*float64(in) {
+		return false
+	}
+	return queueDropped(in, queued, out)
+}
+
+// queueDropped reports whether HIGH's leaky queue dropped at least half
+// the frames missing between in offered and out encoded (queued < 0:
+// unknown, don't ask).
+func queueDropped(in, queued, out int) bool {
+	return queued < 0 || 2*(in-queued) >= in-out
+}
+
+// encodeVerdict is what one window of the encode check found.
+type encodeVerdict int
+
+const (
+	encodeKeptUp encodeVerdict = iota
+	// encodeStill: HIGH fell short of our frame rate, but so did the
+	// capture: the screen was still or changed slowly.
+	encodeStill
+	encodeBehind
+)
+
+// encodeCheck judges a window in which the capture delivered captured
+// frames (< 0: unknown, encoderBehind decides). The encoder is behind only
+// when the screen changed at close to fps (captured at least share of it),
+// it put out under share of the frames captured (up to fps) and HIGH's
+// leaky queue dropped at least half of the missing frames. If the capture
+// fell short, the content did, and a lower size won't help.
+func encodeCheck(captured, in, queued, out, fps int, window time.Duration, share float64) encodeVerdict {
+	if captured < 0 {
+		if encoderBehind(in, queued, out, fps, window, share) {
+			return encodeBehind
+		}
+		return encodeKeptUp
+	}
+	frames := float64(fps) * window.Seconds()
+	if float64(captured) < share*frames {
+		if float64(out) < share*frames {
+			return encodeStill
+		}
+		return encodeKeptUp
+	}
+	if float64(out) >= share*min(float64(captured), frames) {
+		return encodeKeptUp
+	}
+	if in >= 0 && (float64(out) >= share*float64(in) || !queueDropped(in, queued, out)) {
+		return encodeKeptUp
+	}
+	return encodeBehind
 }
 
 // highFPSLocked is the frame rate HIGH runs at now (s.mu held).
@@ -2905,7 +3117,8 @@ func (s *Session) applyHighFPS() {
 }
 
 // checkEncodeRate steps our resolution down if the encoder of src can't
-// keep up with res, and tells the sharer why.
+// keep up with res, and tells the sharer why once the lower size proved
+// to encode faster (judgeStep).
 func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind, res media.Resolution, n *atomic.Int64) {
 	enc := s.encoderName()
 	if hardwareEncoder(enc) {
@@ -2913,38 +3126,56 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 	} else {
 		time.Sleep(encodeWarmup)
 	}
+	share := keepUp(enc)
+	if s.judgeStep(src, kind, res, n, share) {
+		return
+	}
 	strikes, need := 0, encodeStrikes
-	var fps, offeredFPS float64
+	var fps float64
+	slowOut := 0 // frames put out in the slow windows in a row
 	for i := 0; i < encodeChecks; i++ {
-		a, ia := n.Load(), src.HighOfferedFrames()
+		a, c0 := n.Load(), src.Counts()
 		s.mu.Lock()
 		target := s.highFPSLocked()
 		s.mu.Unlock()
 		time.Sleep(encodeWindow)
-		out, in := int(n.Load()-a), -1
-		if ia >= 0 {
-			in = src.HighOfferedFrames() - ia
-		}
+		out, c := int(n.Load()-a), src.Counts()
 		s.mu.Lock()
 		current := s.src == src && orRes(s.res) == res
 		s.mu.Unlock()
 		if !current {
 			return
 		}
-		fps, offeredFPS = float64(out)/encodeWindow.Seconds(), float64(in)/encodeWindow.Seconds()
-		if !encoderBehind(in, out, target, encodeWindow) {
-			strikes = 0
+		in, queued := countDiff(c0.HighIn, c.HighIn), countDiff(c0.HighOut, c.HighOut)
+		captured := countDiff(c0.Captured, c.Captured)
+		fps = float64(out) / encodeWindow.Seconds()
+		dropped := -1
+		if in >= 0 && queued >= 0 {
+			dropped = in - queued
+		}
+		verdict := encodeCheck(captured, in, queued, out, target, encodeWindow, share)
+		if verdict != encodeBehind {
+			if verdict == encodeStill {
+				s.cfg.Log.Debug("encoder behind, but so is the capture: a still or slow screen", "res", res, "fps", fps,
+					"capturedFPS", perSec(captured, encodeWindow), "offeredFPS", perSec(in, encodeWindow),
+					"queueDroppedFPS", perSec(dropped, encodeWindow), "targetFPS", target)
+			}
+			strikes, slowOut = 0, 0
 			continue
 		}
 		strikes++
+		slowOut += out
 		busy := cpuMeter.Busy()
 		need = strikesNeeded(enc, busy)
-		s.cfg.Log.Info("encoder behind", "res", res, "fps", fps, "offeredFPS", offeredFPS, "targetFPS", target, "strike", strikes, "of", need, "cpuBusy", fmt.Sprintf("%.0f", 100*busy))
+		s.cfg.Log.Info("encoder behind", "res", res, "fps", fps,
+			"capturedFPS", perSec(captured, encodeWindow),
+			"offeredFPS", perSec(in, encodeWindow), "queueDroppedFPS", perSec(dropped, encodeWindow),
+			"targetFPS", target, "strike", strikes, "of", need, "cpuBusy", fmt.Sprintf("%.0f", 100*busy))
 		if strikes < need {
 			continue
 		}
 		if s.cpuStep(res, src, fps) {
-			strikes, i = 0, -1 // a fresh set of checks at the lower rate
+			strikes, slowOut, i = 0, 0, -1 // a fresh set of checks at the lower rate
 			continue
 		}
 		break
@@ -2953,22 +3184,42 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 		s.retryWantedRes(src, kind, res)
 		return
 	}
+	lower := s.slowEncoder(src, res, float64(slowOut)/(float64(strikes)*encodeWindow.Seconds()))
+	if lower == "" {
+		return
+	}
+	s.mesh.ResetRenditions()
+	if err := s.SetSource(kind); err != nil {
+		s.cfg.Log.Error("restart at lower resolution", "err", err)
+	}
+}
+
+// slowEncoder acts on src's encoder falling behind at res, where it put
+// out slowFPS: a game share at 720p drops to 30 fps; else it returns the
+// lower size to try ("": we keep res).
+func (s *Session) slowEncoder(src *media.VideoSource, res media.Resolution, slowFPS float64) media.Resolution {
 	s.mu.Lock()
 	current := s.src == src && orRes(s.res) == res
 	lower := media.LowerResolution(res)
-	targetFPS := NormalizeShareOptions(s.shareOpts).FPS
-	if current && lower == "" && s.shareOpts.EffectiveSlowViewer() == SlowResolution && s.cpuFPS == 0 && targetFPS > 30 {
+	opts := NormalizeShareOptions(s.shareOpts)
+	targetFPS := opts.FPS
+	if current && lower == "" && opts.EffectiveSlowViewer() == SlowResolution && s.cpuFPS == 0 && targetFPS > 30 {
 		s.cpuFPS = 30 // 720p60 is too much: 720p30
-		s.resNote = fpsDropNote(res, targetFPS, fps, 30)
+		s.resNote = fpsDropNote(res, targetFPS, slowFPS, 30)
 		s.mu.Unlock()
-		s.cfg.Log.Warn("encoder too slow, lowering the frame rate", "res", res, "fps", fps, "to", 30)
+		s.cfg.Log.Warn("encoder too slow, lowering the frame rate", "res", res, "fps", slowFPS, "to", 30)
 		s.applyHighFPS()
 		s.changed()
-		return
+		return ""
 	}
 	if !current || lower == "" {
 		s.mu.Unlock()
-		return
+		return ""
+	}
+	if why := stepDownBlock(lower, opts.KeepQuality, s.resNoStep, s.resHelped); why != "" {
+		s.mu.Unlock()
+		s.cfg.Log.Info("encoder behind, keeping the resolution", "res", res, "fps", fmt.Sprintf("%.1f", slowFPS), "why", why)
+		return ""
 	}
 	if s.resWant == "" {
 		s.resWant = res
@@ -2976,13 +3227,79 @@ func (s *Session) checkEncodeRate(src *media.VideoSource, kind media.SourceKind,
 		s.resRetries++ // the chosen size failed again
 	}
 	s.res, s.rends = lower, nil
-	s.resNote = fmt.Sprintf("Your computer can't encode %s fast enough (%.0f fps); sharing at %s.", media.ResolutionLabel(res), fps, media.ResolutionLabel(lower))
+	s.resTrial = &resTrial{from: res, to: lower, fromFPS: slowFPS,
+		note: fmt.Sprintf("Your computer can't encode %s fast enough (%.0f fps); sharing at %s.", media.ResolutionLabel(res), slowFPS, media.ResolutionLabel(lower))}
+	s.resNote = "" // not until the lower size proves faster
+	enc := s.encoder
 	s.mu.Unlock()
-	s.cfg.Log.Warn("encoder too slow, stepping down", "from", res, "to", lower, "fps", fps, "offeredFPS", offeredFPS, "encoder", s.encoderName())
+	s.cfg.Log.Warn("encoder too slow, trying a lower resolution", "from", res, "to", lower, "fps", fmt.Sprintf("%.1f", slowFPS), "encoder", enc)
+	return lower
+}
+
+// judgeStep measures res after a step down to it, over encodeStrikes
+// windows. If it doesn't encode faster than the size before, we go back,
+// keep that size for this share and tell the sharer nothing (true: done
+// checking src).
+func (s *Session) judgeStep(src *media.VideoSource, kind media.SourceKind, res media.Resolution, n *atomic.Int64, share float64) bool {
+	s.mu.Lock()
+	t := s.resTrial
+	target := s.highFPSLocked()
+	s.mu.Unlock()
+	if t == nil || t.to != res {
+		return false
+	}
+	window := encodeStrikes * encodeWindow
+	a, c0 := n.Load(), src.Counts()
+	time.Sleep(window)
+	out, c := int(n.Load()-a), src.Counts()
+	in := countDiff(c0.HighIn, c.HighIn)
+	fps := float64(out) / window.Seconds()
+	// A still screen during the trial proves nothing either way: then
+	// only encoding resHelpGain times the frames counts.
+	v := encodeCheck(countDiff(c0.Captured, c.Captured), in, countDiff(c0.HighOut, c.HighOut), out, target, window, share)
+	helped := stepHelped(t.fromFPS, fps, v != encodeKeptUp)
+	back, ok := s.endTrial(src, res, t, helped)
+	if !ok {
+		return true
+	}
+	if back == "" {
+		s.cfg.Log.Info("lower resolution helped", "from", t.from, "fromFPS", fmt.Sprintf("%.1f", t.fromFPS), "to", res, "toFPS", fmt.Sprintf("%.1f", fps))
+		return false
+	}
+	s.cfg.Log.Warn("lower resolution didn't help, keeping "+string(back), "from", t.from, "fromFPS", fmt.Sprintf("%.1f", t.fromFPS), "to", res, "toFPS", fmt.Sprintf("%.1f", fps), "offeredFPS", fmt.Sprintf("%.1f", float64(in)/window.Seconds()), "targetFPS", target)
 	s.mesh.ResetRenditions()
 	if err := s.SetSource(kind); err != nil {
-		s.cfg.Log.Error("restart at lower resolution", "err", err)
+		s.cfg.Log.Error("restart at the resolution before", "err", err)
 	}
+	return true
+}
+
+// endTrial ends trial t of res (ok false: src or the size changed since).
+// If the step helped, the sharer learns why we share lower; if not, it
+// returns the size to go back to, and we don't step down again.
+func (s *Session) endTrial(src *media.VideoSource, res media.Resolution, t *resTrial, helped bool) (back media.Resolution, ok bool) {
+	s.mu.Lock()
+	if s.src != src || orRes(s.res) != res || s.resTrial != t {
+		s.mu.Unlock()
+		return "", false
+	}
+	s.resTrial = nil
+	if helped {
+		s.resHelped = true
+		s.resNote, s.resOKNote = t.note, t.note
+		s.mu.Unlock()
+		s.changed()
+		return "", true
+	}
+	s.resNoStep = true
+	s.res, s.rends = t.from, nil
+	if t.from == s.resWant {
+		s.resWant, s.resRetries, s.resNote = "", 0, ""
+	} else {
+		s.resNote = s.resOKNote // an earlier step down did help
+	}
+	s.mu.Unlock()
+	return t.from, true
 }
 
 // cpuStep lowers a framerate-first share's frame rate one step for a slow
@@ -3018,6 +3335,12 @@ func (s *Session) cpuStep(res media.Resolution, src *media.VideoSource, fps floa
 	return true
 }
 
+// resetResTrials forgets what step downs showed: a new share or a size the
+// sharer picked starts afresh (s.mu held).
+func (s *Session) resetResTrials() {
+	s.resTrial, s.resNoStep, s.resHelped, s.resOKNote = nil, false, false, ""
+}
+
 func (s *Session) encoderName() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3035,6 +3358,7 @@ func (s *Session) SetResolution(res media.Resolution) error {
 	changed := s.res != res
 	s.res, s.resNote = res, ""
 	s.resWant, s.resRetries = "", 0
+	s.resetResTrials()
 	kind := s.srcKind
 	if changed {
 		s.rends = nil // the ladder below the new top differs
@@ -3059,7 +3383,8 @@ func (s *Session) ShareOptions() ShareOptions {
 }
 
 // SetShareOptions updates our outgoing FPS, slow-viewer policy, lowest
-// resolution floor, smaller-copy toggle, and upload limit.
+// resolution floor, smaller-copy toggle, upload limit, and whether a slow
+// encoder may lower the resolution (KeepQuality: back to the chosen size).
 func (s *Session) SetShareOptions(o ShareOptions) error {
 	o = NormalizeShareOptions(o)
 	s.mu.Lock()
@@ -3070,7 +3395,13 @@ func (s *Session) SetShareOptions(o ShareOptions) error {
 	slowChanged := prev.EffectiveSlowViewer() != o.EffectiveSlowViewer()
 	uploadChanged := prev.UploadKbps != o.UploadKbps
 	floorChanged := prev.MinHeight != o.MinHeight || prev.SmallerCopy != o.SmallerCopy
-	if pipelineChanged || slowChanged {
+	keepChanged := prev.KeepQuality != o.KeepQuality
+	keepBack := o.KeepQuality && s.resWant != ""
+	if keepBack {
+		s.res, s.rends = s.resWant, nil
+		s.resWant, s.resRetries, s.resTrial = "", 0, nil
+	}
+	if pipelineChanged || slowChanged || keepBack {
 		s.resNote = ""
 	}
 	if floorChanged {
@@ -3082,11 +3413,11 @@ func (s *Session) SetShareOptions(o ShareOptions) error {
 	kind := s.srcKind
 	s.mu.Unlock()
 
-	if !pipelineChanged && !slowChanged && !uploadChanged {
+	if !pipelineChanged && !slowChanged && !uploadChanged && !keepChanged {
 		return nil
 	}
-	if pipelineChanged && kind != "" {
-		if floorChanged {
+	if (pipelineChanged || keepBack) && kind != "" {
+		if floorChanged || keepBack {
 			s.mesh.ResetRenditions()
 		}
 		return s.SetSource(kind)
@@ -3375,9 +3706,9 @@ func linkHint(m Member) string {
 func (s *Session) Diagnostics() string {
 	st := s.State()
 	var b strings.Builder
-	fmt.Fprintf(&b, "sharing: %s at %s, target %d fps (HIGH %d fps, slow=%s, floor=%dp, smaller=%v), encoder %s\n",
+	fmt.Fprintf(&b, "sharing: %s at %s, target %d fps (HIGH %d fps, slow=%s, floor=%dp, smaller=%v, keep=%v), encoder %s\n",
 		orDefault(st.Source, "nothing"), st.Resolution, st.ShareOptions.FPS, st.HighFPS,
-		st.EffectiveSlow, st.ShareOptions.MinHeight, st.ShareOptions.SmallerCopy, orDefault(st.Encoder, "-"))
+		st.EffectiveSlow, st.ShareOptions.MinHeight, st.ShareOptions.SmallerCopy, st.ShareOptions.KeepQuality, orDefault(st.Encoder, "-"))
 	if st.ResolutionNote != "" {
 		fmt.Fprintf(&b, "note: %s\n", st.ResolutionNote)
 	}
@@ -3546,10 +3877,10 @@ func buildOf(c *proto.ClientMeta) int {
 // down again, once the lower size ran well for resRetryAfter.
 func (s *Session) retryWantedRes(src *media.VideoSource, kind media.SourceKind, res media.Resolution) {
 	s.mu.Lock()
-	want, tries := s.resWant, s.resRetries
+	want, tries, noStep := s.resWant, s.resRetries, s.resNoStep
 	s.mu.Unlock()
-	if want == "" || want == res {
-		return
+	if want == "" || want == res || noStep {
+		return // noStep: a step down didn't help, we stay
 	}
 	wait := resRetryAfter(tries)
 	for end := time.Now().Add(wait); time.Now().Before(end); {
@@ -3559,18 +3890,19 @@ func (s *Session) retryWantedRes(src *media.VideoSource, kind media.SourceKind, 
 		case <-time.After(encodeWindow):
 		}
 		s.mu.Lock()
-		current := s.src == src && orRes(s.res) == res && s.resWant == want
+		current := s.src == src && orRes(s.res) == res && s.resWant == want && !s.resNoStep
 		s.mu.Unlock()
 		if !current {
 			return
 		}
 	}
 	s.mu.Lock()
-	if s.src != src || orRes(s.res) != res || s.resWant != want {
+	if s.src != src || orRes(s.res) != res || s.resWant != want || s.resNoStep {
 		s.mu.Unlock()
 		return
 	}
 	s.res, s.rends, s.resNote = want, nil, ""
+	s.resTrial = nil
 	s.mu.Unlock()
 	s.cfg.Log.Info("trying the chosen resolution again", "from", res, "to", want, "after", wait.String())
 	s.mesh.ResetRenditions()

@@ -266,8 +266,8 @@ const (
 func sourceElements(k SourceKind) (string, error) {
 	if k == SourceScreen {
 		if runtime.GOOS == "windows" {
-			// Windows Graphics Capture, downloaded from GPU memory for the encoders.
-			return "d3d11screencapturesrc show-cursor=true capture-api=wgc ! d3d11download", nil
+			// Windows Graphics Capture, in GPU memory (captureChain).
+			return "d3d11screencapturesrc show-cursor=true capture-api=wgc", nil
 		}
 		k = SourceX11
 	}
@@ -298,7 +298,7 @@ func targetElements(kind, arg string) (string, error) {
 			return "", err
 		}
 		if win {
-			return fmt.Sprintf("d3d11screencapturesrc window-handle=%d show-cursor=true capture-api=wgc ! d3d11download", id), nil
+			return fmt.Sprintf("d3d11screencapturesrc window-handle=%d show-cursor=true capture-api=wgc", id), nil
 		}
 		return fmt.Sprintf("ximagesrc xid=%d use-damage=false show-pointer=true", id), nil
 	case "monitor":
@@ -307,7 +307,7 @@ func targetElements(kind, arg string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("bad monitor %q", arg)
 			}
-			return fmt.Sprintf("d3d11screencapturesrc monitor-handle=%d show-cursor=true capture-api=wgc ! d3d11download", h), nil
+			return fmt.Sprintf("d3d11screencapturesrc monitor-handle=%d show-cursor=true capture-api=wgc", h), nil
 		}
 		r, err := capture.ParseMonitor(arg)
 		if err != nil {
@@ -319,20 +319,76 @@ func targetElements(kind, arg string) (string, error) {
 	return "", fmt.Errorf("unknown source kind %q", kind)
 }
 
-// captureChain is src, capped at fps when it is ximagesrc, then scaled to
-// the size downstream asks for and converted to its format.
-//
-// ximagesrc grabs on its own clock at the frame rate it negotiated (25 fps
-// unless asked), so the framerate caps right after it are what bound its
-// XGetImage calls; a videorate after it would only drop frames already
-// grabbed. The scaling comes before (or with) the conversion: a 5K screen
-// converted at full size to I420 and scaled after cost ~6x the CPU per
-// frame of videoconvertscale doing both at once.
-func captureChain(src string, fps int) string {
-	if strings.HasPrefix(src, "ximagesrc ") {
+// Chain is where a share scales and converts what it captures.
+type Chain string
+
+const (
+	ChainCPU Chain = "cpu" // videoconvertscale, in system memory
+	ChainGPU Chain = "gpu" // d3d11convert, then only HIGH's frames downloaded
+)
+
+// ForceChain makes shares use one chain where they can ("": the best).
+// blite-diag compares them.
+var ForceChain Chain
+
+// gpuChainFailed: a share's GPU chain failed where the CPU one worked, so
+// shares convert on the CPU from then on.
+var gpuChainFailed atomic.Bool
+
+// d3d11Source reports whether src captures into GPU memory (Windows).
+func d3d11Source(src string) bool { return strings.HasPrefix(src, "d3d11screencapturesrc ") }
+
+// chainFor is the chain a share of src uses.
+func chainFor(src string) Chain {
+	if d3d11Source(src) && ForceChain != ChainCPU && gst.HasFactory("d3d11convert") &&
+		(ForceChain == ChainGPU || !gpuChainFailed.Load()) {
+		return ChainGPU
+	}
+	return ChainCPU
+}
+
+// downloaded is src in system memory, at up to fps frames a second (0:
+// the source's choice).
+func downloaded(src string, fps int) string {
+	if d3d11Source(src) {
+		src += " ! d3d11download"
+	}
+	if fps > 0 {
 		src += fmt.Sprintf(" ! video/x-raw,framerate=%d/1", fps)
 	}
-	return src + " ! " + convertScale()
+	return src
+}
+
+// captureChain is src at up to l.FPS, then scaled to l's size and
+// converted to format (in system memory). The identity counts the frames
+// captured, before any conversion.
+//
+// The capture sources tick at the frame rate they negotiated, so the
+// framerate caps right after them are what bound their grabs: ximagesrc
+// grabs on its own clock (25 fps unless asked), and d3d11screencapturesrc
+// picks 30 (it only hands on a frame when the screen changed, so a still
+// screen costs nothing at any rate). A videorate after them would only
+// drop frames already grabbed. The scaling comes before (or with) the
+// conversion: a 5K screen converted at full size to I420 and scaled after
+// cost ~6x the CPU per frame of videoconvertscale doing both at once.
+//
+// On ChainGPU the capture is scaled and converted on the GPU and only
+// HIGH's frames come down: a 4K BGRA frame downloaded and converted on the
+// CPU held a capture of 54 fps to 23-46.
+func captureChain(src string, l Layer, format string, chain Chain) string {
+	switch {
+	case chain == ChainGPU && d3d11Source(src):
+		return fmt.Sprintf("%s ! video/x-raw(memory:D3D11Memory),framerate=%d/1 ! identity name=captured ! "+
+			"d3d11convert add-borders=true ! video/x-raw(memory:D3D11Memory),format=%s,width=%d,height=%d,pixel-aspect-ratio=1/1 ! d3d11download",
+			src, l.FPS, format, l.Width, l.Height)
+	case d3d11Source(src):
+		// All cores: the converter is the bottleneck here, and a hardware
+		// encoder leaves the CPU free.
+		return downloaded(src, l.FPS) + " ! identity name=captured ! " + convertScale() + " n-threads=0"
+	case strings.HasPrefix(src, "ximagesrc "):
+		src = downloaded(src, l.FPS)
+	}
+	return src + " ! identity name=captured ! " + convertScale()
 }
 
 // convertScale scales then converts in one element where GStreamer has it
@@ -568,6 +624,11 @@ type VideoSource struct {
 	previewedBig *gst.Counter
 	offered      *gst.Counter // frames the capture gave the encoders (nil if unknown)
 	thin         *gst.Thinner // HIGH's frame rate step (nil if unknown)
+	captured     *gst.Counter // frames out of the capture, before conversion (nil if unknown)
+	capturedEl   *gst.Element
+	dequeued     *gst.Counter // frames out of HIGH's leaky queue (nil if unknown)
+	gaps         *gst.Gaps    // between captured frames, once WatchCaptureGaps ran
+	chain        Chain
 	life         sync.RWMutex
 	lastKey      []time.Time
 	keyMu        sync.Mutex
@@ -598,11 +659,16 @@ func StartVideoSource(kind SourceKind, res Resolution, mode ContentMode, rends [
 // StartVideoSourceOpts captures from kind once and encodes every active layer
 // of LayersForOpts(opts).
 func StartVideoSourceOpts(kind SourceKind, opts LayerOpts, encoderForce, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
+	return StartVideoSourceLayers(kind, LayersForOpts(opts), encoderForce, preview, onAU)
+}
+
+// StartVideoSourceLayers captures from kind once and encodes layers, indexed
+// by layer ID (zero Layers are skipped).
+func StartVideoSourceLayers(kind SourceKind, layers []Layer, encoderForce, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, string, error) {
 	encs := availableEncoders(encoderForce)
 	if len(encs) == 0 {
 		return nil, "", errors.New("no H.264 encoder available (install gstreamer1.0-plugins-ugly for x264enc)")
 	}
-	layers := LayersForOpts(opts)
 	var lastErr error
 	for _, enc := range encs {
 		vs, err := startVideoSource(kind, layers, enc, preview, onAU)
@@ -610,21 +676,63 @@ func StartVideoSourceOpts(kind SourceKind, opts LayerOpts, encoderForce, preview
 			liveSources.Add(1)
 			return vs, enc.factory, nil
 		}
-		Log.Warn("encoder failed, trying the next", "encoder", enc.factory, "res", opts.Resolution, "err", err)
+		Log.Warn("encoder failed, trying the next", "encoder", enc.factory, "height", layers[High].Height, "err", err)
 		lastErr = fmt.Errorf("%s: %w", enc.factory, err)
 	}
 	return nil, "", lastErr
 }
 
+// captureBranch is a share's capture up to the encoders' tee: captured,
+// converted, and paced to hi by videorate. The identities count what the
+// capture delivers (captured) and what the encoders are offered (offered).
+func captureBranch(src, format string, hi Layer, chain Chain) string {
+	return fmt.Sprintf("%s ! %s ! "+
+		"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! identity name=offered",
+		captureChain(src, hi, format, chain), videorate(hi.FPS), format, hi.Width, hi.Height, hi.FPS)
+}
+
+// videorate paces a capture to fps, filling short gaps with copies of the
+// frame before but not long ones. Windows capture only delivers a frame
+// when the screen changed: after a still second videorate put out all the
+// copies it missed at once (53-178 fps), HIGH's leaky queue dropped most,
+// and that looked like a slow encoder. Over maxDup the next frame comes
+// with a discont at its own time instead; viewers hold the last picture.
+func videorate(fps int) string {
+	return fmt.Sprintf("videorate max-duplication-time=%d", int64(maxDup(fps)))
+}
+
+// maxDup is the longest capture gap videorate fills: 100 ms, or two frames
+// at fps if that's longer.
+func maxDup(fps int) time.Duration {
+	d := 100 * time.Millisecond
+	if fps > 0 {
+		d = max(d, 2*time.Second/time.Duration(fps))
+	}
+	return d
+}
+
+// startVideoSource starts a share of kind with enc. If its GPU chain
+// fails, it tries the CPU's.
 func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, error) {
 	src, err := sourceElements(kind)
 	if err != nil {
 		return nil, err
 	}
+	chain := chainFor(src)
+	vs, err := startVideoChain(src, chain, layers, enc, preview, onAU)
+	if err == nil || chain != ChainGPU || ForceChain == ChainGPU {
+		return vs, err
+	}
+	Log.Warn("converting the capture on the GPU failed, trying the CPU", "encoder", enc.factory, "err", err)
+	if vs, err = startVideoChain(src, ChainCPU, layers, enc, preview, onAU); err == nil {
+		gpuChainFailed.Store(true) // the encoder works, the GPU chain didn't
+	}
+	return vs, err
+}
+
+func startVideoChain(src string, chain Chain, layers []Layer, enc encoder, preview string, onAU func(layer int, au AccessUnit)) (*VideoSource, error) {
 	hi := layers[High]
-	branches := []string{fmt.Sprintf("%s ! videorate ! "+
-		"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! identity name=offered ! tee name=t",
-		captureChain(src, hi.FPS), enc.format(), hi.Width, hi.Height, hi.FPS)}
+	branches := []string{captureBranch(src, enc.format(), hi, chain) + " ! tee name=t"}
 	for i, l := range layers {
 		if l.Height == 0 {
 			continue
@@ -634,16 +742,16 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 		// leaky queue drops because the encoder is slow count as offered.
 		thin, scale := "identity name=thin ! ", ""
 		if i != High {
-			thin, scale = "", fmt.Sprintf("videoscale ! videorate ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! ", l.Width, l.Height, l.FPS)
+			thin, scale = "", fmt.Sprintf("videoscale ! %s ! video/x-raw,width=%d,height=%d,framerate=%d/1 ! ", videorate(l.FPS), l.Width, l.Height, l.FPS)
 		}
 		// The appsink never drops: a lost access unit breaks the references
 		// of every frame after it, for every viewer, until the next IDR,
 		// with no packet loss to tell. A slow consumer blocks the encoder
 		// instead, and the leaky queue before it drops raw frames.
-		branches = append(branches, fmt.Sprintf("t. ! %squeue max-size-buffers=2 leaky=downstream ! %s%s ! "+
+		branches = append(branches, fmt.Sprintf("t. ! %squeue name=q%d max-size-buffers=2 leaky=downstream ! %s%s ! "+
 			"video/x-h264,profile=constrained-baseline ! "+
 			"h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "+
-			"appsink name=out%d sync=false max-buffers=4 drop=false", thin, scale, enc.launch(i, l), i))
+			"appsink name=out%d sync=false max-buffers=4 drop=false", thin, i, scale, enc.launch(i, l), i))
 	}
 	if preview != "" {
 		// The valves drop everything until SetPreview opens one, so a
@@ -665,7 +773,7 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 	if err != nil {
 		return nil, err
 	}
-	vs := &VideoSource{Pipeline: p, lastKey: make([]time.Time, len(layers)),
+	vs := &VideoSource{Pipeline: p, chain: chain, lastKey: make([]time.Time, len(layers)),
 		sinks: make([]*gst.Element, len(layers)), encs: make([]*gst.Element, len(layers))}
 	for i, l := range layers {
 		if l.Height == 0 {
@@ -704,6 +812,13 @@ func startVideoSource(kind SourceKind, layers []Layer, enc encoder, preview stri
 	}
 	if e, err := p.element("thin"); err == nil {
 		vs.thin, _ = e.Thin(hi.FPS)
+	}
+	if e, err := p.element("captured"); err == nil {
+		vs.captured, _ = e.CountBuffers()
+		vs.capturedEl = e
+	}
+	if e, err := p.element("q0"); err == nil {
+		vs.dequeued, _ = e.CountBuffers()
 	}
 	if preview != "" {
 		if vs.preview, err = p.element("preview"); err != nil {
@@ -902,6 +1017,65 @@ func (vs *VideoSource) HighOfferedFrames() int {
 	return vs.thin.Passed()
 }
 
+// Chain is where the share scales and converts what it captures.
+func (vs *VideoSource) Chain() Chain { return vs.chain }
+
+// FrameCounts follows frames through a video source (-1 where unknown).
+type FrameCounts struct {
+	Captured int // out of the capture, before conversion and videorate
+	Offered  int // to the encoders, after videorate
+	HighIn   int // into HIGH's leaky queue, after SetHighFPS
+	HighOut  int // out of that queue to HIGH's encoder; HighIn-HighOut it dropped
+	// CaptureCaps is what the capture negotiated (size, format, frame rate).
+	CaptureCaps string
+}
+
+// Counts reads the frame counters.
+func (vs *VideoSource) Counts() FrameCounts {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	c := FrameCounts{Captured: -1, Offered: -1, HighIn: -1, HighOut: -1}
+	if vs.stopped() {
+		return c
+	}
+	load := func(n *gst.Counter) int {
+		if n == nil {
+			return -1
+		}
+		return n.Load()
+	}
+	c.Captured, c.Offered, c.HighOut = load(vs.captured), load(vs.offered), load(vs.dequeued)
+	if vs.thin != nil {
+		c.HighIn = vs.thin.Passed()
+	}
+	if vs.capturedEl != nil {
+		c.CaptureCaps = vs.capturedEl.SrcCaps()
+	}
+	return c
+}
+
+// WatchCaptureGaps starts recording the time between captured frames
+// (TakeCaptureGaps reads it), to catch capture stalls.
+func (vs *VideoSource) WatchCaptureGaps() bool {
+	vs.life.Lock()
+	defer vs.life.Unlock()
+	if vs.gaps == nil && vs.capturedEl != nil && !vs.stopped() {
+		vs.gaps, _ = vs.capturedEl.WatchGaps(1 << 14)
+	}
+	return vs.gaps != nil
+}
+
+// TakeCaptureGaps returns the gaps between captured frames since the last
+// take, by arrival and by timestamp (nil before WatchCaptureGaps).
+func (vs *VideoSource) TakeCaptureGaps() (arrival, pts []time.Duration) {
+	vs.life.RLock()
+	defer vs.life.RUnlock()
+	if vs.gaps == nil || vs.stopped() {
+		return nil, nil
+	}
+	return vs.gaps.Take()
+}
+
 // Stop tears the source down; in-flight ForceKeyframe calls finish first.
 func (vs *VideoSource) Stop() {
 	vs.life.Lock()
@@ -918,6 +1092,16 @@ func (vs *VideoSource) Stop() {
 	if vs.thin != nil {
 		vs.thin.Free()
 		vs.thin = nil
+	}
+	for _, c := range []**gst.Counter{&vs.captured, &vs.dequeued} {
+		if *c != nil {
+			(*c).Free()
+			*c = nil
+		}
+	}
+	if vs.gaps != nil {
+		vs.gaps.Free()
+		vs.gaps = nil
 	}
 	vs.live.Do(func() { liveSources.Add(-1) })
 }

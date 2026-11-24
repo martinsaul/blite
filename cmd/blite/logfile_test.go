@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"blite/internal/logbuf"
 )
 
 func TestPruneLogs(t *testing.T) {
@@ -36,3 +39,28 @@ func TestPruneLogs(t *testing.T) {
 		t.Fatalf("kept the wrong ones: %v", have)
 	}
 }
+
+// A share's log line through our logger to a file on disk: written by the
+// caller, and through logbuf.
+func benchLogger(b *testing.B, buffered bool) {
+	f, err := os.Create(filepath.Join(b.TempDir(), "x.log"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer f.Close()
+	var dst io.Writer = f
+	if buffered {
+		w := logbuf.New(f, 0, 0, 0)
+		defer w.Close()
+		dst = w
+	}
+	log, _ := newLogger(dst, false, "dev")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		log.Info("keyframes", "layer", 0, "asked", i, "forced", 1, "idrs", 2)
+	}
+}
+
+func BenchmarkLogFile(b *testing.B)         { benchLogger(b, false) }
+func BenchmarkLogFileBuffered(b *testing.B) { benchLogger(b, true) }

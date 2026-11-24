@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"fyne.io/fyne/v2/widget"
+
 	"blite/internal/i18n"
 )
 
@@ -50,5 +52,6 @@ func (u *UI) askAutostart() {
 	}
 	u.confirm(i18n.L("Start with your computer?"),
 		i18n.L("Start Bellion Share in the background when you sign in? You can change this later in Settings."),
+		i18n.L("Start automatically"), i18n.L("Not now"), widget.HighImportance,
 		func() error { return u.a.SetAutostart(true) })
 }

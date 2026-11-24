@@ -1,4 +1,4 @@
 # Stamped by git archive (export-subst, .gitattributes); read by
 # scripts/version.sh when there's no BUILD file and no .git.
-sha=ba447415c7f8b274b01cba64b59b36df448a113b
-describe=build-root-240-gba44741
+sha=7c6ef52626cd8d66a8ef5ca7c42a2d836b60a471
+describe=build-root-257-g7c6ef52

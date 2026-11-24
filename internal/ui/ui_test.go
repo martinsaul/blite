@@ -126,7 +126,6 @@ func (f *fake) SetName(string) error                                 { return ni
 func (f *fake) Kick(string, bool) error                              { return nil }
 func (f *fake) SetResolution(string) error                           { return nil }
 func (f *fake) SetMode(string) error                                 { return nil }
-func (f *fake) SetShareOptions(int, string, int, bool, int) error    { return nil }
 func (f *fake) SetRoomSecurity(bool, string, bool) error             { return nil }
 func (f *fake) AddQualityPreset(string, int) error                   { return nil }
 func (f *fake) RemoveQualityPreset(string, int) error                { return nil }
@@ -271,4 +270,8 @@ func TestHandlerPanicLoggedViaSlog(t *testing.T) {
 	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "http: panic serving") {
 		t.Fatalf("panic not a Warn record: %q", out)
 	}
+}
+
+func (f *fake) SetShareOptions(int, string, int, bool, bool, int) error {
+	return nil
 }

@@ -25,6 +25,7 @@ type appSettings struct {
 	SlowViewer    string `json:"slowViewer,omitempty"`
 	MinHeight     *int   `json:"minHeight,omitempty"`
 	SmallerCopy   *bool  `json:"smallerCopy,omitempty"`
+	KeepQuality   bool   `json:"keepQuality,omitempty"`
 	UploadKbps    *int   `json:"uploadKbps,omitempty"`
 	E2EE          *bool  `json:"e2ee,omitempty"`
 	// UIScale is the window's interface size in percent ("" = follow the
@@ -121,6 +122,7 @@ func loadShareSettings(flagUploadKbps int) (res media.Resolution, opts session.S
 	if st.SmallerCopy != nil {
 		opts.SmallerCopy = *st.SmallerCopy
 	}
+	opts.KeepQuality = st.KeepQuality
 	if flagUploadKbps > 0 {
 		opts.UploadKbps = flagUploadKbps
 	} else if st.UploadKbps != nil && *st.UploadKbps > 0 {
@@ -231,6 +233,7 @@ func saveShareOptions(o session.ShareOptions, uploadChanged, flagSet bool) error
 		st.SlowViewer = o.SlowViewer
 		st.MinHeight = &mh
 		st.SmallerCopy = &sc
+		st.KeepQuality = o.KeepQuality
 		if uploadChanged {
 			if o.UploadKbps > 0 {
 				up := o.UploadKbps

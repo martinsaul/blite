@@ -57,6 +57,8 @@ type shareSheet struct {
 	minResSeg     *segmented
 	smallerSw     *toggleSwitch
 	smallerLbl    *tapLabel
+	keepSw        *toggleSwitch
+	keepLbl       *tapLabel
 	upModeSeg     *segmented
 	upCustomBox   *fyne.Container
 	upEntry       *widget.Entry
@@ -244,6 +246,15 @@ func newShareSheet(u *UI) *shareSheet {
 		s.pushShareOpts()
 	})
 
+	var keepRow fyne.CanvasObject
+	s.keepSw, s.keepLbl, keepRow = newSwitchRow(i18n.L("Keep my chosen resolution"), func(on bool) {
+		if s.setting {
+			return
+		}
+		s.cur.KeepQuality = on
+		s.pushShareOpts()
+	})
+
 	s.upEntry = widget.NewEntry()
 	s.upEntry.SetPlaceHolder("10")
 	applyCustomUpload := func() {
@@ -364,6 +375,8 @@ func newShareSheet(u *UI) *shareSheet {
 		bold(i18n.L("Lowest resolution allowed")),
 		s.minResSeg,
 		smallerRow,
+		keepRow,
+		caption(i18n.L("Don't lower the resolution when the computer seems slow")),
 		bold(i18n.L("Upload limit")),
 		s.upModeSeg,
 		s.upCustomBox,
@@ -502,7 +515,7 @@ func (s *shareSheet) sendShareOpts(withRes bool) {
 				return err
 			}
 		}
-		return s.u.a.SetShareOptions(c.FPS, c.SlowViewer, c.MinHeight, c.SmallerCopy, c.UploadKbps)
+		return s.u.a.SetShareOptions(c.FPS, c.SlowViewer, c.MinHeight, c.SmallerCopy, c.KeepQuality, c.UploadKbps)
 	})
 }
 
@@ -558,6 +571,7 @@ func normalizeShareState(st app.UIState) app.ShareConfig {
 		sh.EffectiveSlow = opts.EffectiveSlowViewer()
 		sh.MinHeight = opts.MinHeight
 		sh.SmallerCopy = opts.SmallerCopy
+		sh.KeepQuality = opts.KeepQuality
 		sh.UploadKbps = opts.UploadKbps
 		sh.Audio = ss.Audio
 		sh.Output = ss.Output
@@ -665,6 +679,7 @@ func (s *shareSheet) update(st app.UIState) {
 	s.slowSeg.SetSelected(sh.EffectiveSlow)
 	s.minResSeg.SetSelected(strconv.Itoa(sh.MinHeight))
 	s.smallerSw.SetChecked(sh.SmallerCopy)
+	s.keepSw.SetChecked(sh.KeepQuality)
 
 	if sh.UploadKbps > 0 {
 		s.upModeSeg.SetSelected("custom")

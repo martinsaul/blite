@@ -9,11 +9,14 @@ import (
 
 // viewRates measures, from counters sampled every viewRateWindow, the
 // frames/s we decode per watched stream and draw per video window. Video
-// windows run at media.GridFastFPS while a stream decodes at fastAbove or
-// more, and go back to media.GridFPS below fastBelow (apart, so a stream
-// near the line doesn't rebuild the windows over and over).
+// windows run at media.GridFastFPS as soon as a stream decodes at fastAbove
+// or more, and go back to media.GridFPS only once every stream stayed below
+// fastBelow for slowAfter (so a stream near the line, or a still window
+// share that sends no frames for a while, doesn't switch them back and
+// forth).
 type viewRates struct {
 	at       time.Time
+	slow     time.Time      // since when every stream is below fastBelow (zero: one isn't)
 	decoded  map[string]int // counters at `at`
 	shown    map[string]int
 	decFPS   map[string]int // the last window's rates
@@ -26,12 +29,12 @@ const (
 	viewLogEvery   = 30 * time.Second
 	fastAbove      = 45
 	fastBelow      = 38
+	slowAfter      = 30 * time.Second
 )
 
-// update takes the counters now; it returns whether windows should run fast
-// and whether that differs from fast.
-func (v *viewRates) update(log *slog.Logger, decoded, shown map[string]int, fast bool) (bool, bool) {
-	now := time.Now()
+// update takes the counters at now; it returns whether windows should run
+// fast and whether that differs from fast.
+func (v *viewRates) update(log *slog.Logger, now time.Time, decoded, shown map[string]int, fast bool) (bool, bool) {
 	if v.at.IsZero() {
 		v.at, v.decoded, v.shown = now, decoded, shown
 		return fast, false
@@ -59,11 +62,16 @@ func (v *viewRates) update(log *slog.Logger, decoded, shown map[string]int, fast
 		v.logAt = now
 		log.Info("view stats", "decodedFPS", v.decFPS, "windowFPS", v.shownFPS, "windowRate", windowRate(fast))
 	}
+	if top >= fastBelow {
+		v.slow = time.Time{}
+	} else if v.slow.IsZero() {
+		v.slow = now
+	}
 	want := fast
 	switch {
 	case top >= fastAbove:
 		want = true
-	case top < fastBelow:
+	case !v.slow.IsZero() && now.Sub(v.slow) >= slowAfter:
 		want = false
 	}
 	return want, want != fast

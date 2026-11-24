@@ -174,6 +174,7 @@ type ShareConfig struct {
 	EffectiveSlow      string          `json:"effectiveSlow"`             // "resolution" or "fps"
 	MinHeight          int             `json:"minHeight"`                 // 360, 540, 720
 	SmallerCopy        bool            `json:"smallerCopy"`               // default true
+	KeepQuality        bool            `json:"keepQuality,omitempty"`     // a slow encoder never lowers the resolution
 	UploadKbps         int             `json:"uploadKbps,omitempty"`      // 0 = Automatic, >0 = kbit/s
 	Audio              audio.Selection `json:"audio"`                     // "none", "system", "apps", "window", "test"
 	Output             string          `json:"output"`                    // "" = system default
@@ -253,6 +254,7 @@ func (a *App) State() any {
 		EffectiveSlow:      opts.EffectiveSlowViewer(),
 		MinHeight:          opts.MinHeight,
 		SmallerCopy:        opts.SmallerCopy,
+		KeepQuality:        opts.KeepQuality,
 		UploadKbps:         opts.UploadKbps,
 		Audio:              asel,
 		Output:             a.output,
@@ -309,6 +311,7 @@ func (a *App) State() any {
 		st.Share.EffectiveSlow = ss.EffectiveSlow
 		st.Share.MinHeight = ss.ShareOptions.MinHeight
 		st.Share.SmallerCopy = ss.ShareOptions.SmallerCopy
+		st.Share.KeepQuality = ss.ShareOptions.KeepQuality
 		st.Share.UploadKbps = ss.ShareOptions.UploadKbps
 		st.Share.Audio = ss.Audio
 		st.Share.Output = ss.Output
@@ -795,13 +798,15 @@ func (a *App) SetResolution(res string) error {
 
 // SetShareOptions implements ui.Backend: frame rate (10..60 step 5),
 // slow-viewer policy ("" auto, "resolution", "fps"), lowest resolution floor
-// (360/540/720), smaller copy toggle, and upload limit (kbit/s, 0 = Automatic).
-func (a *App) SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy bool, uploadKbps int) error {
+// (360/540/720), smaller copy toggle, keep the chosen resolution, and upload
+// limit (kbit/s, 0 = Automatic).
+func (a *App) SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy, keepQuality bool, uploadKbps int) error {
 	opts := session.NormalizeShareOptions(session.ShareOptions{
 		FPS:         fps,
 		SlowViewer:  slowViewer,
 		MinHeight:   minHeight,
 		SmallerCopy: smallerCopy,
+		KeepQuality: keepQuality,
 		UploadKbps:  uploadKbps,
 	})
 	a.mu.Lock()
@@ -837,7 +842,7 @@ func (a *App) SetMode(mode string) error {
 		opts.FPS = 30
 		opts.SlowViewer = session.SlowFPS
 	}
-	return a.SetShareOptions(opts.FPS, opts.SlowViewer, opts.MinHeight, opts.SmallerCopy, opts.UploadKbps)
+	return a.SetShareOptions(opts.FPS, opts.SlowViewer, opts.MinHeight, opts.SmallerCopy, opts.KeepQuality, opts.UploadKbps)
 }
 
 // SetRoomSecurity implements ui.Backend: pre-call room password and E2EE

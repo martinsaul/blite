@@ -36,7 +36,8 @@ type Options struct {
 	// Hidden starts with the window hidden (only the tray icon).
 	Hidden bool
 	// Scene opens a secondary UI surface after the initial draw (for blite-uidemo):
-	// "sharesheet", "advanced", "panel", "gear", "help", "picker".
+	// "sharesheet", "advanced", "panel", "gear", "help", "picker", "leave",
+	// "send-logs".
 	Scene string
 	// Targets and TargetIcons replace what the source picker lists
 	// (capture.List and capture.Icons) for blite-uidemo; nil: the real ones.
@@ -330,6 +331,10 @@ func (u *UI) applyScene(scene string) {
 		u.sourceDialog()
 	case "servers-dialog":
 		u.serversDialog()
+	case "leave":
+		u.leave()
+	case "send-logs":
+		u.sendLogs()
 	}
 }
 
@@ -383,10 +388,12 @@ type logInfo struct {
 	Dir, File, Error, Guard, Report string
 }
 
-func (u *UI) logs() logInfo {
+func (u *UI) logs() logInfo { return logsOf(u.st) }
+
+func logsOf(st app.UIState) logInfo {
 	var l logInfo
-	if u.st.Logs != nil {
-		b, _ := json.Marshal(u.st.Logs)
+	if st.Logs != nil {
+		b, _ := json.Marshal(st.Logs)
 		json.Unmarshal(b, &l)
 	}
 	return l

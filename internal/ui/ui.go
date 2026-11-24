@@ -64,8 +64,9 @@ type Backend interface {
 	// SetMode tunes the share for desktop (sharp text) or game (60 fps).
 	SetMode(mode string) error
 	// SetShareOptions sets outgoing FPS, slow-viewer policy, lowest resolution
-	// floor, smaller-copy toggle, and upload limit (kbit/s, 0 = Automatic).
-	SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy bool, uploadKbps int) error
+	// floor, smaller-copy toggle, keep the chosen resolution, and upload
+	// limit (kbit/s, 0 = Automatic).
+	SetShareOptions(fps int, slowViewer string, minHeight int, smallerCopy, keepQuality bool, uploadKbps int) error
 	// SetRoomSecurity sets pre-call password and E2EE toggles for new rooms.
 	SetRoomSecurity(requirePw bool, password string, e2ee bool) error
 	// AddQualityPreset keeps a resolution and frame rate to pick on Home;
@@ -273,13 +274,14 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 			SlowViewer  string `json:"slowViewer"`
 			MinHeight   int    `json:"minHeight"`
 			SmallerCopy *bool  `json:"smallerCopy"`
+			KeepQuality bool   `json:"keepQuality"`
 			UploadKbps  int    `json:"uploadKbps"`
 		}
 		if err := decode(r, &b); err != nil {
 			return err
 		}
 		sc := b.SmallerCopy == nil || *b.SmallerCopy
-		return s.be.SetShareOptions(b.FPS, b.SlowViewer, b.MinHeight, sc, b.UploadKbps)
+		return s.be.SetShareOptions(b.FPS, b.SlowViewer, b.MinHeight, sc, b.KeepQuality, b.UploadKbps)
 	})))
 	mux.Handle("POST /api/room-security", s.authed(s.post(func(r *http.Request) error {
 		var b struct {

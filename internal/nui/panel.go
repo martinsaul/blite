@@ -106,19 +106,19 @@ func newPersonPanel(u *UI, onClose func()) *personPanel {
 	p.makeOwn = widget.NewButton(i18n.L("Make owner..."), func() {
 		id, name := p.id, p.m.Name
 		u.confirm(i18n.L("Make {{.Name}} the owner?", i18n.D{"Name": name}),
-			i18n.L("You can't take it back yourself."),
+			i18n.L("You can't take it back yourself."), i18n.L("Make owner"), i18n.L("Cancel"), widget.HighImportance,
 			func() error { return u.a.Transfer(id) })
 	})
 	p.kickBtn = widget.NewButton(i18n.L("Disconnect..."), func() {
 		id, name := p.id, p.m.Name
 		u.confirm(i18n.L("Disconnect {{.Name}}?", i18n.D{"Name": name}),
-			i18n.L("They can rejoin with the link."),
+			i18n.L("They can rejoin with the link."), i18n.L("Disconnect"), i18n.L("Cancel"), widget.HighImportance,
 			func() error { return u.a.Kick(id, false) })
 	})
 	p.banBtn = widget.NewButton(i18n.L("Ban..."), func() {
 		id, name := p.id, p.m.Name
 		u.confirm(i18n.L("Ban {{.Name}}?", i18n.D{"Name": name}),
-			i18n.L("They won't be able to rejoin this room."),
+			i18n.L("They won't be able to rejoin this room."), i18n.L("Ban"), i18n.L("Cancel"), widget.DangerImportance,
 			func() error { return u.a.Kick(id, true) })
 	})
 	p.banBtn.Importance = widget.DangerImportance

@@ -224,3 +224,42 @@ func TestSelfView(t *testing.T) {
 		s.Close()
 	}
 }
+
+// The video windows' frame rate changes in place: the window isn't rebuilt
+// (that flashes it black).
+func TestGridRateInPlace(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts := httptest.NewServer(server.New(server.Config{Log: quiet}))
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	s, err := Create(context.Background(), Config{Server: ws, Name: "alice", View: media.ViewGrid, Log: quiet}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.gridMu.Lock()
+	s.gridView = media.ViewCount
+	s.openWindow = func(title string, _, _ int) (media.Window, error) {
+		return newFakeWindow(title), nil
+	}
+	s.gridMu.Unlock()
+	if err := s.SetSource(media.SourceTest); err != nil {
+		t.Fatal(err)
+	}
+	main := func() *media.Grid {
+		s.gridMu.Lock()
+		defer s.gridMu.Unlock()
+		return s.grids[""]
+	}
+	g := main()
+	if g == nil || g.FPS() != media.GridFPS {
+		t.Fatalf("main window %v", g)
+	}
+	for _, fast := range []bool{true, false} {
+		s.gridFast.Store(fast)
+		s.regrid()
+		if main() != g || g.FPS() != windowRate(fast) {
+			t.Fatalf("fast=%v: window rebuilt or at %d fps", fast, g.FPS())
+		}
+	}
+}

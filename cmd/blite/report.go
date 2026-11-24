@@ -4,13 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"blite/internal/diag"
+	"blite/internal/metrics"
 	"blite/internal/proto"
 	"blite/internal/redact"
 )
@@ -70,44 +69,6 @@ const (
 
 // crashMarks in a log mean the run crashed (Go, the guard, Xlib).
 var crashMarks = []string{"fatal error:", "panic:", "guard: crash", "Exception 0x", "X Error of failed request", "SIGSEGV"}
-
-func reportURL(server string) (string, error) {
-	u, err := url.Parse(server)
-	if err != nil {
-		return "", err
-	}
-	switch u.Scheme {
-	case "wss":
-		u.Scheme = "https"
-	case "ws":
-		u.Scheme = "http"
-	}
-	u.Path, u.RawQuery, u.Fragment = "/v1/report", "", ""
-	return u.String(), nil
-}
-
-func sendReport(ctx context.Context, server string, r proto.Report) error {
-	u, err := reportURL(server)
-	if err != nil {
-		return err
-	}
-	b, _ := json.Marshal(r)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusAccepted {
-		msg, _ := io.ReadAll(io.LimitReader(res.Body, 200))
-		return fmt.Errorf("server: %s %s", res.Status, strings.TrimSpace(string(msg)))
-	}
-	return nil
-}
 
 // recentLog is the last n whole lines of the log file at path.
 func recentLog(path string, n int) string {
@@ -224,16 +185,19 @@ type reporter struct {
 }
 
 // Send logs also uploads a zip: whole log files (up to zipFileMax each,
-// the newest zipFiles of them) and system.txt, at most zipMax compressed.
+// the newest zipFiles of them), the newest zipMetrics metrics files and
+// system.txt, at most zipMax compressed.
 const (
 	zipFiles   = 6
 	zipFileMax = 32 << 20
+	zipMetrics = 2 // up to metrics.FileMax (1 MB) each
 	zipMax     = 8 << 20
 )
 
 // buildZip packs the newest of names (sorted oldest first) from dir with
-// system, dropping the oldest files until it fits zipMax.
-func buildZip(dir string, names []string, system string) ([]byte, []string, error) {
+// the metrics files bins and system, dropping the oldest logs until it fits
+// zipMax.
+func buildZip(dir string, names, bins []string, system string) ([]byte, []string, error) {
 	if len(names) > zipFiles {
 		names = names[len(names)-zipFiles:]
 	}
@@ -254,6 +218,17 @@ func buildZip(dir string, names []string, system string) ([]byte, []string, erro
 				return nil, nil, err
 			}
 			io.WriteString(w, redact.Text(t))
+		}
+		for _, n := range bins { // numbers only: nothing to redact
+			b, err := os.ReadFile(filepath.Join(dir, n))
+			if err != nil || len(b) > zipFileMax {
+				continue
+			}
+			w, err := zw.Create(n)
+			if err != nil {
+				return nil, nil, err
+			}
+			w.Write(b)
 		}
 		if err := zw.Close(); err != nil {
 			return nil, nil, err
@@ -281,7 +256,7 @@ func (r *reporter) previous() {
 		// crashLog redacts what it takes from t.
 		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "crash", name, crashLog(t, reportTail), redact.Text(l.Guard)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		err = sendReport(ctx, r.server, rep)
+		err = diag.SendReport(ctx, r.server, rep)
 		cancel()
 		if err != nil {
 			r.log.Warn("crash report", "file", name, "err", err)
@@ -324,6 +299,7 @@ func pickUserLogs(names []string, current string) []string {
 // send uploads this run's log and the two newest others (the user's
 // "Send logs").
 func (r *reporter) send(ctx context.Context) error {
+	flushLogs() // the report has the last lines
 	l := logState()
 	if l.Dir == "" {
 		return errors.New("no log folder: " + l.Error)
@@ -359,17 +335,18 @@ func (r *reporter) send(ctx context.Context) error {
 	if r.system != nil {
 		system = r.system()
 	}
-	z, zipped, zerr := buildZip(l.Dir, all, system)
+	metricsRec.Flush() // the readings up to now
+	z, zipped, zerr := buildZip(l.Dir, all, metrics.Newest(l.Dir, zipMetrics), system)
 	if zerr != nil {
 		r.log.Warn("log zip", "err", zerr)
 	}
 	rep.Zip = z
-	err := sendReport(ctx, r.server, rep)
+	err := diag.SendReport(ctx, r.server, rep)
 	if err != nil && len(rep.Zip) > 0 && ctx.Err() == nil {
 		// A server from before zips refuses the size: send the tails alone.
 		r.log.Warn("logs with zip refused, sending without", "err", err)
 		rep.Zip = nil
-		err = sendReport(ctx, r.server, rep)
+		err = diag.SendReport(ctx, r.server, rep)
 	} else if err == nil && len(z) > 0 {
 		r.log.Info("log zip sent", "files", strings.Join(zipped, ","), "bytes", len(z))
 	}
@@ -385,14 +362,14 @@ func (r *reporter) send(ctx context.Context) error {
 // feedback sends what the user wrote in the feedback dialog: an idea or a
 // problem, with the diagnostics (no names, keys or links) if they agreed.
 // The server keeps it as a report of kind "feedback".
-func (r *reporter) feedback(ctx context.Context, kind, text, diag string) error {
+func (r *reporter) feedback(ctx context.Context, kind, text, details string) error {
 	rep := r.base
 	rep.Name, rep.Kind, rep.Note = r.name(), "feedback", kind
 	rep.Log = "feedback (" + kind + "):\n" + redact.Text(text) + "\n"
-	if diag != "" {
-		rep.Log += "\n===== diagnostics\n" + redact.Text(diag)
+	if details != "" {
+		rep.Log += "\n===== diagnostics\n" + redact.Text(details)
 	}
-	err := sendReport(ctx, r.server, rep)
+	err := diag.SendReport(ctx, r.server, rep)
 	r.log.Info("feedback sent", "kind", kind, "chars", len(text), "err", err)
 	return err
 }

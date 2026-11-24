@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"blite/internal/metrics"
 	"blite/internal/proto"
 	"blite/internal/redact"
 	"blite/internal/session"
@@ -44,12 +45,6 @@ func TestCrashedLogs(t *testing.T) {
 	want := []string{"blite-20261026-030000-200.log", "blite-20261026-060000-event.log"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-func TestReportURL(t *testing.T) {
-	if u, _ := reportURL("wss://blite.example.com/ws"); u != "https://blite.example.com/v1/report" {
-		t.Fatal(u)
 	}
 }
 
@@ -114,7 +109,8 @@ func TestBuildZip(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, n), []byte(strings.Repeat("line\n", 1000*(i+1))), 0o600)
 		names = append(names, n)
 	}
-	b, got, err := buildZip(dir, names, "cpus: 8\n")
+	os.WriteFile(filepath.Join(dir, "metrics-20261107-010000-1.bin"), []byte(metrics.Magic+"\x00\xff"), 0o600)
+	b, got, err := buildZip(dir, names, []string{"metrics-20261107-010000-1.bin"}, "cpus: 8\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +121,14 @@ func TestBuildZip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(zr.File) != 1+zipFiles || zr.File[0].Name != "system.txt" {
+	if len(zr.File) != 2+zipFiles || zr.File[0].Name != "system.txt" {
 		t.Fatalf("entries %d, first %q", len(zr.File), zr.File[0].Name)
 	}
-	f, _ := zr.File[len(zr.File)-1].Open()
+	mf, _ := zr.File[len(zr.File)-1].Open()
+	if raw, _ := io.ReadAll(mf); string(raw) != metrics.Magic+"\x00\xff" {
+		t.Fatalf("metrics file in the zip: %q", raw)
+	}
+	f, _ := zr.File[len(zr.File)-2].Open()
 	whole, _ := io.ReadAll(f)
 	if len(whole) != 5*1000*8 {
 		t.Fatalf("newest log: %d bytes, want it whole", len(whole))

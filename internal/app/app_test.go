@@ -192,7 +192,7 @@ func TestShareOptionsPersistenceAndPreCall(t *testing.T) {
 	if err := a.SetResolution("1080p"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.SetShareOptions(45, "fps", 540, false, 7500); err != nil {
+	if err := a.SetShareOptions(45, "fps", 540, false, true, 7500); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.SetRoomSecurity(true, "pw1234", false); err != nil {
@@ -217,7 +217,7 @@ func TestShareOptionsPersistenceAndPreCall(t *testing.T) {
 	defer b.Shutdown()
 	sh := b.State().(UIState).Share
 	if sh.Resolution != "1080p" || sh.FPS != 45 || sh.SlowViewer != "fps" || sh.EffectiveSlow != "fps" ||
-		sh.MinHeight != 540 || sh.SmallerCopy || sh.UploadKbps != 7500 || sh.E2EE {
+		sh.MinHeight != 540 || sh.SmallerCopy || !sh.KeepQuality || sh.UploadKbps != 7500 || sh.E2EE {
 		t.Fatalf("persisted share settings mismatch: %+v", sh)
 	}
 	if sh.RequirePassword || sh.RoomPassword != "" || sh.HasPassword {
@@ -232,7 +232,7 @@ func TestShareOptionsPersistenceAndPreCall(t *testing.T) {
 		t.Fatal("expected live session")
 	}
 	if live.Resolution != "1080p" || live.ShareOptions.FPS != 45 || live.ShareOptions.SlowViewer != "fps" ||
-		live.EffectiveSlow != "fps" || live.ShareOptions.MinHeight != 540 || live.ShareOptions.SmallerCopy ||
+		live.EffectiveSlow != "fps" || live.ShareOptions.MinHeight != 540 || live.ShareOptions.SmallerCopy || !live.ShareOptions.KeepQuality ||
 		live.UploadLimitKbps != 7500 || live.Encrypted {
 		t.Fatalf("live session did not inherit pre-call share options: %+v", live)
 	}
@@ -407,7 +407,7 @@ func TestUploadFlagWinsOverSavedSettings(t *testing.T) {
 	// 1. Start without the flag and change FPS: saving other options must NOT
 	// write a default 0 for uploadKbps into settings.json.
 	a0 := New(session.Config{Name: "alice", View: "none", Log: quiet}, "none")
-	if err := a0.SetShareOptions(60, session.SlowResolution, 360, true, 0); err != nil {
+	if err := a0.SetShareOptions(60, session.SlowResolution, 360, true, false, 0); err != nil {
 		t.Fatal(err)
 	}
 	a0.Shutdown()
@@ -435,7 +435,7 @@ func TestUploadFlagWinsOverSavedSettings(t *testing.T) {
 	}
 	// Even if a caller passes 0 when changing FPS during this run, restarting
 	// with the flag must still apply the flag's limit.
-	if err := a1.SetShareOptions(45, session.SlowFPS, 540, true, 0); err != nil {
+	if err := a1.SetShareOptions(45, session.SlowFPS, 540, true, false, 0); err != nil {
 		t.Fatal(err)
 	}
 	a1.Shutdown()
@@ -453,7 +453,7 @@ func TestUploadFlagWinsOverSavedSettings(t *testing.T) {
 	// 3. Even when settings.json has a saved non-zero uploadKbps (7500), the CLI
 	// flag wins on startup without overwriting the saved setting on FPS change.
 	aNoFlag := New(session.Config{Name: "alice", View: "none", Log: quiet}, "none")
-	if err := aNoFlag.SetShareOptions(30, "", 360, true, 7500); err != nil {
+	if err := aNoFlag.SetShareOptions(30, "", 360, true, false, 7500); err != nil {
 		t.Fatal(err)
 	}
 	aNoFlag.Shutdown()
@@ -467,7 +467,7 @@ func TestUploadFlagWinsOverSavedSettings(t *testing.T) {
 	}
 	// Choosing Automatic (0) in the UI while --upload is set applies to the
 	// current run without deleting the previously saved 7500 limit on disk.
-	if err := aWithFlag.SetShareOptions(60, session.SlowResolution, 360, true, 0); err != nil {
+	if err := aWithFlag.SetShareOptions(60, session.SlowResolution, 360, true, false, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := aWithFlag.State().(UIState).Share.UploadKbps; got != 0 {

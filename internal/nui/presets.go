@@ -233,7 +233,7 @@ func (u *UI) applyPreset(p app.QualityPreset) {
 		if err := u.a.SetResolution(p.Resolution); err != nil {
 			return err
 		}
-		return u.a.SetShareOptions(p.FPS, sh.SlowViewer, sh.MinHeight, sh.SmallerCopy, sh.UploadKbps)
+		return u.a.SetShareOptions(p.FPS, sh.SlowViewer, sh.MinHeight, sh.SmallerCopy, sh.KeepQuality, sh.UploadKbps)
 	})
 }
 

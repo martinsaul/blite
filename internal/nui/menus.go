@@ -106,9 +106,9 @@ func (u *UI) checkUpdate() {
 				u.showUpdate()
 			case up.Problem != "": // the banner shows it
 			case up.Offline:
-				u.info(i18n.L("Update"), i18n.L("Couldn't reach the update server. Check your connection and try again."), nil)
+				u.info(i18n.L("Couldn't check for updates"), i18n.L("Couldn't reach the update server. Check your connection and try again."), nil)
 			default:
-				u.info(i18n.L("Update"), i18n.L("Bellion Share is up to date."), nil)
+				u.info(i18n.L("You're up to date"), i18n.L("You have the newest version of Bellion Share."), nil)
 			}
 		})
 		return nil
@@ -198,10 +198,10 @@ func (u *UI) uiScaleMenu() *fyne.MenuItem {
 		}
 		items = append(items, check(label, uiscale.Same(pref, p), func() {
 			if err := app.SaveUIScale(p); err != nil {
-				u.info(i18n.L("Interface size"), err.Error(), nil)
+				u.info(i18n.L("Couldn't change the interface size"), upperFirst(i18n.Err(err).Error()), nil)
 				return
 			}
-			u.info(i18n.L("Interface size"), i18n.L("The new size applies when you restart Bellion Share."), nil)
+			u.info(i18n.L("Interface size changed"), i18n.L("The new size applies when you restart Bellion Share."), nil)
 		}))
 		if p == "" {
 			items = append(items, fyne.NewMenuItemSeparator())

@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"blite/internal/app"
 	"blite/internal/audio"
 	"blite/internal/capture"
 	"blite/internal/i18n"
@@ -34,12 +35,15 @@ func (u *UI) info(title, text string, done func()) {
 	d.Show()
 }
 
-func (u *UI) confirm(title, text string, f func() error) {
-	d := dialog.NewCustomConfirm(title, i18n.L("Yes"), i18n.L("No"), label(text), func(ok bool) {
+// confirm asks before f: the buttons name the action and the way out, so
+// they read right without the title. imp styles the action's button.
+func (u *UI) confirm(title, text, act, dismiss string, imp widget.Importance, f func() error) {
+	d := dialog.NewCustomConfirm(title, act, dismiss, label(text), func(ok bool) {
 		if ok {
 			u.do(f)
 		}
 	}, u.win)
+	d.SetConfirmImportance(imp)
 	d.Resize(fyne.NewSize(420, 0))
 	d.Show()
 }
@@ -60,10 +64,11 @@ func (u *UI) busyDo(b *widget.Button, f func() error) {
 }
 
 func (u *UI) leave() {
-	u.confirm(i18n.L("Leave the session?"), i18n.L("You can rejoin with the link while the session is open."), func() error {
-		u.a.Leave()
-		return nil
-	})
+	u.confirm(i18n.L("Leave the session?"), i18n.L("You can rejoin later with the same link while the session is open."),
+		i18n.L("Leave"), i18n.L("Stay"), widget.HighImportance, func() error {
+			u.a.Leave()
+			return nil
+		})
 }
 
 func (u *UI) copyLink() {
@@ -335,7 +340,7 @@ func hinted(f *widget.FormItem, hint string) *widget.FormItem {
 }
 
 func (u *UI) relayDialog() {
-	u.info(i18n.L("Relays"), i18n.L("Everyone sends their video to everyone (full mesh). Members with a fast upload can volunteer as relays: the others then send their video only to a relay, which forwards it. Big rooms use several relays."), nil)
+	u.info(i18n.L("How relays work"), i18n.L("Everyone sends their video to everyone (full mesh). Members with a fast upload can volunteer as relays: the others then send their video only to a relay, which forwards it. Big rooms use several relays."), nil)
 }
 
 func (u *UI) feedbackDialog() {
@@ -362,7 +367,7 @@ func (u *UI) feedbackDialog() {
 				if err != nil {
 					u.showErr(err)
 				} else {
-					u.info(i18n.L("Thank you"), i18n.L("Your feedback was sent."), nil)
+					u.info(i18n.L("Feedback sent"), i18n.L("Thanks for telling us. Your feedback was sent."), nil)
 				}
 			})
 		}()
@@ -374,16 +379,18 @@ func (u *UI) feedbackDialog() {
 func (u *UI) sendLogs() {
 	go func() {
 		err := u.a.SendLogsNow(ctx())
+		st, _ := u.a.State().(app.UIState) // u.st may not have the report yet
 		u.later(func() {
 			if err != nil {
-				u.showErr(err)
+				u.info(i18n.L("Couldn't send your logs"), upperFirst(i18n.Err(err).Error())+"\n\n"+i18n.L("Check your connection and try again."), nil)
 				return
 			}
-			st := i18n.Msg(u.logs().Report)
-			if st == "" {
-				st = i18n.L("Your logs were sent to the developers.")
+			// The report says "sent 15:04" (the time it went).
+			text := i18n.L("Thanks. Your logs were sent and will help us find the problem.")
+			if t, ok := strings.CutPrefix(logsOf(st).Report, "sent "); ok && t != "" {
+				text = i18n.L("Thanks. Your logs were sent at {{.Time}} and will help us find the problem.", i18n.D{"Time": t})
 			}
-			u.info(i18n.L("Logs"), st, nil)
+			u.info(i18n.L("Logs sent"), text, nil)
 		})
 	}()
 }

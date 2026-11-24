@@ -53,10 +53,13 @@ func (k *keyStats) asked(l int, forced bool) {
 	}
 }
 
-// sent notes one encoded access unit of layer l.
+// sent notes one encoded access unit of layer l. It runs for every frame
+// and asked takes the same lock from the RTCP path, so it logs after
+// unlocking.
 func (k *keyStats) sent(log *slog.Logger, l int, idr bool) {
+	var late time.Duration
+	var asked, forced, idrs int
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	lk := k.layer(l)
 	now := time.Now()
 	if idr {
@@ -64,13 +67,17 @@ func (k *keyStats) sent(log *slog.Logger, l int, idr bool) {
 		lk.pending = time.Time{}
 	} else if !lk.pending.IsZero() && now.Sub(lk.pending) >= keyLate && now.Sub(lk.warnAt) >= keyStatsEvery {
 		lk.warnAt = now
-		log.Warn("encoder made no IDR after a forced keyframe", "layer", l, "waitedMs", now.Sub(lk.pending).Milliseconds())
+		late = now.Sub(lk.pending)
 	}
-	if now.Sub(lk.logAt) < keyStatsEvery {
-		return
+	if now.Sub(lk.logAt) >= keyStatsEvery {
+		asked, forced, idrs = lk.asked, lk.forced, lk.idrs
+		lk.logAt, lk.asked, lk.forced, lk.idrs = now, 0, 0, 0
 	}
-	if lk.asked > 0 {
-		log.Info("keyframes", "layer", l, "asked", lk.asked, "forced", lk.forced, "idrs", lk.idrs)
+	k.mu.Unlock()
+	if late > 0 {
+		log.Warn("encoder made no IDR after a forced keyframe", "layer", l, "waitedMs", late.Milliseconds())
 	}
-	lk.logAt, lk.asked, lk.forced, lk.idrs = now, 0, 0, 0
+	if asked > 0 {
+		log.Info("keyframes", "layer", l, "asked", asked, "forced", forced, "idrs", idrs)
+	}
 }

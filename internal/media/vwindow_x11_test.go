@@ -144,3 +144,51 @@ func videoWindowClicks(t *testing.T, c *xgb.Conn, sink string, ww, wh int) {
 		}
 	}
 }
+
+// A grid drawn into our own X11 window changes its frame rate in place with
+// every sink we draw with: the sink takes the new caps, frames keep coming.
+// Opt-in, on a test X server, like TestVideoWindowClicks.
+func TestVideoWindowSetFPS(t *testing.T) {
+	if os.Getenv("BLITE_X11_TEST") == "" {
+		t.Skip("set BLITE_X11_TEST=1 with DISPLAY pointing at a test X server")
+	}
+	Init()
+	for _, sink := range append(VideoWindowSinks(), "ximagesink") {
+		t.Run(sink, func(t *testing.T) {
+			if !gst.HasFactory(sink) {
+				t.Skip("no " + sink)
+			}
+			old := videoWindowSinks
+			videoWindowSinks = []string{sink}
+			defer func() { videoWindowSinks = old }()
+			pl, err := StartPlayer(ViewGrid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pl.Stop()
+			ww, wh := 1280, 720
+			if sink == "ximagesink" {
+				ww, wh = gridW, gridH // it doesn't scale
+			}
+			win, err := OpenVideoWindow("rate", ww, wh)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer win.Destroy()
+			g, err := StartGrid(GridConfig{
+				Tiles:     []Tile{{Channel: pl.Channel, Label: "alice", ID: "a", Volume: 1}},
+				View:      ViewWindow,
+				Window:    win,
+				OnControl: func(string, Control, float64) {},
+			})
+			if err != nil {
+				t.Skipf("%s can't draw here: %v", sink, err)
+			}
+			defer g.Stop()
+			if !g.InWindow() || g.Sink != sink {
+				t.Skipf("%s can't draw here (%s)", sink, g.Sink)
+			}
+			checkSetFPS(t, g, "vsink", "sink", false)
+		})
+	}
+}
