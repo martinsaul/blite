@@ -1,5 +1,12 @@
 [
  {
+  "build": 218,
+  "date": "2026-11-24",
+  "changes": [
+   "When an update fails to install, Bellion now writes down why, and Help > Send logs includes it, so we can fix it faster."
+  ]
+ },
+ {
   "build": 217,
   "date": "2026-11-23",
   "changes": [

@@ -759,6 +759,9 @@ func systemText(a *app.App) string {
 	j, _ := json.MarshalIndent(st, "", "  ")
 	b.Write(j)
 	b.WriteString("\n")
+	if t := a.Updates.SwapLog(4 << 10); t != "" {
+		fmt.Fprintf(&b, "\nmolt-swap.log (end):\n%s\n", t)
+	}
 	return b.String()
 }
 

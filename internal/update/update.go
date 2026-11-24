@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -332,9 +333,11 @@ func (u *Updater) install(ctx context.Context, args []string) error {
 		return err
 	})
 	if err != nil && ctx.Err() != nil {
+		u.log.Info("update: install given up", "build", up.Build, "err", err)
 		return err // given up (Skip at start-up): not a problem to show
 	}
 	if err != nil {
+		u.log.Warn("update: install failed", "build", up.Build, "err", err)
 		u.mu.Lock()
 		u.info.Problem = "Installing the update failed: " + err.Error()
 		u.mu.Unlock()
@@ -407,6 +410,28 @@ func pruneStaged(cache, keep string, log *slog.Logger) {
 			}
 		}
 	}
+}
+
+// SwapLog returns the end of molt-swap's log (at most max bytes), for
+// "Send logs": an update that failed after Blite exited shows only there.
+func (u *Updater) SwapLog(max int64) string {
+	if u == nil {
+		return ""
+	}
+	cache, err := u.c.CacheDir(u.opts)
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(filepath.Join(cache, "molt-swap.log"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > max {
+		f.Seek(fi.Size()-max, io.SeekStart)
+	}
+	b, _ := io.ReadAll(f)
+	return strings.TrimSpace(string(b))
 }
 
 // progress notes how much of the update is downloaded (whole percents).
