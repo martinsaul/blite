@@ -1,5 +1,12 @@
 [
  {
+  "build": 223,
+  "date": "2026-11-24",
+  "changes": [
+   "In a call, a new QR code button under the People list shows your room's link as a QR code, so a phone can join by scanning it."
+  ]
+ },
+ {
   "build": 222,
   "date": "2026-11-24",
   "changes": [

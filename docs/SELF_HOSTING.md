@@ -53,6 +53,7 @@ server pings every 30 s.
 | `BLITE_SITE_ALIASES` | unset | Other host names of this server (comma-separated); their web pages redirect to the main site |
 | `BLITE_UPDATE_URL` | unset | Update server the download page reads releases from (no download page when unset) |
 | `BLITE_DOWNLOAD_CHANNEL` | `beta` | Release channel the download page offers |
+| `BLITE_ANDROID_MANIFEST` | `https://bellion.app/download/android.json` | The Android APK manifest the download page offers (`/download/android`); `off` = none |
 | `BLITE_DISCORD_CLIENT_ID` + `BLITE_DISCORD_SECRET` | unset | Discord app credentials for the token exchange (the app only uses Discord with its built-in server for now) |
 | `BLITE_DISCORD_PUBLIC_KEY` | unset | Discord app Ed25519 public key (hex) for verifying `POST /v1/discord/interactions` |
 

@@ -80,6 +80,7 @@ const (
 	speakerNonePath = "M3 9v6h4l5 5V4L7 9H3zm15 1a2 2 0 1 0 0 4 2 2 0 1 0 0-4z"
 	musicPath       = "M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
 	musicOffPath    = "M4.27 3L3 4.27l9 9v.28c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4v-1.73L19.73 21 21 19.73 4.27 3zM14 7h4V3h-6v5.18l2 2z"
+	qrPath          = "M3 11h8V3H3v8zm2-6h4v4H5V5zm1 1h2v2H6V6zM3 21h8v-8H3v8zm2-6h4v4H5v-4zm1 1h2v2H6v-2zM13 3v8h8V3h-8zm6 6h-4V5h4v4zm-3-3h2v2h-2V6zM19 19h2v2h-2zM13 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM15 19h2v2h-2zM17 17h2v2h-2zM17 13h2v2h-2zM19 15h2v2h-2z"
 	closePath       = "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
 )
 
@@ -104,6 +105,7 @@ var (
 	musicOffRes        = svgResource("music-off.svg", "#8B93A8", musicOffPath)
 	autoWatchOnRes     = autoWatchResource("auto-watch-on.svg", "#EEF0F7", "#EEF0F7", true)
 	autoWatchOffRes    = autoWatchResource("auto-watch-off.svg", "#8B93A8", "#8B93A8", false)
+	qrWhiteRes         = svgResource("qr-white.svg", "#EEF0F7", qrPath) // Material qr_code, finder centres filled
 	closeDimRes        = svgResource("close-dim.svg", "#8B93A8", closePath)
 	closeWhiteRes      = svgResource("close-white.svg", "#EEF0F7", closePath)
 )

@@ -1,5 +1,5 @@
 {{define "title"}}Troubleshooting and FAQ{{end}}
-{{define "description"}}Fixes for common Bellion Share problems: Windows install warnings, share links that don't open the app, people who can't connect, low quality or lag, sound, Linux and Wayland, and how to send logs.{{end}}
+{{define "description"}}Fixes for common Bellion Share problems: Windows install warnings, share links that don't open the app, people who can't connect, low quality or lag, sound, Linux and Wayland, the Android beta on Google Play, and how to send logs.{{end}}
 {{define "body"}}
 <h1>Troubleshooting and FAQ</h1>
 <p class="lead">Most problems show up as a hint in the People list or a note at the top of the window. Here is what they mean.</p>
@@ -58,9 +58,17 @@
 <h2>Sending logs and feedback</h2>
 <p>In the <em>?</em> menu at the top right, <em>Send logs to the developers</em> sends your log; when two people can't connect, send logs from both sides. <em>Send feedback...</em> sends an idea or a problem in your own words. Logs contain names and network addresses of the people you were in a session with, but not room passwords; they're used only to fix problems and deleted after 30 days (see the <a href="/privacy">Privacy Policy</a>).</p>
 
+<h2>Android: Google Play says the app isn't available</h2>
+<p>The Google Play version is a closed beta: Play shows it only to testers. Check that:</p>
+<ul>
+  <li>you joined the <a href="https://groups.google.com/g/bellion-share-testers">Bellion Share testers group</a> with the same Google account your phone uses in the Play Store;</li>
+  <li>you opted in on the <a href="https://play.google.com/apps/testing/io.saul.bellion">test page</a> (<strong>Become a tester</strong>).</li>
+</ul>
+<p>After opting in, the listing can take a few minutes to appear: wait a little, then open <a href="https://play.google.com/store/apps/details?id=io.saul.bellion">Bellion Share on Google Play</a> again. No Google services on your phone? <a href="/download#android">Download the APK</a> instead.</p>
+
 <h2>Is it free? Do I need an account?</h2>
 <p>Yes, it's free, and no account is needed. Bellion Share is open source under the AGPL-3.0: the <a href="https://github.com/martinsaul/blite">source code is on GitHub</a>.</p>
 
 <h2>Does it work on macOS or phones?</h2>
-<p>No. Bellion Share runs on Windows 10 and 11, and on Linux with X11.</p>
+<p>Not on macOS or iPhone. Bellion Share runs on Windows 10 and 11, and on Linux with X11. On Android 10 or newer, the <a href="/download#android">Android app</a> (beta, on Google Play or as an APK) watches streams and joins rooms; it can't share its screen yet.</p>
 {{end}}

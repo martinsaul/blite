@@ -16,6 +16,10 @@
   p { color:var(--muted); margin:.4rem 0; }
   a.btn { display:inline-block; margin-top:.75rem; padding:.55rem 1rem; border-radius:8px; background:var(--accent);
           color:#fff; text-decoration:none; font-weight:600; }
+  a.btn.alt { background:transparent; color:var(--accent); box-shadow:inset 0 0 0 1.5px var(--accent); }
+  .android { margin:1rem 0 1.5rem; }
+  .android .btn { display:block; text-align:center; margin-top:.6rem; }
+  .android p { font-size:.9rem; }
   [hidden] { display:none; }
 </style>
 <script src="/static/join.js" defer></script>
@@ -25,11 +29,22 @@
   <h1>Joining Bellion Share session</h1>
   <div class="code">{{.Display}}</div>
   <p id="opening">Opening Bellion Share&hellip;</p>
+  {{- if .Android}}
+  <div class="android">
+    <a class="btn" id="android-open" href="/j/{{.Code}}">Open in Bellion Share for Android</a>
+    <a class="btn alt" href="/download#android">Get the Android app</a>
+    <p>Bellion Share for Android (beta) watches streams and joins rooms from your phone. New to it? Install the app, then tap the link again.</p>
+  </div>
+  <div id="missing" hidden>
+    <p>On a computer? <a href="/download">Download Bellion Share for Windows or Linux</a> to share your screen too.</p>
+  </div>
+  {{- else}}
   <div id="missing" hidden>
     <p>Nothing opened? Bellion Share needs to be installed and running.</p>
     <a class="btn" id="retry" href="#">Open Bellion Share</a>
     <p>Don't have it yet? <a href="/download">Download Bellion Share</a>, then click the link again.</p>
   </div>
+  {{- end}}
 </main>
 </body>
 </html>

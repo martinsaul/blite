@@ -37,7 +37,7 @@ type Options struct {
 	Hidden bool
 	// Scene opens a secondary UI surface after the initial draw (for blite-uidemo):
 	// "sharesheet", "advanced", "panel", "gear", "help", "picker", "leave",
-	// "send-logs".
+	// "send-logs", "qr".
 	Scene string
 	// Targets and TargetIcons replace what the source picker lists
 	// (capture.List and capture.Icons) for blite-uidemo; nil: the real ones.
@@ -329,6 +329,8 @@ func (u *UI) applyScene(scene string) {
 		}
 	case "picker":
 		u.sourceDialog()
+	case "qr":
+		u.qrDialog()
 	case "servers-dialog":
 		u.serversDialog()
 	case "leave":

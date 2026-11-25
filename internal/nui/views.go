@@ -379,6 +379,7 @@ type callView struct {
 	relayOn    bool
 	sounds     *iconToggle
 	autoWatch  *iconToggle
+	qr         *iconToggle
 }
 
 func newCall(u *UI) *callView {
@@ -446,12 +447,14 @@ func newCall(u *UI) *callView {
 		u.do(func() error { return u.a.SetAutoWatch(on) })
 	})
 	v.autoWatch.aspect = 38.0 / 24
+	v.qr = newIconToggle(u.tips, qrWhiteRes, u.qrDialog)
+	v.qr.meaning = i18n.L("Show a QR code to join from a phone")
 	relayFooter := container.NewVBox(
 		widget.NewSeparator(),
 		v.relay,
 		container.NewBorder(nil, nil,
 			container.NewHBox(v.relaySw, v.relayLbl, aboutRelays),
-			container.NewHBox(v.sounds, v.autoWatch)),
+			container.NewHBox(v.qr, v.sounds, v.autoWatch)),
 	)
 
 	peopleList := container.NewVScroll(container.NewVBox(v.self.root, widget.NewSeparator(), v.alone, v.rows))

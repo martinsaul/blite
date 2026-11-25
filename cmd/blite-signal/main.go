@@ -82,6 +82,9 @@ func main() {
 		DiscordLinkRedirect: os.Getenv("BLITE_DISCORD_LINK_REDIRECT"),
 		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
 		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
+		// BLITE_ANDROID_MANIFEST: the Android APK's manifest (blite-ops
+		// aws/android-publish.sh); "off" = no Android download.
+		AndroidManifest: androidManifest(env("BLITE_ANDROID_MANIFEST", "https://bellion.app/download/android.json")),
 		// BLITE_STATE_FILE keeps rooms across restarts: members resume
 		// instead of rejoining. It holds password and token hashes; keep
 		// it on a private volume.
@@ -266,4 +269,11 @@ func siteAliases(v string) []string {
 		}
 	}
 	return out
+}
+
+func androidManifest(v string) string {
+	if v == "off" {
+		return ""
+	}
+	return v
 }

@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bellion Share: free screen sharing with friends, up to 4K60</title>
-<meta name="description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration.">
+<meta name="description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration; watch on Android.">
 <link rel="canonical" href="https://bellion.app/">
 {{template "assets"}}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Bellion Share">
 <meta property="og:title" content="Bellion Share: free screen sharing with friends, up to 4K60">
-<meta property="og:description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration.">
+<meta property="og:description" content="Stream your screen to friends in sharp, smooth quality: up to 4K at 60 fps, low latency, peer-to-peer and end-to-end encrypted. Free for Windows and Linux, with Discord integration; watch on Android.">
 <meta property="og:url" content="https://bellion.app/">
 <meta property="og:image" content="https://bellion.app/static/og.jpg">
 <meta property="og:image:width" content="1200">
@@ -21,7 +21,7 @@
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Bellion Share",
 "url":"https://bellion.app/","image":"https://bellion.app/static/icon-512.png",
 "description":"Peer-to-peer screen sharing with friends: up to 4K at 60 fps, low latency, end-to-end encrypted, with Discord integration.",
-"applicationCategory":"CommunicationApplication","operatingSystem":"Windows 10, Windows 11, Linux",
+"applicationCategory":"CommunicationApplication","operatingSystem":"Windows 10, Windows 11, Linux, Android 10 or newer (watch only)",
 "downloadUrl":"https://bellion.app/","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
 </script>
 </head>
@@ -31,7 +31,7 @@
 <section class="hero">
   <div class="wrap">
     <div class="hero-text">
-      <p class="eyebrow">Free &middot; Windows and Linux &middot; Open source</p>
+      <p class="eyebrow">Free &middot; Windows and Linux, watch on Android &middot; Open source</p>
       <h1>Bellion Share</h1>
       <p class="pitch">Share your screen with friends: sharp, smooth and low latency, straight from your PC to theirs.</p>
       <div class="get">
@@ -50,6 +50,10 @@
           {{else}}
           <p class="unavail"><strong>Linux:</strong> not available right now. Try again in a few minutes.</p>
           {{end}}
+        </div>
+        <div class="get-item">
+          <a class="btn btn-lg btn-outline" href="#android"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.2"/><path d="M10.5 18.5h3"/></svg>Android app (beta)</a>
+          <p>Watch on your phone &middot; Google Play beta, or APK</p>
         </div>
       </div>
       <p class="hero-note">No account needed: start a session and send the link. <a href="#install">How to install</a></p>
@@ -190,7 +194,7 @@
   <div class="wrap">
     <header class="section-head">
       <h2 id="install-title">Install in a minute</h2>
-      <p>Bellion Share keeps itself up to date: it offers new versions in the app. New here? <a href="/docs/getting-started">Getting started</a>.</p>
+      <p>On Windows and Linux, Bellion Share keeps itself up to date: it offers new versions in the app. New here? <a href="/docs/getting-started">Getting started</a>.</p>
     </header>
     <div class="platforms">
       <section class="platform">
@@ -220,6 +224,44 @@
           <li>Open a terminal in the folder you downloaded it to and run <code>sudo apt install ./blite_*.deb</code></li>
           <li>Start Bellion Share from your app menu.</li>
         </ol>
+      </section>
+      <section class="platform" id="android">
+        <h3>Android <span class="badge">beta</span></h3>
+        <p class="meta">Android 10 or newer &middot; Google Play closed beta, open to anyone</p>
+        <a class="btn" href="https://groups.google.com/g/bellion-share-testers">Get it on Google Play (beta)</a>
+        <p class="platform-text">Bellion Share for Android (beta): watch streams and join rooms from your phone. It is watch-only for now: to share your screen or start a room, use Windows or Linux.</p>
+        <p class="platform-text">On Google Play it is a closed beta that anyone can join; it will open to everyone later.</p>
+        <ol>
+          <li>Signed in to the same Google account your phone uses, open the <a href="https://groups.google.com/g/bellion-share-testers">Bellion Share testers group</a> and click <strong>Join group</strong>.</li>
+          <li>Open the <a href="https://play.google.com/apps/testing/io.saul.bellion">test page</a> and click <strong>Become a tester</strong>.</li>
+          <li>Install from the Play Store link on that page, or from <a href="https://play.google.com/store/apps/details?id=io.saul.bellion">Bellion Share on Google Play</a>. The listing can take a few minutes to appear after you opt in.</li>
+        </ol>
+        <p class="platform-text">Google Play keeps the app up to date. Tap a share link, or scan the QR code of a room, to join it.</p>
+        <div class="platform-alt">
+          <p><strong>No Google services on your phone?</strong></p>
+          {{with .android}}
+          <a class="btn btn-outline" href="/download/android">Download the APK</a>
+          <p class="meta">Version {{.VersionName}} (vc {{.VersionCode}}) &middot; {{.Size}} &middot; {{.Released}}</p>
+          {{else}}
+          <p class="meta">The APK is not available right now. Try again in a few minutes.</p>
+          {{end}}
+          <p>The Google Play version and the APK are signed with the same key: you can switch between them, and update, without uninstalling.</p>
+          <details class="verify">
+            <summary>Install the APK, and verify it</summary>
+            <ol>
+              <li>Open the downloaded file from your notifications or the Downloads app.</li>
+              <li>When Android asks, allow your browser to install apps, then tap <strong>Install</strong>.</li>
+              <li>Play Protect may warn you, because the APK isn't from Google Play: choose <strong>More details</strong>, then <strong>Install anyway</strong>.</li>
+            </ol>
+            <p>The APK doesn't update itself: come back here for newer versions.</p>
+            <!-- From vc4, swap in: <p>The app shows a banner when a newer APK is on bellion.app: download it from here and install it over the old one.</p> -->
+            {{with .android}}
+            <p>To verify the download (<code>sha256sum</code>, <code>apksigner verify --print-certs</code>):</p>
+            <p>SHA-256 of the APK:<br><code>{{.SHA256}}</code></p>
+            <p>SHA-256 of the signing certificate:<br><code>{{.CertSHA256}}</code></p>
+            {{end}}
+          </details>
+        </div>
       </section>
     </div>
   </div>

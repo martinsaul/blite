@@ -1,5 +1,5 @@
 {{define "title"}}Getting started{{end}}
-{{define "description"}}Install Bellion Share on Windows or Linux, pick a screen or window and go live, send the share link to friends, and watch someone else's screen.{{end}}
+{{define "description"}}Install Bellion Share on Windows or Linux (or the watch-only Android app), pick a screen or window and go live, send the share link to friends, and watch someone else's screen.{{end}}
 {{define "body"}}
 <h1>Getting started</h1>
 <p class="lead">No account needed: install the app, pick what to share, press Go live, and send the link.</p>
@@ -8,8 +8,15 @@
 <ul>
   <li><strong>Windows 10 or 11 (64-bit):</strong> <a href="/download/windows">download the installer</a> and run <code>BellionShare-Setup.exe</code>. It installs the latest version for your user account (no admin rights needed) and adds Start menu and desktop shortcuts. The installer is code-signed (publisher: Martin Saul). The signature is new, so for a while Windows may still say "Windows protected your PC": choose <strong>More info</strong>, then <strong>Run anyway</strong>. Prefer no installer? Use the <a href="/download/windows-zip">portable zip</a>: unzip it anywhere and run <code>blite-guard.exe</code>.</li>
   <li><strong>Linux (Ubuntu 24.04, Mint 22 or newer, 64-bit):</strong> <a href="/">download the .deb</a>, open a terminal in its folder and run <code>sudo apt install ./blite_*.deb</code>, then start Bellion Share from your app menu. Bellion Share needs an X11 session; Wayland sessions aren't supported yet.</li>
+  <li><strong>Android 10 or newer (beta, watch only):</strong> get it on Google Play, a closed beta that anyone can join (it will open to everyone later):
+    <ol>
+      <li>Signed in to the same Google account your phone uses, open the <a href="https://groups.google.com/g/bellion-share-testers">Bellion Share testers group</a> and click <strong>Join group</strong>.</li>
+      <li>Open the <a href="https://play.google.com/apps/testing/io.saul.bellion">test page</a> and click <strong>Become a tester</strong>.</li>
+      <li>Install from the Play Store link on that page, or from <a href="https://play.google.com/store/apps/details?id=io.saul.bellion">Bellion Share on Google Play</a>. The listing can take a few minutes to appear after you opt in. Google Play keeps the app up to date.</li>
+    </ol>
+    No Google services on your phone? <a href="/download#android">Download the APK</a> instead, open it, and when Android asks, allow your browser to install apps; if Play Protect warns, choose <strong>More details</strong>, then <strong>Install anyway</strong>. The Play version and the APK are signed with the same key, so you can switch between them without uninstalling. The Android app watches streams and joins rooms by share link or by scanning a room's QR code; sharing your screen and starting rooms need Windows or Linux.</li>
 </ul>
-<p>Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
+<p>On Windows and Linux, Bellion Share keeps itself up to date: when a new version is out it offers it in the app, and installing restarts it (and rejoins your call).</p>
 <p>Closing the window keeps Bellion Share running in the tray, so share links still open it. Use the tray icon to open the window again or quit. <em>Open at sign-in</em>, in the gear (Settings) menu at the top right, starts it in the tray when you sign in.</p>
 
 <h2>2. Pick your name</h2>
@@ -38,7 +45,7 @@
 <p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>. Until Discord approves the Bellion app, this works only for a few people added as testers.</p>
 
 <h2>4. Watch someone</h2>
-<p>Click the share link someone sent you. Your browser opens a page that hands the link to Bellion Share (on its first use it may ask whether to open the app). If nothing opens, make sure Bellion Share is installed and running, then click the link again.</p>
+<p>Click the share link someone sent you. Your browser opens a page that hands the link to Bellion Share (on its first use it may ask whether to open the app). If nothing opens, make sure Bellion Share is installed and running, then click the link again. On an Android phone, the page offers <strong>Open in Bellion Share for Android</strong> and a link to get the app.</p>
 <p>You can also paste the link, or just the room code (like <code>K7PQ-2M4X</code>), into <em>Watch someone</em> and press <strong>Watch</strong>. If the session has a password, the app asks for it. When you switch to Bellion Share with a share link on your clipboard, it offers a one-click button to watch that session.</p>
 <p><strong>Recent rooms</strong> on the home screen lists the last 5 sessions you started or joined: click one to rejoin it. Sessions that have ended show <em>Ended</em> and fade away; the x removes one from the list.</p>
 <p>You join watching only. To share your own screen too, press <strong>Go live: main monitor</strong> in the call: everyone in a room can share at the same time.</p>

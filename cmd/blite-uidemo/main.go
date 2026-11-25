@@ -388,6 +388,9 @@ func main() {
 	case "leave":
 		d.inCall = true
 		scene = "leave"
+	case "qr":
+		d.inCall = true
+		scene = "qr"
 	case "logs-sent", "logs-failed":
 		d.inCall = true
 		d.logsFail = arg == "logs-failed"

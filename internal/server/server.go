@@ -83,6 +83,10 @@ type Config struct {
 	// builds (molt). Empty UpdateURL = no download page.
 	UpdateURL     string
 	UpdateChannel string
+	// AndroidManifest is the URL of the Android app's manifest
+	// (android.json, written by blite-ops aws/android-publish.sh) the
+	// download page offers the APK from. Empty = no Android download.
+	AndroidManifest string
 	// StateFile keeps the rooms across restarts (LoadState, SaveState).
 	// Run saves it every StateEvery (default 30 s). Empty = rooms live in
 	// memory only.
@@ -111,7 +115,8 @@ type Server struct {
 	reportIP      *ratelimit.Window
 	lookIP        *ratelimit.Window
 	mux           *http.ServeMux
-	releases      *releases // the download page (nil = off)
+	releases      *releases    // the download page (nil = off)
+	android       *androidInfo // the Android APK on the download page (nil = off)
 	discordPubKey ed25519.PublicKey
 	discord       *discordFollow // nil = no Discord bot
 	started       time.Time
@@ -190,6 +195,7 @@ func New(cfg Config) *Server {
 	}
 	s.mux.HandleFunc("GET /terms", s.canonicalHost(staticPage(termsHTML)))
 	s.mux.HandleFunc("GET /privacy", s.canonicalHost(staticPage(privacyHTML)))
+	s.mux.HandleFunc("GET /.well-known/assetlinks.json", textFile(assetLinksJSON, "application/json"))
 	s.mux.HandleFunc("GET /robots.txt", textFile(robotsTxt, "text/plain; charset=utf-8"))
 	s.mux.HandleFunc("GET /sitemap.xml", textFile(sitemapXML, "application/xml"))
 	s.mux.HandleFunc("GET /favicon.ico", siteFile("favicon.ico", "image/x-icon"))
@@ -213,9 +219,16 @@ func New(cfg Config) *Server {
 	})
 	if cfg.UpdateURL != "" {
 		s.releases = &releases{base: cfg.UpdateURL, channel: cfg.UpdateChannel}
+		if cfg.AndroidManifest != "" {
+			s.android = &androidInfo{url: cfg.AndroidManifest}
+		}
 		s.mux.HandleFunc("GET /{$}", s.canonicalHost(s.handleDownloadPage))
 		s.mux.HandleFunc("GET /download", s.canonicalHost(s.handleDownloadPage))
 		s.mux.HandleFunc("GET /download/{platform}", s.handleDownload)
+		// /android: a short link to the Android app (Google Play beta, or the APK).
+		s.mux.HandleFunc("GET /android", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/download#android", http.StatusFound)
+		})
 	}
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	return s
@@ -697,5 +710,8 @@ func (s *Server) handleJoinPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	joinTmpl.Execute(w, map[string]string{"Code": code, "Display": room.Display(code)})
+	w.Header().Set("Vary", "User-Agent")
+	// On Android, the Android app (a viewer) comes first.
+	android := strings.Contains(r.UserAgent(), "Android")
+	joinTmpl.Execute(w, map[string]any{"Code": code, "Display": room.Display(code), "Android": android})
 }

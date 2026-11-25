@@ -9,8 +9,13 @@
   // default is. Older apps ignore the parameter. No password: an open room.
   var server = location.protocol === "http:" ? "ws://" + location.host : location.host;
   var target = "blite://join/" + encodeURIComponent(code) + "?server=" + encodeURIComponent(server) + (pw ? "#" + pw : "");
-  var retry = document.getElementById("retry");
-  retry.href = target;
+  // The desktop app's retry button, or (on Android) the Android app's
+  // button: the Android app takes blite:// links too. Its https fallback
+  // would only reload this page: Chrome keeps a link to the page it is on.
+  ["retry", "android-open"].forEach(function (id) {
+    var a = document.getElementById(id);
+    if (a) a.href = target;
+  });
   location.href = target;
   setTimeout(function () {
     document.getElementById("opening").hidden = true;

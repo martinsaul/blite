@@ -304,9 +304,12 @@ func (s *Server) handleDownloadPage(w http.ResponseWriter, r *http.Request) {
 		Size     string
 		Released string
 	}
-	data := map[string]*dl{}
+	data := map[string]any{}
 	for p, x := range rel {
 		data[strings.ReplaceAll(strings.TrimSuffix(p, "-amd64"), "-", "_")] = &dl{x.Build, fmt.Sprintf("%.0f MB", float64(x.Size)/1e6), x.Released.Format("January 2, 2006")}
+	}
+	if a := s.android.get(r.Context()); a != nil {
+		data["android"] = newAndroidDL(a)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=60")
@@ -314,9 +317,19 @@ func (s *Server) handleDownloadPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDownload sends the latest download: windows (the installer, or the
-// zip while no installer is published), windows-zip (the portable zip) or
-// linux.
+// zip while no installer is published), windows-zip (the portable zip),
+// linux or android (the APK).
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("platform") == "android" {
+		a := s.android.get(r.Context())
+		if a == nil {
+			http.Error(w, "the Android app isn't available right now; try again later", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		http.Redirect(w, r, a.URL, http.StatusFound)
+		return
+	}
 	rel := s.releases.get(r.Context())
 	var x *release
 	switch p := r.PathValue("platform"); p {
