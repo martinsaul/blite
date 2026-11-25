@@ -54,6 +54,40 @@ static int blite_pull(GstElement *sink, guint64 timeout_ns, void **out, gsize *l
 	return 1;
 }
 
+// Pulls one sample without copying it: *out is a reference (unref it).
+// Returns like blite_pull.
+static int blite_pull_sample(GstElement *sink, guint64 timeout_ns, GstSample **out) {
+	GstSample *s = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), timeout_ns);
+	if (s == NULL) {
+		return gst_app_sink_is_eos(GST_APP_SINK(sink)) ? -1 : 0;
+	}
+	*out = s;
+	return 1;
+}
+
+static void blite_sample_unref(GstSample *s) { gst_sample_unref(s); }
+
+// Pushes the frame of s to an appsrc (again), sharing its memory: without
+// timestamps, so a do-timestamp appsrc stamps it with the time now, lasting
+// dur, in s's caps at fps frames a second.
+static int blite_push_frame(GstElement *src, GstSample *s, guint64 dur, gint fps) {
+	GstBuffer *b = gst_sample_get_buffer(s);
+	GstCaps *caps = gst_sample_get_caps(s);
+	if (b == NULL || caps == NULL) return 0;
+	GstCaps *want = gst_caps_copy(caps);
+	gst_caps_set_simple(want, "framerate", GST_TYPE_FRACTION, fps, 1, NULL);
+	GstCaps *have = gst_app_src_get_caps(GST_APP_SRC(src));
+	if (have == NULL || !gst_caps_is_equal(have, want)) gst_app_src_set_caps(GST_APP_SRC(src), want);
+	if (have != NULL) gst_caps_unref(have);
+	gst_caps_unref(want);
+	b = gst_buffer_copy(b);
+	GST_BUFFER_PTS(b) = GST_CLOCK_TIME_NONE;
+	GST_BUFFER_DTS(b) = GST_CLOCK_TIME_NONE;
+	GST_BUFFER_DURATION(b) = dur;
+	GST_BUFFER_FLAG_UNSET(b, GST_BUFFER_FLAG_DISCONT);
+	return gst_app_src_push_buffer(GST_APP_SRC(src), b) == GST_FLOW_OK; // takes ownership
+}
+
 static int blite_push(GstElement *src, const void *data, gsize len) {
 	GstBuffer *b = gst_buffer_new_allocate(NULL, len, NULL);
 	gst_buffer_fill(b, 0, data, len);
@@ -167,13 +201,23 @@ static int blite_count_buffers(GstElement *e, gint *n) {
 static gint blite_counter_get(gint *n) { return g_atomic_int_get(n); }
 
 // Thins the buffers entering e to keep of every base (evenly spread) and
-// counts the ones it lets through.
-typedef struct { gint keep, base, acc, passed; } blite_thin;
+// counts the ones it lets through. A buffer a keep interval or more after
+// the one before always goes through: a change on a still screen comes
+// alone, and the thinning would otherwise drop it as readily as any.
+typedef struct { gint keep, base, acc, passed, seen; GstClockTime last; } blite_thin;
 
 static GstPadProbeReturn blite_thin_probe(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
 	blite_thin *t = d;
 	gint keep = g_atomic_int_get(&t->keep);
-	if (keep < t->base) {
+	GstClockTime pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
+	gboolean apart = t->seen && GST_CLOCK_TIME_IS_VALID(pts) && pts >= t->last + GST_SECOND / keep;
+	if (GST_CLOCK_TIME_IS_VALID(pts)) {
+		t->last = pts;
+		t->seen = 1;
+	}
+	if (apart) {
+		t->acc = 0;
+	} else if (keep < t->base) {
 		t->acc += keep;
 		if (t->acc < t->base) return GST_PAD_PROBE_DROP;
 		t->acc -= t->base;
@@ -556,6 +600,35 @@ func (e *Element) Pull(timeout time.Duration) ([]byte, time.Duration, error) {
 	return nil, 0, ErrEOS
 }
 
+// Sample is a frame pulled from an appsink without copying it.
+type Sample struct{ s *C.GstSample }
+
+// PullSample takes one sample from an appsink, sharing its memory. Free it.
+func (e *Element) PullSample(timeout time.Duration) (*Sample, error) {
+	var s *C.GstSample
+	switch C.blite_pull_sample(e.p, C.guint64(timeout), &s) {
+	case 1:
+		return &Sample{s}, nil
+	case 0:
+		return nil, ErrTimeout
+	}
+	return nil, ErrEOS
+}
+
+// Free releases s (nil is fine).
+func (s *Sample) Free() {
+	if s != nil {
+		C.blite_sample_unref(s.s)
+	}
+}
+
+// PushFrame hands the frame of s to a do-timestamp appsrc, which stamps it
+// with the time now: the same frame can go out more than once. It lasts d,
+// and its caps say fps.
+func (e *Element) PushFrame(s *Sample, d time.Duration, fps int) bool {
+	return C.blite_push_frame(e.p, s.s, C.guint64(max(d, 0)), C.gint(fps)) == 1
+}
+
 // Push hands a buffer to an appsrc.
 func (e *Element) Push(b []byte) bool {
 	if len(b) == 0 {
@@ -750,7 +823,8 @@ func (c *Counter) Load() int { return int(C.blite_counter_get(c.n)) }
 func (c *Counter) Free() { C.free(unsafe.Pointer(c.n)) }
 
 // Thinner lets through only some of the buffers entering an element:
-// fps of every base, spread evenly. The frames keep their timestamps, so
+// fps of every base, spread evenly, and any that comes 1/fps s or more
+// after the one before. The frames keep their timestamps, so
 // the caps (and the encoder's idea of the frame rate) stay as they are.
 type Thinner struct {
 	t    *C.blite_thin

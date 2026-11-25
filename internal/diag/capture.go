@@ -27,7 +27,7 @@ type CaptureRes struct {
 }
 
 // CaptureProbe is the capture alone (into a fakesink), without the share's
-// videorate, queues and encoders.
+// pacer, queues and encoders.
 type CaptureProbe struct {
 	Source string  `json:"source"`
 	What   string  `json:"what"`
@@ -38,7 +38,7 @@ type CaptureProbe struct {
 
 // ShareRun is one target size through the whole share pipeline. The
 // rates are per second over the run, at each point:
-// captured -> (convert, videorate) -> offered -> HIGH's leaky queue in ->
+// captured -> (convert, pace) -> offered -> HIGH's leaky queue in ->
 // queue out (the rest it dropped) -> encoded.
 type ShareRun struct {
 	Source      string  `json:"source"`
@@ -469,13 +469,13 @@ func captureVerdict(run ShareRun, probes []CaptureProbe) string {
 		causes = append(causes, fmt.Sprintf("the capture stalled: gaps up to %.0f ms (%d over 50 ms)", run.CaptureGaps.MaxMs, run.CaptureGaps.Over50))
 	}
 	if run.CapturedFPS > 72 {
-		causes = append(causes, fmt.Sprintf("the capture delivers %.0f fps, more than the 60 sent: each extra frame is converted, then dropped by videorate (no capture frame-rate cap)", run.CapturedFPS))
+		causes = append(causes, fmt.Sprintf("the capture delivers %.0f fps, more than the 60 sent: each extra frame is converted, then dropped by the pacer (no capture frame-rate cap)", run.CapturedFPS))
 	}
 	if run.DroppedPS > 2 {
 		causes = append(causes, fmt.Sprintf("the leaky queue dropped %.0f of %.0f frames/s -> the encoder (%s) is the bottleneck", run.DroppedPS, run.QueueInFPS, run.Encoder))
 	}
 	if run.OfferedFPS >= 0 && run.OfferedFPS < okFPS && run.CapturedFPS >= okFPS {
-		causes = append(causes, fmt.Sprintf("captured %.0f but offered only %.0f -> lost in conversion or videorate", run.CapturedFPS, run.OfferedFPS))
+		causes = append(causes, fmt.Sprintf("captured %.0f but offered only %.0f -> lost in conversion or pacing", run.CapturedFPS, run.OfferedFPS))
 	}
 	if run.QueueOutFPS >= 0 && run.EncodedFPS < run.QueueOutFPS-3 {
 		causes = append(causes, fmt.Sprintf("the encoder took %.0f frames/s but put out %.0f", run.QueueOutFPS, run.EncodedFPS))
@@ -483,8 +483,8 @@ func captureVerdict(run ShareRun, probes []CaptureProbe) string {
 	if run.CPUBusyPct > 90 {
 		causes = append(causes, fmt.Sprintf("the CPU was %.0f%% busy", run.CPUBusyPct))
 	}
-	// videorate repeats frames up to 60, so the encoder can make 60 a
-	// second out of fewer captured ones.
+	// The pacer repeats a frame after a change, so the encoder can put
+	// out more frames than were captured.
 	if run.EncodedFPS >= okFPS && (run.CapturedFPS < 0 || run.CapturedFPS >= okFPS) {
 		if len(causes) == 0 {
 			return head + " OK"

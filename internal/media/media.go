@@ -367,8 +367,8 @@ func downloaded(src string, fps int) string {
 // framerate caps right after them are what bound their grabs: ximagesrc
 // grabs on its own clock (25 fps unless asked), and d3d11screencapturesrc
 // picks 30 (it only hands on a frame when the screen changed, so a still
-// screen costs nothing at any rate). A videorate after them would only
-// drop frames already grabbed. The scaling comes before (or with) the
+// screen costs nothing at any rate). Pacing them after would only drop
+// frames already grabbed. The scaling comes before (or with) the
 // conversion: a 5K screen converted at full size to I420 and scaled after
 // cost ~6x the CPU per frame of videoconvertscale doing both at once.
 //
@@ -507,6 +507,7 @@ type Pipeline struct {
 	g       *gst.Pipeline
 	els     []*gst.Element
 	loops   []func() bool // registered before start, run after Play
+	stops   []func()      // run by Stop once the loops ended
 	Err     chan error
 	done    chan struct{}
 	wg      sync.WaitGroup
@@ -556,6 +557,9 @@ func (p *Pipeline) goLoop(f func() bool) {
 	}()
 }
 
+// atStop has Stop run f once the loops ended (f frees what they used).
+func (p *Pipeline) atStop(f func()) { p.stops = append(p.stops, f) }
+
 func (p *Pipeline) start() error {
 	if err := p.g.Play(); err != nil {
 		p.Stop()
@@ -587,6 +591,9 @@ func (p *Pipeline) Stop() {
 		close(p.done)
 		p.g.SetNull()
 		p.wg.Wait()
+		for _, f := range p.stops {
+			f()
+		}
 		for _, e := range p.els {
 			e.Release()
 		}
@@ -683,26 +690,31 @@ func StartVideoSourceLayers(kind SourceKind, layers []Layer, encoderForce, previ
 }
 
 // captureBranch is a share's capture up to the encoders' tee: captured,
-// converted, and paced to hi by videorate. The identities count what the
+// converted, and paced to hi by paceCapture, from the appsink fresh to the
+// appsrc paced. The fresh appsink doesn't wait for a frame to preroll: the
+// sinks after paced get none until it plays. The identities count what the
 // capture delivers (captured) and what the encoders are offered (offered).
 func captureBranch(src, format string, hi Layer, chain Chain) string {
-	return fmt.Sprintf("%s ! %s ! "+
-		"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1 ! identity name=offered",
-		captureChain(src, hi, format, chain), videorate(hi.FPS), format, hi.Width, hi.Height, hi.FPS)
+	size := fmt.Sprintf("format=%s,width=%d,height=%d,pixel-aspect-ratio=1/1", format, hi.Width, hi.Height)
+	return fmt.Sprintf("%s ! video/x-raw,%s ! "+
+		"appsink name=fresh sync=false async=false max-buffers=1 drop=true enable-last-sample=false  "+
+		"appsrc name=paced is-live=true format=time do-timestamp=true max-buffers=2 leaky-type=downstream ! "+
+		"video/x-raw,%s,framerate=%d/1 ! identity name=offered",
+		captureChain(src, hi, format, chain), size, size, hi.FPS)
 }
 
-// videorate paces a capture to fps, filling short gaps with copies of the
-// frame before but not long ones. Windows capture only delivers a frame
-// when the screen changed: after a still second videorate put out all the
-// copies it missed at once (53-178 fps), HIGH's leaky queue dropped most,
-// and that looked like a slow encoder. Over maxDup the next frame comes
-// with a discont at its own time instead; viewers hold the last picture.
+// videorate paces LOW and the renditions to fps, filling short gaps with
+// copies of the frame before but not long ones. Over maxDup the next frame
+// comes with a discont at its own time instead of a burst of the copies
+// missed (Windows capture, a still second: 53-178 fps that HIGH's leaky
+// queue mostly dropped, which looked like a slow encoder). It holds the
+// newest frame until the next: the pacer's repeats bring it out.
 func videorate(fps int) string {
 	return fmt.Sprintf("videorate max-duplication-time=%d", int64(maxDup(fps)))
 }
 
-// maxDup is the longest capture gap videorate fills: 100 ms, or two frames
-// at fps if that's longer.
+// maxDup is the longest capture gap videorate fills, and how long the
+// pacer repeats a frame: 100 ms, or two frames at fps if that's longer.
 func maxDup(fps int) time.Duration {
 	d := 100 * time.Millisecond
 	if fps > 0 {
@@ -771,6 +783,10 @@ func startVideoChain(src string, chain Chain, layers []Layer, enc encoder, previ
 	}
 	p, err := launch(strings.Join(branches, "  "))
 	if err != nil {
+		return nil, err
+	}
+	if err := paceCapture(p, hi.FPS); err != nil {
+		p.Stop()
 		return nil, err
 	}
 	vs := &VideoSource{Pipeline: p, chain: chain, lastKey: make([]time.Time, len(layers)),
@@ -1022,8 +1038,8 @@ func (vs *VideoSource) Chain() Chain { return vs.chain }
 
 // FrameCounts follows frames through a video source (-1 where unknown).
 type FrameCounts struct {
-	Captured int // out of the capture, before conversion and videorate
-	Offered  int // to the encoders, after videorate
+	Captured int // out of the capture, before conversion and pacing
+	Offered  int // to the encoders, after pacing (with its repeats)
 	HighIn   int // into HIGH's leaky queue, after SetHighFPS
 	HighOut  int // out of that queue to HIGH's encoder; HighIn-HighOut it dropped
 	// CaptureCaps is what the capture negotiated (size, format, frame rate).

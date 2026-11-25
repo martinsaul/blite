@@ -76,6 +76,9 @@ func ProbeSharePath(kind SourceKind, l Layer, format string, chain Chain, warm, 
 		return r, err
 	}
 	defer p.Stop()
+	if err := paceCapture(p, l.FPS); err != nil {
+		return r, err
+	}
 	var cs []*gst.Counter
 	var capEl *gst.Element
 	for _, n := range []string{"captured", "offered", "out"} {

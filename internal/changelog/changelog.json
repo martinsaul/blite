@@ -1,5 +1,12 @@
 [
  {
+  "build": 222,
+  "date": "2026-11-24",
+  "changes": [
+   "Screen sharing: a change on your screen, like the next slide, now reaches viewers right away, even when nothing else moves."
+  ]
+ },
+ {
   "build": 221,
   "date": "2026-11-24",
   "changes": [
