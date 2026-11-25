@@ -88,7 +88,7 @@ done
 
 out_tmp="${out_abs}.tmp.$$"
 rm -f "$out_tmp"
-(cd "$tmp/work" && python3 -I -m zipfile -c "$out_tmp" .)
+python3 -I "$script_dir/detzip.py" "$out_tmp" "$tmp/work" .
 mv -f "$out_tmp" "$out_zip"
 out_tmp=""
 

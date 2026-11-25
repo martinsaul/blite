@@ -1,0 +1,6 @@
+.git
+dist
+blite
+*.exe
+*.deb
+*.zip

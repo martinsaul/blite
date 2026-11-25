@@ -27,9 +27,9 @@ rm -rf "$out" && mkdir -p "$out/blite/bin" "$out/blite/lib/gstreamer-1.0"
 eval "$(scripts/version.sh)"
 scripts/winres.sh "$APP_VERSION" "$BUILD"
 trap 'scripts/winres.sh clean' EXIT
-go build -trimpath -ldflags "$LDFLAGS" -o "$out/blite/bin/blite.exe" ./cmd/blite
+go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$out/blite/bin/blite.exe" ./cmd/blite
 # The crash guard is pure Go and has no console window.
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -H windowsgui" -o "$out/blite/blite-guard.exe" ./cmd/blite-guard
+CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w -H windowsgui" -o "$out/blite/blite-guard.exe" ./cmd/blite-guard
 
 # Cameras: jpeg (jpegdec, needs jpeg8.dll), videofilter (videoflip for the
 # mirrored self-view), directshow (OBS Virtual Camera and other DirectShow-only
@@ -65,5 +65,6 @@ Per-app audio needs Windows 11 (or Windows 10 build 20348+).
 Updates: Bellion Share checks the ${BLITE_DEFAULT_CHANNEL:-beta} channel and offers new builds in its window.
 Logs: %LOCALAPPDATA%\\Blite\\logs. Crash dumps: %LOCALAPPDATA%\\Blite\\crash.
 TXT
-(cd "$out" && rm -f blite-windows.zip && python3 -I -m zipfile -c blite-windows.zip blite)
+rm -f "$out/blite-windows.zip"
+python3 -I scripts/detzip.py "$out/blite-windows.zip" "$out/blite"
 du -sh "$out/blite" "$out/blite-windows.zip"

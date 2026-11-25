@@ -1,0 +1,251 @@
+# Official Bellion Share release: build on GitHub, sign with Azure Trusted
+# Signing through OIDC (no stored Azure secret), attest, publish a GitHub Release.
+#
+# Tags pick the build number and the channel; the last digit is the channel:
+#   b2240         build 2240, channel beta
+#   b2241-stable  build 2241, channel stable (usually the same commit as b2240)
+#
+# Jobs:
+#   build    no credentials. Reproducible: pinned toolchain and inputs,
+#            SOURCE_DATE_EPOCH = commit date. Attests the unsigned files.
+#   sign     environment "release" (approval). Signs the exes, verifies the
+#            signatures against the pinned Microsoft root, signs the .deb
+#            (detached GPG, key in the environment secret DEB_SIGNING_KEY),
+#            attests the results.
+#   publish  creates the GitHub Release with every file and SHA256SUMS.
+name: release
+
+on:
+  push:
+    tags: ["b[0-9]*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The GStreamer 1.28.8 MSVC SDK, cut down to what the Windows build uses
+  # (bin, include, pkg-config, import libs, the bundled plugins, licenses).
+  WINSDK_URL: https://github.com/martinsaul/blite/releases/download/winsdk-gst-1.28.8/gstreamer-1.0-msvc-x86_64-1.28.8-blite.tar.zst
+  WINSDK_SHA256: 93ae6b1bfb1d47c67f3c26ed45aa7f492a7d0f972c772fe8809475f8e44cc3ea
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      build: ${{ steps.meta.outputs.build }}
+      channel: ${{ steps.meta.outputs.channel }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release settings from the tag
+        id: meta
+        run: |
+          set -euo pipefail
+          tag=$GITHUB_REF_NAME
+          # Build numbers end in the channel: 0 = beta, 1 = stable. Promoting
+          # beta build 2240 to stable = tag b2241-stable on the same commit.
+          if [[ $tag =~ ^b([1-9][0-9]*1)-stable$ ]]; then build=${BASH_REMATCH[1]} channel=stable
+          elif [[ $tag =~ ^b([1-9][0-9]*0)$ ]]; then build=${BASH_REMATCH[1]} channel=beta
+          else echo "::error::tag $tag must be bN0 (beta) or bN1-stable (stable)"; exit 1; fi
+          echo "$build" > BUILD
+          version=$(cat VERSION)
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)"
+            echo "BLITE_BUILD_ENV=$PWD/release/bellion.env"
+            echo "BLITE_DEFAULT_CHANNEL=$channel"
+          } >> "$GITHUB_ENV"
+          {
+            echo "build=$build"
+            echo "channel=$channel"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bellion Share $version build $build, channel $channel, commit $GITHUB_SHA"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 zstd >/dev/null
+          go version
+          x86_64-w64-mingw32-gcc --version | head -1
+          dpkg-query -W gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 dpkg
+      - name: GStreamer SDK (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/winsdk.tar.zst" "$WINSDK_URL"
+          echo "$WINSDK_SHA256  $RUNNER_TEMP/winsdk.tar.zst" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/winsdk"
+          tar --zstd -xf "$RUNNER_TEMP/winsdk.tar.zst" -C "$RUNNER_TEMP/winsdk"
+          rm "$RUNNER_TEMP/winsdk.tar.zst"
+          echo "BLITE_WINSDK=$RUNNER_TEMP/winsdk" >> "$GITHUB_ENV"
+      - name: Build Windows
+        run: scripts/build-windows.sh dist/windows
+      - name: Build Linux
+        run: scripts/build-deb.sh dist/linux
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir out
+          b=${{ steps.meta.outputs.build }} v=${{ steps.meta.outputs.version }}
+          cp dist/windows/blite-windows.zip "out/blite-windows_${v}-${b}-unsigned.zip"
+          cp dist/linux/blite_${v}-${b}_amd64.deb out/
+          cp dist/linux/blite-linux-home_${v}-${b}.zip out/
+          (cd out && sha256sum * | tee SHA256SUMS.unsigned)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            out/*.zip
+            out/*.deb
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned
+          path: out/
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      B: ${{ needs.build.outputs.build }}
+      V: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: out
+      - name: Check the files are the ones the build job made
+        run: |
+          cd out && sha256sum -c SHA256SUMS.unsigned
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+      - name: Azure login (OIDC, no secret)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Sign the Windows executables
+        run: |
+          set -euo pipefail
+          tok="$RUNNER_TEMP/sign-token"
+          trap 'shred -u "$tok" 2>/dev/null || true' EXIT
+          (umask 077 && az account get-access-token --resource https://codesigning.azure.net \
+            --query accessToken -o tsv > "$tok")
+          scripts/sign-zip.sh "$tok" "out/blite-windows_${V}-${B}-unsigned.zip"
+          mv "out/blite-windows_${V}-${B}-unsigned-signed.zip" "out/blite-windows_${V}-${B}.zip"
+      - name: Azure logout
+        if: always()
+        run: az logout || true
+      - name: Verify the signatures
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq osslsigncode >/dev/null
+          root=release/ms-identity-verification-root-2020.pem
+          [ "$(openssl x509 -in "$root" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d :)" = \
+            5367F20C7ADE0E2BCA790915056D086B720C33C1FA2A2661ACF787E3292E1270 ]
+          mkdir "$RUNNER_TEMP/check"
+          python3 -I -m zipfile -e "out/blite-windows_${V}-${B}.zip" "$RUNNER_TEMP/check"
+          n=0
+          while IFS= read -r -d '' exe; do
+            osslsigncode verify -CAfile "$root" -TSA-CAfile "$root" -in "$exe" > "$RUNNER_TEMP/v.txt"
+            grep -q 'Signature verification: ok' "$RUNNER_TEMP/v.txt"
+            grep -q 'CN=Martin Saul' "$RUNNER_TEMP/v.txt"
+            echo "verified: ${exe#$RUNNER_TEMP/check/}"
+            n=$((n + 1))
+          done < <(find "$RUNNER_TEMP/check" -iname '*.exe' -print0)
+          [ "$n" -ge 2 ]
+      - name: Sign the .deb (detached GPG signature)
+        env:
+          DEB_SIGNING_KEY: ${{ secrets.DEB_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          sign_home="$RUNNER_TEMP/gnupg-sign" verify_home="$RUNNER_TEMP/gnupg-verify"
+          trap 'GNUPGHOME="$sign_home" gpgconf --kill gpg-agent 2>/dev/null || true
+                GNUPGHOME="$verify_home" gpgconf --kill gpg-agent 2>/dev/null || true
+                rm -rf "$sign_home" "$verify_home"' EXIT
+          (umask 077 && mkdir "$sign_home" "$verify_home")
+          export GNUPGHOME="$sign_home"
+          printf '%s\n' "$DEB_SIGNING_KEY" | gpg -q --batch --import
+          deb="out/blite_${V}-${B}_amd64.deb"
+          gpg -q --batch --pinentry-mode loopback --passphrase '' --armor --detach-sign \
+            --local-user "$(gpg --with-colons --list-secret-keys | awk -F: '/^fpr/{print $10; exit}')" \
+            -o "$deb.asc" "$deb"
+          # Check it against the committed public key, in a clean keyring.
+          export GNUPGHOME="$verify_home"
+          gpg -q --batch --import release/bellion-deb-signing.asc
+          gpg --batch --verify "$deb.asc" "$deb"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            out/blite-windows_${{ env.V }}-${{ env.B }}.zip
+            out/blite_${{ env.V }}-${{ env.B }}_amd64.deb.asc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: |
+            out/blite-windows_${{ env.V }}-${{ env.B }}.zip
+            out/blite_${{ env.V }}-${{ env.B }}_amd64.deb.asc
+          if-no-files-found: error
+
+  publish:
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      B: ${{ needs.build.outputs.build }}
+      V: ${{ needs.build.outputs.version }}
+      CHANNEL: ${{ needs.build.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: out
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd out
+          rm -f SHA256SUMS.unsigned
+          sha256sum -- * | tee SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/SHA256SUMS
+      - name: Publish
+        run: |
+          set -euo pipefail
+          cd out
+          {
+            echo "Bellion Share $V, build $B, channel **$CHANNEL**."
+            echo
+            echo "Built and signed by this repository's release workflow from commit $GITHUB_SHA."
+            echo "Verify a file: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          flags=()
+          [ "$CHANNEL" = stable ] || flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Bellion Share $V ($B)" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" -- *

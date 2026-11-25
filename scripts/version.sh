@@ -39,7 +39,12 @@ build=$(cat BUILD 2>/dev/null || git rev-list --count HEAD 2>/dev/null || stampe
   echo "version.sh: no build number (no BUILD file, no git, BUILDINFO unstamped)" >&2
   exit 1
 }
-date=$(date -u '+%Y-%m-%d %H:%M')
+# SOURCE_DATE_EPOCH (reproducible builds) pins the build date.
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  date=$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M')
+else
+  date=$(date -u '+%Y-%m-%d %H:%M')
+fi
 ld="-s -w -X main.version=$app -X main.build=$build -X \"main.buildDate=$date\" -X main.defaultChannel=${BLITE_DEFAULT_CHANNEL:-beta}"
 [ -z "${BLITE_DEFAULT_SERVER:-}" ] || ld="$ld -X main.defaultServer=$BLITE_DEFAULT_SERVER"
 [ -z "${BLITE_DEFAULT_SERVER_ALIASES:-}" ] || ld="$ld -X main.defaultServerAliases=$BLITE_DEFAULT_SERVER_ALIASES"

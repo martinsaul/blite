@@ -45,6 +45,8 @@ command -v update-desktop-database >/dev/null && update-desktop-database -q /usr
 POST
 chmod 755 "$pkg/DEBIAN/postinst"
 deb="$out/blite_${APP_VERSION}-${BUILD}_amd64.deb"
+# Reproducible builds: one mtime for every file (dpkg-deb also reads SOURCE_DATE_EPOCH).
+[ -z "${SOURCE_DATE_EPOCH:-}" ] || find "$pkg" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 dpkg-deb --root-owner-group --build "$pkg" "$deb" >/dev/null
 ls -l "$deb"
 
