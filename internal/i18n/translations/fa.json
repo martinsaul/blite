@@ -14,6 +14,8 @@
  "already in a session; leave it first": "از قبل در یک جلسه هستید؛ اول از آن خارج شوید",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "همین حالا در یکی هستید؟ آن سرور Discord ربات Bellion را ندارد، پس Bellion نمی‌تواند شما را آنجا ببیند. از یکی از مدیران سرور بخواهید آن را اضافه کند.",
  "An idea or something you'd like added": "یک ایده یا چیزی که دوست دارید اضافه شود",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "ناشناس‌سازی: نام‌ها، کدهای اتاق، سرورها و نام این رایانه حذف شوند",
+ "Anonymized logs may keep us from finding the problem.": "ممکن است با گزارش‌های ناشناس نتوانیم مشکل را پیدا کنیم.",
  "app audio sharing is not available on this OS yet": "اشتراک صدای برنامه‌ها هنوز در این سیستم‌عامل در دسترس نیست",
  "Applies to your next session.": "در جلسهٔ بعدی شما اعمال می‌شود.",
  "Applies when starting a new session.": "هنگام شروع جلسهٔ جدید اعمال می‌شود.",

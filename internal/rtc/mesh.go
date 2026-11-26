@@ -302,6 +302,7 @@ func New(sig *sigclient.Client, opt Options) (*Mesh, error) {
 	}
 	newAPI := func(mux ice.UDPMux) *webrtc.API {
 		se := webrtc.SettingEngine{}
+		se.SetInterfaceFilter(usableInterface)
 		if mux != nil {
 			se.SetICEUDPMux(mux)
 		}

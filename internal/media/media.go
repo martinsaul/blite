@@ -631,6 +631,7 @@ type VideoSource struct {
 	previewedBig *gst.Counter
 	offered      *gst.Counter // frames the capture gave the encoders (nil if unknown)
 	thin         *gst.Thinner // HIGH's frame rate step (nil if unknown)
+	pacer        *pacer
 	captured     *gst.Counter // frames out of the capture, before conversion (nil if unknown)
 	capturedEl   *gst.Element
 	dequeued     *gst.Counter // frames out of HIGH's leaky queue (nil if unknown)
@@ -785,11 +786,12 @@ func startVideoChain(src string, chain Chain, layers []Layer, enc encoder, previ
 	if err != nil {
 		return nil, err
 	}
-	if err := paceCapture(p, hi.FPS); err != nil {
+	pc, err := paceCapture(p, hi.FPS)
+	if err != nil {
 		p.Stop()
 		return nil, err
 	}
-	vs := &VideoSource{Pipeline: p, chain: chain, lastKey: make([]time.Time, len(layers)),
+	vs := &VideoSource{Pipeline: p, pacer: pc, chain: chain, lastKey: make([]time.Time, len(layers)),
 		sinks: make([]*gst.Element, len(layers)), encs: make([]*gst.Element, len(layers))}
 	for i, l := range layers {
 		if l.Height == 0 {
@@ -884,6 +886,7 @@ func (vs *VideoSource) ForceKeyframe(layer int) {
 	defer vs.life.RUnlock()
 	if !vs.stopped() {
 		vs.sinks[layer].ForceKeyframe()
+		vs.pacer.repeat()
 	}
 }
 
@@ -952,6 +955,7 @@ func (vs *VideoSource) SetIdle(idle bool) {
 			s.ForceKeyframe()
 		}
 	}
+	vs.pacer.repeat()
 }
 
 // Idle reports whether SetIdle paused the capture.

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/pion/ice/v4"
@@ -145,6 +146,22 @@ func (p *Port) Close() { p.SetMapping(false) }
 // appears, which failed the whole port.
 func usableIP(ip net.IP) bool { return !ip.IsLinkLocalUnicast() }
 
+// virtualPrefixes name container and VM bridges: Docker, libvirt, LXC,
+// Podman and Hyper-V/WSL. A peer can't reach us through them, so offering
+// them only hands out internal addresses (host networking sees them all).
+var virtualPrefixes = []string{"docker", "br-", "veth", "virbr", "lxc", "lxdbr", "cni", "podman", "vethernet"}
+
+// usableInterface skips container and VM bridges (see virtualPrefixes).
+func usableInterface(name string) bool {
+	name = strings.ToLower(name)
+	for _, p := range virtualPrefixes {
+		if strings.HasPrefix(name, p) {
+			return false
+		}
+	}
+	return true
+}
+
 // freePort is the first port from pref on that nobody has bound (another
 // instance on this machine must not map, and on exit unmap, ours).
 func freePort(pref int) int {
@@ -165,7 +182,7 @@ func (p *Port) acquire() (ice.UDPMux, int, error) {
 	if p.mux == nil {
 		var err error
 		for port := p.pref; port < p.pref+portTries; port++ {
-			if p.mux, err = ice.NewMultiUDPMuxFromPort(port, ice.UDPMuxFromPortWithIPFilter(usableIP)); err == nil {
+			if p.mux, err = ice.NewMultiUDPMuxFromPort(port, ice.UDPMuxFromPortWithIPFilter(usableIP), ice.UDPMuxFromPortWithInterfaceFilter(usableInterface)); err == nil {
 				p.port = port
 				break
 			}

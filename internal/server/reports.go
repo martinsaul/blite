@@ -24,8 +24,8 @@ const (
 	maxReport      = 512 << 10
 	maxReportZip   = 12 << 20 // a report with a log zip (base64 in the JSON)
 	maxReportFiles = 2000
-	maxReportZips  = 200 // past that, reports are kept without their zip
-	reportKeep     = 30 * 24 * time.Hour
+	maxReportZips  = 200            // past that, reports are kept without their zip
+	reportKeep     = 72 * time.Hour // pruned hourly: gone within 73 h
 )
 
 var reportName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -84,7 +84,9 @@ func (s *Server) pruneReports() {
 	z, _ := filepath.Glob(filepath.Join(s.cfg.ReportDir, "*.zip"))
 	for _, p := range append(m, z...) {
 		if st, err := os.Stat(p); err == nil && time.Since(st.ModTime()) > reportKeep {
-			os.Remove(p)
+			if err := os.Remove(p); err != nil {
+				s.cfg.Log.Error("report past retention not deleted", "file", filepath.Base(p), "err", err)
+			}
 		}
 	}
 }

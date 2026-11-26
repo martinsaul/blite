@@ -62,7 +62,7 @@ func TestStandby(t *testing.T) {
 		}
 	}
 	// The old names don't go through the Worker: served.
-	old, st := dialHost(t, url, "bellion.zenithnetwork.com", nil)
+	old, st := dialHost(t, url, "old.example.net", nil)
 	if st != 0 {
 		t.Fatalf("old host name refused: %d", st)
 	}

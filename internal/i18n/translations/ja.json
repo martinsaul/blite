@@ -14,6 +14,8 @@
  "already in a session; leave it first": "すでにセッションに参加しています。先に退出してください",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "すでに参加中ですか？その Discord サーバーには Bellion ボットがいないため、Bellion からは見えません。サーバーの管理者に追加を頼んでください。",
  "An idea or something you'd like added": "アイデアや追加してほしい機能",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "匿名化：名前、ルームコード、サーバー、このコンピューターの名前を除く",
+ "Anonymized logs may keep us from finding the problem.": "匿名化したログでは問題を特定できないことがあります。",
  "app audio sharing is not available on this OS yet": "この OS ではアプリ音声の共有にまだ対応していません",
  "Applies to your next session.": "次のセッションから適用されます。",
  "Applies when starting a new session.": "新しいセッションの開始時に適用されます。",

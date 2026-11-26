@@ -139,7 +139,7 @@ func (f *fake) SetPlaySounds(bool) error                             { return ni
 func (f *fake) SetVoiceInSystem(bool) error                          { return nil }
 func (f *fake) SetHideChangelog(bool) error                          { return nil }
 func (f *fake) SetPortMap(bool) error                                { return nil }
-func (f *fake) SendLogsNow(context.Context) error                    { return nil }
+func (f *fake) SendLogsNow(context.Context, bool) error              { return nil }
 func (f *fake) OpenLogFolder() error                                 { return nil }
 func (f *fake) ProbeRecentRooms()                                    {}
 func (f *fake) JoinRecentRoom(context.Context, string, string) error { return nil }

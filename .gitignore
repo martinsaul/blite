@@ -5,3 +5,11 @@
 /dist/
 /BUILD
 *.syso
+# go build ./cmd/blite output at the top level
+/blite
+/blite.exe
+# signing material for local release builds; never committed
+/.release/
+*.jks
+*.p12
+*.keystore

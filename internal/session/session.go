@@ -445,12 +445,27 @@ const (
 	stoppedGrace = 1500 * time.Millisecond
 )
 
+// ErrE2EEDowngrade: we asked for an encrypted room and the server made a
+// plain one. Only a broken or hostile server does that, so we leave rather
+// than send media in the clear.
+var ErrE2EEDowngrade = errors.New("the server did not make the room end-to-end encrypted")
+
 // Create makes a new room. An empty password gets a random one.
 func Create(ctx context.Context, cfg Config, password string) (*Session, error) {
 	s := newSession(cfg, password)
-	sig, err := sigclient.Create(ctx, cfg.Server, proto.Create{Password: password, Name: cfg.Name, IDKey: s.idKey(), Client: cfg.Client, Room: cfg.HostRoom, HostKey: cfg.HostKey, Owners: cfg.HostOwners, E2EE: cfg.E2EE && buildOf(cfg.Client) >= proto.E2EEBuild, Channel: cfg.Channel}, sigclient.Options{OnState: s.sigState, OnDrop: s.sigDrop})
+	e2ee := cfg.E2EE && buildOf(cfg.Client) >= proto.E2EEBuild
+	sig, err := sigclient.Create(ctx, cfg.Server, proto.Create{Password: password, Name: cfg.Name, IDKey: s.idKey(), Client: cfg.Client, Room: cfg.HostRoom, HostKey: cfg.HostKey, Owners: cfg.HostOwners, E2EE: e2ee, Channel: cfg.Channel}, sigclient.Options{OnState: s.sigState, OnDrop: s.sigDrop})
 	if err != nil {
 		return nil, err
+	}
+	if e2ee && !sig.Welcome.E2EE {
+		// A fixed room that already exists keeps the setting it was made
+		// with, so a relay rejoining an older plain room only warns.
+		if cfg.HostRoom == "" {
+			sig.Leave()
+			return nil, ErrE2EEDowngrade
+		}
+		cfg.Log.Warn("hosted room is not end-to-end encrypted", "room", sig.Welcome.Room)
 	}
 	return s.start(sig)
 }

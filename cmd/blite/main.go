@@ -94,7 +94,7 @@ func main() {
 		join      = flag.String("join", "", "headless: room code to join")
 		link      = flag.String("link", "", "share link (https://HOST/j/CODE#password or bshare://join/CODE?server=HOST#password); joins on the link's server")
 		password  = flag.String("password", "", "room password (create: generated if empty)")
-		name      = flag.String("name", hostname(), "display name")
+		name      = flag.String("name", "", "display name (default: the one chosen in the app, else two random words)")
 		source    = flag.String("source", "", "video source: screen | test | none | a monitor:/window: source from -sources (default: screen with -headless; none in the app, where the user starts sharing)")
 		sources   = flag.Bool("sources", false, "list shareable monitors and windows and exit")
 		cameras   = flag.Bool("cameras", false, "list cameras, their modes and the mode each quality would use, and exit")
@@ -195,7 +195,7 @@ func main() {
 		fatal(log, "server", err)
 	}
 	cfg := session.Config{Server: srv, Name: *name, Client: clientMeta(), View: media.ViewKind(*view), Encoder: *encoder, Relay: *relay, UploadKbps: *upKbps, E2EE: *e2eeFlag, Log: log}
-	cfg.Name = orDefault(identity.CleanName(cfg.Name), "Bellion Share user") // '#' is reserved for the tag
+	cfg.Name = orDefault(identity.CleanName(cfg.Name), identity.FriendlyName()) // '#' is reserved for the tag
 	// openPort opens our UDP port (nil = off); when mapRouter is true it also
 	// maps the port on the router until Close.
 	openPort := func(mapRouter bool) *rtc.Port {
@@ -412,11 +412,12 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	}
 	defer log.Info(cleanExit)
 
-	// The name the user chose in the app wins over the hostname default.
+	// The name the user chose in the app wins over the default: two random
+	// words, never the computer's name (others see it).
 	if n := identity.LoadName(); n != "" && !flagSet("name") {
 		cfg.Name = n
 	}
-	cfg.Name = orDefault(identity.CleanName(cfg.Name), "Bellion Share user")
+	cfg.Name = orDefault(identity.CleanName(cfg.Name), identity.FriendlyName())
 	key, err := identity.LoadOrCreate()
 	if err != nil {
 		fatal(log, "identity key", err)
@@ -442,7 +443,8 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	a.ConfirmServer = nui.ConfirmServer
 	rep := &reporter{server: cfg.Server, log: log, name: a.DisplayName,
 		base: proto.Report{Platform: runtime.GOOS, Version: cfg.Client.Label(), Build: cfg.Client.Build, OSVersion: cfg.Client.OSVersion}}
-	rep.system = func() string { return systemText(a) }
+	rep.system = func(anon bool) string { return systemText(a, anon) }
+	rep.names = a.KnownNames
 	a.Logs = func() any { return logState() }
 	a.SendLogs = rep.send
 	a.SendFeedback = rep.feedback
@@ -794,14 +796,6 @@ func envOr(k, def string) string {
 	return def
 }
 
-func hostname() string {
-	h, _ := os.Hostname()
-	if h == "" {
-		return "blite"
-	}
-	return h
-}
-
 func fatal(log *slog.Logger, msg string, err error) {
 	log.Error(msg, "err", err)
 	closeLogs()
@@ -810,12 +804,29 @@ func fatal(log *slog.Logger, msg string, err error) {
 
 // systemText is system.txt in the Send logs zip: this computer, the
 // encoders it has, and the app's state without the room password.
-func systemText(a *app.App) string {
+func systemText(a *app.App, anon bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "version: %s\nos: %s/%s %s\ncpus: %d\nencoders: %s\ntime: %s\n\n",
 		clientMeta().Label(), runtime.GOOS, runtime.GOARCH, clientMeta().OSVersion, runtime.NumCPU(),
 		strings.Join(media.AvailableEncoders(), ","), time.Now().Format(time.RFC3339))
 	st := a.State().(app.UIState)
+	if anon {
+		// Counts and switches only: no names, rooms, servers or paths.
+		in, members, sharing := st.Session != nil, 0, 0
+		if in {
+			members = len(st.Session.Members)
+			for _, m := range st.Session.Members {
+				if m.Sharing {
+					sharing++
+				}
+			}
+		}
+		fmt.Fprintf(&b, "in session: %v, members: %d, sharing: %d, encrypted: %v\n", in, members, sharing, in && st.Session.Encrypted)
+		fmt.Fprintf(&b, "share: resolution %s, fps %d, audio %s, upload %d kbit/s\n", st.Share.Resolution, st.Share.FPS, st.Share.Audio.Mode, st.Share.UploadKbps)
+		fmt.Fprintf(&b, "autoWatch: %v, portMap: %v, e2ee: %v, discord linked: %v, custom servers: %v\n",
+			st.AutoWatch, st.Share.PortMap, st.Share.E2EE, st.Discord != nil && st.Discord.User != "", st.Servers != nil && len(st.Servers.List) > 1)
+		return b.String()
+	}
 	if st.Session != nil {
 		ss := *st.Session
 		ss.Link = "" // carries the room password

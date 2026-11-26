@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"blite/internal/i18n"
@@ -33,6 +36,31 @@ func loadFirstRun() (firstRun, string) {
 		json.Unmarshal(b, &f)
 	}
 	return f, p
+}
+
+// askName offers, once, to keep or change the random name a new user
+// starts with (identity.FriendlyName). Either answer saves a name, so it
+// isn't asked again.
+func (u *UI) askName() {
+	if u.nameAsked || u.st.NameChosen || u.st.Name == "" {
+		return
+	}
+	u.nameAsked = true
+	name := widget.NewEntry()
+	name.SetText(u.st.Name)
+	given := u.st.Name
+	d := dialog.NewForm(i18n.L("Your name"), i18n.L("Save"), i18n.L("Cancel"), []*widget.FormItem{
+		hinted(widget.NewFormItem(i18n.L("Name"), name), i18n.L("Others see it with your tag (#{{.Tag}}), which comes from your identity key.", i18n.D{"Tag": u.st.Tag})),
+	}, func(ok bool) {
+		n := given
+		if t := strings.TrimSpace(name.Text); ok && t != "" {
+			n = t
+		}
+		u.do(func() error { return u.a.SetName(n) })
+	}, u.win)
+	d.Resize(fyne.NewSize(460, 0))
+	d.Show()
+	u.win.Canvas().Focus(name)
 }
 
 // askAutostart asks once whether to start at sign-in, where the OS supports

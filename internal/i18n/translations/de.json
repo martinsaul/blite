@@ -14,6 +14,8 @@
  "already in a session; leave it first": "du bist schon in einer Sitzung; verlasse sie zuerst",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Schon in einem? Dieser Discord-Server hat den Bellion-Bot nicht, deshalb sieht Bellion dich dort nicht. Bitte einen Server-Admin, ihn hinzuzufügen.",
  "An idea or something you'd like added": "Eine Idee oder ein Wunsch",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Anonymisieren: Namen, Raumcodes, Server und den Namen dieses Computers weglassen",
+ "Anonymized logs may keep us from finding the problem.": "Mit anonymisierten Logs finden wir das Problem womöglich nicht.",
  "app audio sharing is not available on this OS yet": "App-Audio teilen ist auf diesem Betriebssystem noch nicht verfügbar",
  "Applies to your next session.": "Gilt für deine nächste Sitzung.",
  "Applies when starting a new session.": "Gilt beim Start einer neuen Sitzung.",

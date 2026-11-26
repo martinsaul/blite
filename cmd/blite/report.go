@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"blite/internal/app"
 	"blite/internal/diag"
 	"blite/internal/metrics"
 	"blite/internal/proto"
@@ -180,8 +181,32 @@ type reporter struct {
 	name   func() string
 	log    *slog.Logger
 	// system is a plain-text summary of this computer and our state for
-	// the zip (system.txt); nil = none.
-	system func() string
+	// the zip (system.txt), short and without names when anon; nil = none.
+	system func(anon bool) string
+	// names are what an anonymous report replaces (app.KnownNames).
+	names func() []string
+}
+
+// scrub returns the text filter for a report: redact.Text, plus an
+// Anonymizer when anon.
+func (r *reporter) scrub(anon bool) func(string) string {
+	if !anon {
+		return redact.Text
+	}
+	var names []string
+	if r.names != nil {
+		names = r.names()
+	}
+	an := redact.NewAnonymizer(names...)
+	return func(s string) string { return an.Text(redact.Text(s)) }
+}
+
+// reportName is who a report is from: name#tag, or "anonymous".
+func (r *reporter) reportName(anon bool) string {
+	if anon {
+		return "anonymous"
+	}
+	return r.name()
 }
 
 // Send logs also uploads a zip: whole log files (up to zipFileMax each,
@@ -197,7 +222,7 @@ const (
 // buildZip packs the newest of names (sorted oldest first) from dir with
 // the metrics files bins and system, dropping the oldest logs until it fits
 // zipMax.
-func buildZip(dir string, names, bins []string, system string) ([]byte, []string, error) {
+func buildZip(dir string, names, bins []string, system string, scrub func(string) string) ([]byte, []string, error) {
 	if len(names) > zipFiles {
 		names = names[len(names)-zipFiles:]
 	}
@@ -206,7 +231,7 @@ func buildZip(dir string, names, bins []string, system string) ([]byte, []string
 		zw := zip.NewWriter(&buf)
 		if system != "" {
 			w, _ := zw.Create("system.txt")
-			io.WriteString(w, redact.Text(system))
+			io.WriteString(w, scrub(system))
 		}
 		for _, n := range names {
 			t, err := tail(filepath.Join(dir, n), zipFileMax)
@@ -217,7 +242,7 @@ func buildZip(dir string, names, bins []string, system string) ([]byte, []string
 			if err != nil {
 				return nil, nil, err
 			}
-			io.WriteString(w, redact.Text(t))
+			io.WriteString(w, scrub(t))
 		}
 		for _, n := range bins { // numbers only: nothing to redact
 			b, err := os.ReadFile(filepath.Join(dir, n))
@@ -253,8 +278,14 @@ func (r *reporter) previous() {
 			continue
 		}
 		rep := r.base
-		// crashLog redacts what it takes from t.
-		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "crash", name, crashLog(t, reportTail), redact.Text(l.Guard)
+		// crashLog redacts what it takes from t; anonymous if the user
+		// last chose so in Send logs.
+		anon := app.AnonymizeLogs()
+		scrub := r.scrub(anon)
+		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.reportName(anon), "crash", name, crashLog(t, reportTail), scrub(l.Guard)
+		if anon {
+			rep.Log = scrub(rep.Log)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		err = diag.SendReport(ctx, r.server, rep)
 		cancel()
@@ -298,7 +329,7 @@ func pickUserLogs(names []string, current string) []string {
 
 // send uploads this run's log and the two newest others (the user's
 // "Send logs").
-func (r *reporter) send(ctx context.Context) error {
+func (r *reporter) send(ctx context.Context, anon bool) error {
 	flushLogs() // the report has the last lines
 	l := logState()
 	if l.Dir == "" {
@@ -317,13 +348,14 @@ func (r *reporter) send(ctx context.Context) error {
 		setLogs(func(x *logInfo) { x.Report = err.Error() })
 		return err
 	}
+	scrub := r.scrub(anon)
 	var b strings.Builder
 	for _, n := range names {
 		t, _ := tail(filepath.Join(l.Dir, n), reportTail)
-		fmt.Fprintf(&b, "===== %s\n%s\n", n, redact.Text(t))
+		fmt.Fprintf(&b, "===== %s\n%s\n", n, scrub(t))
 	}
 	rep := r.base
-	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.name(), "user", strings.Join(names, ", "), b.String(), redact.Text(l.Guard)
+	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.reportName(anon), "user", strings.Join(names, ", "), b.String(), scrub(l.Guard)
 	var all []string
 	for _, e := range es {
 		if n := e.Name(); strings.HasSuffix(n, ".log") {
@@ -333,10 +365,10 @@ func (r *reporter) send(ctx context.Context) error {
 	sort.Strings(all)
 	system := ""
 	if r.system != nil {
-		system = r.system()
+		system = r.system(anon)
 	}
 	metricsRec.Flush() // the readings up to now
-	z, zipped, zerr := buildZip(l.Dir, all, metrics.Newest(l.Dir, zipMetrics), system)
+	z, zipped, zerr := buildZip(l.Dir, all, metrics.Newest(l.Dir, zipMetrics), system, scrub)
 	if zerr != nil {
 		r.log.Warn("log zip", "err", zerr)
 	}

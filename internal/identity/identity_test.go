@@ -93,3 +93,17 @@ func TestSignPurpose(t *testing.T) {
 		t.Fatal("signature valid for another key")
 	}
 }
+
+func TestFriendlyName(t *testing.T) {
+	seen := map[string]bool{}
+	for range 200 {
+		n := FriendlyName()
+		if CleanName(n) != n || len(strings.Fields(n)) != 2 {
+			t.Fatalf("FriendlyName() = %q", n)
+		}
+		seen[n] = true
+	}
+	if len(seen) < 50 {
+		t.Errorf("only %d different names in 200", len(seen))
+	}
+}

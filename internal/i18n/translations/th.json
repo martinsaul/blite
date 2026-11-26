@@ -14,6 +14,8 @@
  "already in a session; leave it first": "คุณอยู่ในเซสชันอยู่แล้ว ออกจากเซสชันนั้นก่อน",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "อยู่ในช่องอยู่แล้วใช่ไหม เซิร์ฟเวอร์ Discord นั้นไม่มีบอท Bellion จึงมองไม่เห็นคุณที่นั่น ขอให้ผู้ดูแลเซิร์ฟเวอร์เพิ่มบอทให้",
  "An idea or something you'd like added": "ไอเดียหรือสิ่งที่อยากให้เพิ่ม",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "ไม่ระบุตัวตน: ไม่ใส่ชื่อ รหัสห้อง เซิร์ฟเวอร์ และชื่อคอมพิวเตอร์เครื่องนี้",
+ "Anonymized logs may keep us from finding the problem.": "บันทึกที่ไม่ระบุตัวตนอาจทำให้เราหาปัญหาไม่พบ",
  "app audio sharing is not available on this OS yet": "ยังแชร์เสียงแอปบนระบบปฏิบัติการนี้ไม่ได้",
  "Applies to your next session.": "มีผลในเซสชันถัดไปของคุณ",
  "Applies when starting a new session.": "มีผลเมื่อเริ่มเซสชันใหม่",

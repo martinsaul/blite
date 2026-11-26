@@ -179,7 +179,7 @@ func TestDrain(t *testing.T) {
 
 	// Creates, joins and resumes alike are refused at the upgrade, on
 	// every host name.
-	for _, host := range []string{"bellion.app", "bellion.zenithnetwork.com", "blite-blue.internal.example"} {
+	for _, host := range []string{"bellion.app", "old.example.net", "blite-blue.internal.example"} {
 		if _, st := dialHost(t, url, host, nil); st != http.StatusServiceUnavailable {
 			t.Fatalf("new session on a drained server (%s): status %d", host, st)
 		}

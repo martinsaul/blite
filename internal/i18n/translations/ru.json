@@ -14,6 +14,8 @@
  "already in a session; leave it first": "вы уже в сессии; сначала выйдите из неё",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Уже в канале? На этом сервере Discord нет бота Bellion, поэтому Bellion вас там не видит. Попросите администратора сервера добавить его.",
  "An idea or something you'd like added": "Идея или то, что вы хотели бы добавить",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Анонимизировать: убрать имена, коды комнат, серверы и имя этого компьютера",
+ "Anonymized logs may keep us from finding the problem.": "По анонимизированным журналам мы можем не найти проблему.",
  "app audio sharing is not available on this OS yet": "показ звука приложений пока не поддерживается в этой ОС",
  "Applies to your next session.": "Применится со следующей сессии.",
  "Applies when starting a new session.": "Применяется при запуске новой сессии.",

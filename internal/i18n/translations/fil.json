@@ -14,6 +14,8 @@
  "already in a session; leave it first": "nasa isang session ka na; umalis ka muna roon",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Nasa isa ka na? Walang Bellion bot ang Discord server na iyon, kaya hindi ka makita ng Bellion doon. Hilingin sa isang admin ng server na idagdag ito.",
  "An idea or something you'd like added": "Isang ideya o gusto mong idagdag",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Gawing anonymous: alisin ang mga pangalan, room code, server at pangalan ng computer na ito",
+ "Anonymized logs may keep us from finding the problem.": "Maaaring hindi namin mahanap ang problema sa mga anonymous na log.",
  "app audio sharing is not available on this OS yet": "hindi pa puwede ang pag-share ng audio ng app sa OS na ito",
  "Applies to your next session.": "Ilalapat sa susunod mong session.",
  "Applies when starting a new session.": "Ilalapat kapag nagsimula ng bagong session.",

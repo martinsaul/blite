@@ -14,6 +14,8 @@
  "already in a session; leave it first": "이미 세션에 참여 중이에요. 먼저 나가세요",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "이미 참여 중인가요? 그 Discord 서버에는 Bellion 봇이 없어서 Bellion이 볼 수 없습니다. 서버 관리자에게 추가해 달라고 요청하세요.",
  "An idea or something you'd like added": "아이디어나 추가되었으면 하는 기능",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "익명화: 이름, 방 코드, 서버, 이 컴퓨터의 이름을 제외",
+ "Anonymized logs may keep us from finding the problem.": "익명화된 로그로는 문제를 찾지 못할 수 있습니다.",
  "app audio sharing is not available on this OS yet": "이 OS에서는 아직 앱 오디오 공유를 지원하지 않아요",
  "Applies to your next session.": "다음 세션부터 적용됩니다.",
  "Applies when starting a new session.": "새 세션을 시작할 때 적용됩니다.",

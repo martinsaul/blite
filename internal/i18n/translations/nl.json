@@ -14,6 +14,8 @@
  "already in a session; leave it first": "je zit al in een sessie; verlaat die eerst",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Zit je er al in een? Die Discord-server heeft de Bellion-bot niet, dus Bellion ziet je daar niet. Vraag een serverbeheerder om hem toe te voegen.",
  "An idea or something you'd like added": "Een idee of iets wat je graag zou zien",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Anonimiseren: namen, kamercodes, servers en de naam van deze computer weglaten",
+ "Anonymized logs may keep us from finding the problem.": "Met geanonimiseerde logs kunnen we het probleem misschien niet vinden.",
  "app audio sharing is not available on this OS yet": "audio van apps delen is op dit besturingssysteem nog niet beschikbaar",
  "Applies to your next session.": "Geldt voor je volgende sessie.",
  "Applies when starting a new session.": "Geldt bij het starten van een nieuwe sessie.",

@@ -35,6 +35,7 @@ type App struct {
 	bc  ui.Broadcaster
 
 	mu          sync.Mutex
+	nameChosen  bool // the user saved a name; until then it's two random words
 	sess        *session.Session
 	lastErr     string
 	homeSource  string               // pre-call source choice ("primary", "window:...", "screen", "test", "none")
@@ -79,8 +80,9 @@ type App struct {
 	Exit func()
 	// Logs describes the log files for the UI; SendLogs uploads them to the
 	// signal server; OpenLogs shows their folder. nil = not available.
-	Logs     func() any
-	SendLogs func(ctx context.Context) error
+	Logs func() any
+	// SendLogs: anon = an anonymous report (see AnonymizeLogs).
+	SendLogs func(ctx context.Context, anon bool) error
 	OpenLogs func() error
 	// SendFeedback sends an idea or a problem the user wrote, with
 	// diagnostics ("" = without); nil = not available.
@@ -139,6 +141,7 @@ func New(cfg session.Config, def media.SourceKind) *App {
 	}
 	a := &App{
 		cfg:           cfg,
+		nameChosen:    identity.LoadName() != "",
 		log:           cfg.Log,
 		DefaultSource: def,
 		homeSource:    "primary",
@@ -195,9 +198,12 @@ type UIState struct {
 	Error   string         `json:"error,omitempty"`
 	Version string         `json:"version"` // our build, e.g. "0.1.0 (57) linux"
 	// Name and Tag: who we are (name#tag), also outside a session.
-	Name   string       `json:"name"`
-	Tag    string       `json:"tag"`
-	Update *update.Info `json:"update,omitempty"`
+	Name string `json:"name"`
+	// NameChosen: the user saved a name. Until then Name is two random
+	// words, and the app asks once whether to keep or change them.
+	NameChosen bool         `json:"nameChosen"`
+	Tag        string       `json:"tag"`
+	Update     *update.Info `json:"update,omitempty"`
 	// Autostart is whether Blite starts at sign-in; nil where it can't
 	// (dev builds).
 	Autostart *bool `json:"autostart,omitempty"`
@@ -212,6 +218,9 @@ type UIState struct {
 	// HideChangelog: the user doesn't want to see what changed after an
 	// update (Help > What's new still shows it).
 	HideChangelog bool `json:"hideChangelog,omitempty"`
+	// AnonymizeLogs: the last choice of "Anonymize" for Send logs; crash
+	// reports follow it too.
+	AnonymizeLogs bool `json:"anonymizeLogs,omitempty"`
 	Logs          any  `json:"logs,omitempty"`
 	// Reach says whether others can reach us from the internet.
 	Reach *Reach `json:"reach,omitempty"`
@@ -274,7 +283,7 @@ func (a *App) State() any {
 	servers := a.serverState()
 	recent := a.recentStateLocked()
 	a.mu.Unlock()
-	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), AutoWatch: autoWatch, PlaySounds: playSounds, VoiceInSystem: audio.IncludeVoice(), HideChangelog: hideChangelog, Discord: dc, Servers: servers, Recent: recent}
+	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), NameChosen: a.isNameChosen(), AutoWatch: autoWatch, PlaySounds: playSounds, VoiceInSystem: audio.IncludeVoice(), HideChangelog: hideChangelog, AnonymizeLogs: AnonymizeLogs(), Discord: dc, Servers: servers, Recent: recent}
 	if a.cfg.Client != nil {
 		st.Build = a.cfg.Client.Build
 	}
@@ -334,6 +343,33 @@ func (a *App) config() session.Config {
 	return cfg
 }
 
+// KnownNames are the names the app knows of: ours, the members', Discord's,
+// recent rooms' and servers'. An anonymous report replaces them.
+func (a *App) KnownNames() []string {
+	st, _ := a.State().(UIState)
+	n := []string{st.Name}
+	if s := st.Session; s != nil {
+		n = append(n, s.Room)
+		for _, m := range s.Members {
+			n = append(n, m.Name)
+		}
+	}
+	if d := st.Discord; d != nil {
+		n = append(n, d.User, d.Guild, d.Channel, d.ChannelID)
+	}
+	for _, r := range st.Recent {
+		n = append(n, r.Code, r.Display, r.Host)
+	}
+	if sv := st.Servers; sv != nil {
+		for _, s := range sv.List {
+			if !s.BuiltIn {
+				n = append(n, s.URL, s.Host)
+			}
+		}
+	}
+	return n
+}
+
 // DisplayName is our name#tag, for reports.
 func (a *App) DisplayName() string {
 	n := a.cfgName()
@@ -343,12 +379,20 @@ func (a *App) DisplayName() string {
 	return n
 }
 
-// SendLogsNow implements ui.Backend.
-func (a *App) SendLogsNow(ctx context.Context) error {
+// AnonymizeLogs reports whether reports should be anonymous (the user's
+// last choice in Send logs).
+func AnonymizeLogs() bool { return loadSettings().AnonymizeLogs }
+
+// SendLogsNow implements ui.Backend: anon sends an anonymous report, and
+// is remembered for the next one and for crash reports.
+func (a *App) SendLogsNow(ctx context.Context, anon bool) error {
 	if a.SendLogs == nil {
 		return errors.New("this build can't send logs")
 	}
-	err := a.SendLogs(ctx)
+	if err := updateSettings(func(s *appSettings) { s.AnonymizeLogs = anon }); err != nil {
+		a.log.Warn("save anonymize setting", "err", err)
+	}
+	err := a.SendLogs(ctx, anon)
 	a.bc.Notify()
 	return err
 }
@@ -952,6 +996,12 @@ func (a *App) Volunteer(on bool) error {
 	return s.Volunteer(on)
 }
 
+func (a *App) isNameChosen() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nameChosen
+}
+
 // SetName implements ui.Backend: our display name, kept for later
 // sessions, and changed in the current one.
 func (a *App) SetName(name string) error {
@@ -963,7 +1013,7 @@ func (a *App) SetName(name string) error {
 		a.log.Warn("save name", "err", err)
 	}
 	a.mu.Lock()
-	a.cfg.Name = name
+	a.cfg.Name, a.nameChosen = name, true
 	s := a.sess
 	a.mu.Unlock()
 	if s != nil {

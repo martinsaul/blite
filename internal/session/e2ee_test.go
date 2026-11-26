@@ -2,12 +2,17 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"blite/internal/audio"
 	"blite/internal/media"
@@ -106,3 +111,42 @@ func TestE2EEMeshRelayAndRekey(t *testing.T) {
 }
 
 const keySwitchDelayForTest = time.Second
+
+// A server that answers an encrypted create with a plain room is refused:
+// media must never go out in the clear because the server said so.
+func TestE2EEDowngradeRefused(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		if _, _, err := ws.Read(r.Context()); err != nil {
+			return
+		}
+		b, _ := json.Marshal(proto.Welcome{T: proto.TWelcome, Room: "7K3QX9MD", PeerID: "alice", Resume: "tok"})
+		ws.Write(r.Context(), websocket.MessageText, b)
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+	ws := "ws" + strings.TrimPrefix(ts.URL, "http")
+	cm := &proto.ClientMeta{AppVersion: "0.1.0", Build: proto.E2EEBuild}
+	cfg := Config{Server: ws, Name: "alice", View: media.ViewCount, Client: cm, E2EE: true, Log: quiet}
+	if s, err := Create(context.Background(), cfg, ""); !errors.Is(err, ErrE2EEDowngrade) {
+		if s != nil {
+			s.Close()
+		}
+		t.Fatalf("create with a downgrading server: %v, want ErrE2EEDowngrade", err)
+	}
+	cfg.E2EE = false
+	s, err := Create(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("plain create: %v", err)
+	}
+	s.Close()
+}

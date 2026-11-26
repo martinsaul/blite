@@ -14,6 +14,8 @@
  "already in a session; leave it first": "तुम्ही आधीच एका सेशनमध्ये आहात; आधी ते सोडा",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "आधीच एखाद्यात आहात? त्या Discord सर्व्हरमध्ये Bellion बॉट नाही, त्यामुळे Bellion तुम्हाला तिथे पाहू शकत नाही. सर्व्हरच्या एखाद्या अ‍ॅडमिनला तो जोडायला सांगा.",
  "An idea or something you'd like added": "एखादी कल्पना किंवा तुम्हाला हवे असलेले काहीतरी",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "निनावी करा: नावे, रूम कोड, सर्व्हर आणि या संगणकाचे नाव वगळा",
+ "Anonymized logs may keep us from finding the problem.": "निनावी लॉगमुळे आम्हाला समस्या सापडणे कठीण होऊ शकते.",
  "app audio sharing is not available on this OS yet": "या OS वर ॲप ऑडिओ शेअरिंग अजून उपलब्ध नाही",
  "Applies to your next session.": "तुमच्या पुढील सत्रापासून लागू होईल.",
  "Applies when starting a new session.": "नवीन सत्र सुरू करताना लागू होते.",

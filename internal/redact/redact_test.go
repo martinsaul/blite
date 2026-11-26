@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -432,6 +433,9 @@ func TestWriterAndReplaceAttrOnDisk(t *testing.T) {
 				t.Fatal(err)
 			}
 			disk := string(b)
+			// Timestamps carry nanoseconds, which can contain a numeric
+			// secret like 4821 by chance: blank them for the leak scan.
+			scan := timestampRE.ReplaceAllString(disk, "<time>")
 			for _, sec := range []string{
 				"linkQTok0", "linkFrag0",
 				"rpDisk1", "rpDisk2", "jpDisk17", "pwsDisk18", "rpwDisk19",
@@ -446,7 +450,7 @@ func TestWriterAndReplaceAttrOnDisk(t *testing.T) {
 				"4821", "0xDEADBEEF", "DEADBEEF", "1_000", "100000",
 				"spEq25", "spCol26", "jp27", "pws28", "rpw29", `pw"58`, `pw\"58`,
 			} {
-				if strings.Contains(disk, sec) {
+				if strings.Contains(scan, sec) {
 					t.Fatalf("on-disk %s log leaked secret %q:\n%s", name, sec, disk)
 				}
 			}
@@ -887,3 +891,6 @@ func TestWriterRecoverIsPerLine(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// timestampRE matches the RFC 3339 times slog writes.
+var timestampRE = regexp.MustCompile(`\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)`)

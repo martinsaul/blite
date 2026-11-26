@@ -259,7 +259,7 @@ func (d *demo) SetPlaySounds(on bool) error { d.playSounds = on; d.changed(); re
 func (d *demo) SetVoiceInSystem(bool) error { return nil }
 func (d *demo) SetHideChangelog(bool) error { return nil }
 func (d *demo) SetPortMap(on bool) error    { d.portMap = on; d.changed(); return nil }
-func (d *demo) SendLogsNow(context.Context) error {
+func (d *demo) SendLogsNow(context.Context, bool) error {
 	if d.logsFail {
 		d.logsReport = "could not send: connection refused"
 		d.changed()

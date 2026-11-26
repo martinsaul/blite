@@ -51,6 +51,8 @@ type UI struct {
 	fa    fyne.App
 	win   fyne.Window
 	shown bool // the window showed once (Fyne thread)
+	// nameAsked: the first-start name question was shown (Fyne thread).
+	nameAsked bool
 
 	// closed: a quit was asked for (or Run returned). From then on nothing
 	// may queue work for the driver: once it has quit, fyne.Do runs the
@@ -135,6 +137,9 @@ func Run(a ui.Backend, o Options) {
 	})
 	fa.Lifecycle().SetOnStarted(func() {
 		fyne.Do(u.refresh) // the first draw, on Fyne's thread
+		if !o.Hidden && o.Scene == "" {
+			fyne.Do(u.askName)
+		}
 		if o.Scene == "" {
 			u.keepWinGeom()
 		}
@@ -240,6 +245,7 @@ func (u *UI) Show() {
 	u.win.RequestFocus()
 	if !u.shown {
 		u.shown = true
+		u.askName()
 		u.askAutostart() // the first time the window shows
 	} else if u.viewKind == "lobby" && u.lobby != nil {
 		u.lobby.checkClipboard(u)

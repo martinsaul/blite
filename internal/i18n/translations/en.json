@@ -14,6 +14,8 @@
  "already in a session; leave it first": "already in a session; leave it first",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.",
  "An idea or something you'd like added": "An idea or something you'd like added",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Anonymize: leave out names, room codes, servers and this computer's name",
+ "Anonymized logs may keep us from finding the problem.": "Anonymized logs may keep us from finding the problem.",
  "app audio sharing is not available on this OS yet": "app audio sharing is not available on this OS yet",
  "Applies to your next session.": "Applies to your next session.",
  "Applies when starting a new session.": "Applies when starting a new session.",

@@ -376,9 +376,26 @@ func (u *UI) feedbackDialog() {
 	d.Show()
 }
 
+// sendLogs asks whether to anonymize (remembered), then sends.
 func (u *UI) sendLogs() {
+	anon := widget.NewCheck(i18n.L("Anonymize: leave out names, room codes, servers and this computer's name"), nil)
+	anon.SetChecked(u.st.AnonymizeLogs)
+	note := widget.NewLabel(i18n.L("Anonymized logs may keep us from finding the problem."))
+	note.Wrapping = fyne.TextWrapWord
+	note.Importance = widget.LowImportance
+	d := dialog.NewCustomConfirm(i18n.L("Send logs to the developers"), i18n.L("Send"), i18n.L("Cancel"),
+		container.NewVBox(anon, note), func(ok bool) {
+			if ok {
+				u.sendLogsNow(anon.Checked)
+			}
+		}, u.win)
+	d.Resize(fyne.NewSize(520, 0))
+	d.Show()
+}
+
+func (u *UI) sendLogsNow(anonymize bool) {
 	go func() {
-		err := u.a.SendLogsNow(ctx())
+		err := u.a.SendLogsNow(ctx(), anonymize)
 		st, _ := u.a.State().(app.UIState) // u.st may not have the report yet
 		u.later(func() {
 			if err != nil {

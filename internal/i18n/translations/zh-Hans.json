@@ -14,6 +14,8 @@
  "already in a session; leave it first": "已在会话中，请先退出",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "已经在语音频道里了？那个 Discord 服务器没有 Bellion 机器人，所以 Bellion 看不到你。请服务器管理员添加它。",
  "An idea or something you'd like added": "想法或希望添加的功能",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "匿名化：不包含名称、房间代码、服务器和这台电脑的名称",
+ "Anonymized logs may keep us from finding the problem.": "匿名化的日志可能让我们无法找到问题。",
  "app audio sharing is not available on this OS yet": "此系统暂不支持共享应用音频",
  "Applies to your next session.": "将在你的下一次会话中生效。",
  "Applies when starting a new session.": "在开始新会话时生效。",

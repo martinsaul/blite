@@ -682,16 +682,16 @@ func hasFoldAt(s string, idx int, lowerWord string) bool {
 
 // Text removes secret fields, Bearer tokens, URL credentials, secret query
 // parameters, share-link fragments (# and %23 on any path), and bare CODE#pw
-// join inputs from log text.
+// join inputs from log text, and turns public IP addresses into lossy codes
+// (see ipCode).
 func Text(s string) string {
 	if s == "" {
 		return ""
 	}
-	pf := scanPrefilter(s)
-	if !pf.any() {
-		return s
+	if pf := scanPrefilter(s); pf.any() {
+		s = redactTextGuarded(s, pf)
 	}
-	return redactTextGuarded(s, pf)
+	return redactIPsGuarded(s)
 }
 
 // redactionFailed replaces a line (or value) whose redaction panicked. The

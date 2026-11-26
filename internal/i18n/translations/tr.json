@@ -14,6 +14,8 @@
  "already in a session; leave it first": "zaten bir oturumdasın; önce oturumdan ayrıl",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Zaten birinde misin? O Discord sunucusunda Bellion botu yok, bu yüzden Bellion seni orada göremiyor. Bir sunucu yöneticisinden onu eklemesini iste.",
  "An idea or something you'd like added": "Bir fikir veya eklenmesini istediğin bir şey",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Anonimleştir: adları, oda kodlarını, sunucuları ve bu bilgisayarın adını çıkar",
+ "Anonymized logs may keep us from finding the problem.": "Anonimleştirilmiş kayıtlarla sorunu bulamayabiliriz.",
  "app audio sharing is not available on this OS yet": "uygulama sesi paylaşımı bu işletim sisteminde henüz yok",
  "Applies to your next session.": "Sonraki oturumunda uygulanır.",
  "Applies when starting a new session.": "Yeni bir oturum başlatılırken uygulanır.",

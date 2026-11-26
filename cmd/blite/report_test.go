@@ -110,7 +110,7 @@ func TestBuildZip(t *testing.T) {
 		names = append(names, n)
 	}
 	os.WriteFile(filepath.Join(dir, "metrics-20261107-010000-1.bin"), []byte(metrics.Magic+"\x00\xff"), 0o600)
-	b, got, err := buildZip(dir, names, []string{"metrics-20261107-010000-1.bin"}, "cpus: 8\n")
+	b, got, err := buildZip(dir, names, []string{"metrics-20261107-010000-1.bin"}, "cpus: 8\n", redact.Text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,9 +223,10 @@ func TestReportUploadRedactsSecrets(t *testing.T) {
 		log:    quiet,
 		name:   func() string { return "alice#7F2A" },
 		base:   proto.Report{Platform: "linux", Version: "dev", Build: 1},
-		system: func() string {
+		system: func(bool) string {
 			return "version: dev\nlastError: bshare://join/K7PQ2M4X#pwSys101\n"
 		},
+		names: func() []string { return []string{"martin"} },
 	}
 
 	// 1. Automatic crash-report upload.
@@ -257,7 +258,7 @@ func TestReportUploadRedactsSecrets(t *testing.T) {
 	}
 
 	// 2. User "Send logs" upload (both inline Log and Zip entries).
-	if err := rep.send(context.Background()); err != nil {
+	if err := rep.send(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -315,6 +316,29 @@ func TestReportUploadRedactsSecrets(t *testing.T) {
 	assertClean("feedback Log", fbRep.Log)
 	if !strings.Contains(fbRep.Log, "https://share.bellion.io/room/7K3QX9MD#[cut]") || !strings.Contains(fbRep.Log, "MAMACO#[cut]") {
 		t.Fatalf("feedback lost room code:\n%s", fbRep.Log)
+	}
+
+	// 4. Anonymous "Send logs": no names, no room codes, the same story.
+	if err := rep.send(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	anonRep := received[3]
+	mu.Unlock()
+	assertClean("anonymous Log", anonRep.Log)
+	if anonRep.Name != "anonymous" {
+		t.Fatalf("anonymous report from %q", anonRep.Name)
+	}
+	for _, gone := range []string{"martin#", `"peer":"bob#`, "peer=alice#", "room=7K3Q-X9MD"} {
+		if !strings.Contains(userRep.Log, gone) {
+			t.Fatalf("test data: the plain report lacks %q", gone)
+		}
+		if strings.Contains(anonRep.Log, gone) {
+			t.Fatalf("anonymous report still has %q:\n%s", gone, anonRep.Log)
+		}
+	}
+	if !strings.Contains(anonRep.Log, `msg="healthy frame" fps=60`) || !strings.Contains(anonRep.Log, `#9A1C"`) {
+		t.Fatalf("anonymous report lost the story:\n%s", anonRep.Log)
 	}
 }
 
@@ -414,8 +438,8 @@ func TestOnDiskLoggerAndUploadRedactsAllForms(t *testing.T) {
 		"PW", "diskAttrPw15",
 		"Pass", "diskAttrPass16",
 		"Token", "diskAttrTok17",
-		"Key", "diskAttrKey18",
-		"SECRET", "diskAttrSec19",
+		"Key", "dAKey18",
+		"SECRET", "dASec19",
 		"api_key", "diskAttrAk27",
 		"access_token", "diskAttrAt28",
 		"x-token", "diskAttrXt29",
@@ -426,7 +450,7 @@ func TestOnDiskLoggerAndUploadRedactsAllForms(t *testing.T) {
 		"name", "martin#0A1B",
 		"ch", "chan#3",
 		"rawLink", `https://share.bellion.io/r/7K3QX9MD#my "escaped" diskQuote20`,
-		"req", fmt.Sprintf("%+v", proto.Join{T: "join", Room: "7K3QX9MD", Password: "diskJoinStruct21"}),
+		"req", fmt.Sprintf("%+v", proto.Join{T: "join", Room: "7K3QX9MD", Password: "dJS21"}),
 	)
 	emitRound2Cases(tlog)
 	tlog.Info(strings.Repeat("a", 65520) + ` pw="secretPartOne two"`)
@@ -461,7 +485,7 @@ func TestOnDiskLoggerAndUploadRedactsAllForms(t *testing.T) {
 		"diskGuard1", "diskCliPw2", "ssDisk3", "diskQTok4", "diskQPw5", "diskQKey6",
 		"diskBare7", "diskSpace8", "diskPct9", "diskStruct10", "pwLong6",
 		"diskAttrLink11", "diskAttrPw12", "diskAttrRp13", "diskAttrRp14", "diskAttrPw15",
-		"diskAttrPass16", "diskAttrTok17", "diskAttrKey18", "diskAttrSec19", "diskQuote20", "diskJoinStruct21",
+		"diskAttrPass16", "diskAttrTok17", "dAKey18", "dASec19", "diskQuote20", "dJS21",
 		"diskAttrAk27", "diskAttrAt28", "diskAttrXt29", "diskAttrPwd30",
 		"diskJsonRp22", "diskJsonSec23", "123456", "diskJsonLink31", "diskJsonPct24", "diskJsonBare25", "diskJsonObjPw26",
 		"hunter2", "r2UpPw1", "r2Pw2", "r2Ak3", "12345", "r2AttrUpPw4", "r2AttrPw5", "r2AttrAk6",
@@ -540,7 +564,7 @@ func TestOnDiskLoggerAndUploadRedactsAllForms(t *testing.T) {
 		base:   proto.Report{Platform: "linux", Version: "dev", Build: 1},
 	}
 	rep.previous()
-	if err := rep.send(context.Background()); err != nil {
+	if err := rep.send(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()

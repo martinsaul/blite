@@ -14,6 +14,8 @@
  "already in a session; leave it first": "tayari uko kwenye kipindi; ondoka kwanza",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Tayari uko kwenye moja? Seva hiyo ya Discord haina boti ya Bellion, kwa hiyo Bellion haiwezi kukuona huko. Mwombe msimamizi wa seva aiongeze.",
  "An idea or something you'd like added": "Wazo au kitu ungependa kiongezwe",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Ficha utambulisho: ondoa majina, misimbo ya vyumba, seva na jina la kompyuta hii",
+ "Anonymized logs may keep us from finding the problem.": "Kumbukumbu zisizo na utambulisho zinaweza kutuzuia kupata tatizo.",
  "app audio sharing is not available on this OS yet": "kushiriki sauti ya programu bado hakupatikani kwenye mfumo huu",
  "Applies to your next session.": "Itatumika kwenye kipindi chako kijacho.",
  "Applies when starting a new session.": "Hutumika unapoanzisha kipindi kipya.",

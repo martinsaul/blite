@@ -22,7 +22,7 @@ func TestCaptureGapNoBurst(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Stop()
-	if err := paceCapture(p, fps); err != nil {
+	if _, err := paceCapture(p, fps); err != nil {
 		t.Fatal(err)
 	}
 	gap, err := p.element("gap")
@@ -140,7 +140,7 @@ func changeLatency(t *testing.T, fps, thin int, tail string, every time.Duration
 		t.Fatal(err)
 	}
 	defer p.Stop()
-	if err := paceCapture(p, fps); err != nil {
+	if _, err := paceCapture(p, fps); err != nil {
 		t.Fatal(err)
 	}
 	if thin > 0 {
@@ -286,6 +286,60 @@ func shareChange(t *testing.T, enc encoder, fps, thin int) {
 		// Thinned, the repeats go like any frame.
 		if want := 2 - min(thin, 1); c.layer == High && n < want {
 			t.Errorf("HIGH encoded %d frames after a change, want at least %d (it and a repeat unless thinned)", n, want)
+		}
+	}
+}
+
+// A keyframe asked for on a still screen (a viewer joined, or switched
+// layer) comes out at once: an encoder makes it from its next frame, and
+// a still screen gave none until it changed. A phone waited 12 s.
+func TestStillScreenKeyframe(t *testing.T) {
+	Init()
+	enc, err := PickEncoder("x264enc")
+	if err != nil {
+		t.Skip(err)
+	}
+	layers := make([]Layer, NumLayers)
+	layers[High] = Layer{Width: 640, Height: 360, FPS: 30, BitrateKbs: 800}
+	layers[Low] = Layer{Width: 320, Height: 180, FPS: 15, BitrateKbs: 300}
+	var mu sync.Mutex
+	keys := make([][]time.Time, NumLayers)
+	vs, err := startVideoChain(changeFeed, ChainCPU, layers, enc, "", func(layer int, au AccessUnit) {
+		if annexBKey(au.Data) {
+			mu.Lock()
+			keys[layer] = append(keys[layer], time.Now())
+			mu.Unlock()
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vs.Stop()
+	feed, err := vs.element("feed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 15; i++ {
+		pushChange(t, feed, byte(16+i))
+		time.Sleep(time.Second / 30)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	for _, l := range []int{High, Low} {
+		at := time.Now()
+		vs.ForceKeyframe(l)
+		time.Sleep(time.Second)
+		mu.Lock()
+		first := time.Duration(-1)
+		for _, k := range keys[l] {
+			if k.After(at) {
+				first = k.Sub(at)
+				break
+			}
+		}
+		mu.Unlock()
+		t.Logf("layer %d: keyframe %v after asking", l, first)
+		if first < 0 || first > 300*time.Millisecond {
+			t.Errorf("layer %d: keyframe %v after asking on a still screen, want within 300ms", l, first)
 		}
 	}
 }

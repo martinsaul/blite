@@ -90,8 +90,9 @@ type Backend interface {
 	SetHideChangelog(on bool) error
 	// SetPortMap sets "Open a port on my router automatically" (kept on disk).
 	SetPortMap(on bool) error
-	// SendLogsNow uploads our recent logs for the developers.
-	SendLogsNow(ctx context.Context) error
+	// SendLogsNow uploads our recent logs for the developers; anon leaves
+	// out names, rooms, servers and this computer's names.
+	SendLogsNow(ctx context.Context, anon bool) error
 	// OpenLogFolder shows the log folder in the file manager.
 	OpenLogFolder() error
 	// Diagnostics is a text block for bug reports.
@@ -294,7 +295,9 @@ func Start(be Backend, port int, log *slog.Logger) (*Server, error) {
 		}
 		return s.be.SetRoomSecurity(b.RequirePassword, b.Password, b.E2EE == nil || *b.E2EE)
 	})))
-	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error { return s.be.SendLogsNow(r.Context()) })))
+	mux.Handle("POST /api/logs/send", s.authed(s.post(func(r *http.Request) error {
+		return s.be.SendLogsNow(r.Context(), r.URL.Query().Get("anonymize") == "1")
+	})))
 	mux.Handle("POST /api/logs/open", s.authed(s.post(func(*http.Request) error { return s.be.OpenLogFolder() })))
 	mux.Handle("POST /api/relay", s.authed(s.post(func(r *http.Request) error {
 		var b struct {

@@ -14,6 +14,8 @@
  "already in a session; leave it first": "sudah ada di sesi; keluar dulu",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Sudah ada di salah satunya? Server Discord itu belum punya bot Bellion, jadi Bellion tidak bisa melihatmu di sana. Minta admin server untuk menambahkannya.",
  "An idea or something you'd like added": "Ide atau sesuatu yang ingin kamu tambahkan",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Anonimkan: hilangkan nama, kode ruang, server, dan nama komputer ini",
+ "Anonymized logs may keep us from finding the problem.": "Log yang dianonimkan bisa membuat kami tidak menemukan masalahnya.",
  "app audio sharing is not available on this OS yet": "berbagi audio aplikasi belum tersedia di OS ini",
  "Applies to your next session.": "Berlaku pada sesi berikutnya.",
  "Applies when starting a new session.": "Berlaku saat memulai sesi baru.",

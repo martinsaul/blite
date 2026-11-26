@@ -14,6 +14,8 @@
  "already in a session; leave it first": "bạn đã ở trong một phiên; hãy rời phiên đó trước",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "Bạn đã ở trong một kênh rồi? Máy chủ Discord đó chưa có bot Bellion nên Bellion không thấy bạn ở đó. Hãy nhờ quản trị viên máy chủ thêm bot.",
  "An idea or something you'd like added": "Ý tưởng hoặc tính năng bạn muốn thêm",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "Ẩn danh: bỏ tên, mã phòng, máy chủ và tên máy tính này",
+ "Anonymized logs may keep us from finding the problem.": "Nhật ký ẩn danh có thể khiến chúng tôi không tìm ra vấn đề.",
  "app audio sharing is not available on this OS yet": "chia sẻ âm thanh ứng dụng chưa có trên hệ điều hành này",
  "Applies to your next session.": "Áp dụng cho phiên tiếp theo của bạn.",
  "Applies when starting a new session.": "Áp dụng khi bắt đầu phiên mới.",

@@ -35,6 +35,9 @@ type appSettings struct {
 	SelfView string `json:"selfView,omitempty"`
 	// Presets are the user's own quality presets (BuiltinPresets aren't kept).
 	Presets []QualityPreset `json:"presets,omitempty"`
+	// AnonymizeLogs: reports (Send logs, crash reports) leave out names,
+	// room codes, servers, window titles and this computer's names.
+	AnonymizeLogs bool `json:"anonymizeLogs,omitempty"`
 }
 
 func settingsFile() (string, error) {

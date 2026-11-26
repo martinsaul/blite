@@ -98,7 +98,7 @@ list says *Relays: Group relay relays for N people.* Ctrl+C leaves the room clea
 | `-volunteer` | Volunteer as relay as soon as it's in |
 | `-source none` | Share nothing. Required: otherwise it tries to share its screen and, without a display, stops right away |
 | `-view none` | Show and play nothing (no windows, no decoding) |
-| `-name NAME` | Its name in the People list (default: the computer's name) |
+| `-name NAME` | Its name in the People list (default: two random words, e.g. Quiet Otter) |
 | `-relay-upload-kbps N` | Its upload in kbit/s: decides how many members it serves; it never sends faster than this |
 | `-udp-port N` | UDP port for all connections (default 30471, or the next free one) |
 

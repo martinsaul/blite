@@ -136,3 +136,15 @@ func TestPortMappingToggleKeepsFixedLocalPort(t *testing.T) {
 	p.release()
 	p.release()
 }
+
+func TestUsableInterface(t *testing.T) {
+	for name, want := range map[string]bool{
+		"eth0": true, "enp3s0": true, "wlan0": true, "Wi-Fi": true, "Ethernet": true, "tailscale0": true,
+		"docker0": false, "br-1a2b3c": false, "veth9f8e7d": false, "virbr0": false, "lxcbr0": false,
+		"lxdbr0": false, "cni0": false, "podman0": false, "vEthernet (WSL)": false,
+	} {
+		if got := usableInterface(name); got != want {
+			t.Errorf("usableInterface(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

@@ -14,6 +14,8 @@
  "already in a session; leave it first": "أنت في جلسة بالفعل؛ غادرها أولًا",
  "Already in one? That Discord server doesn't have the Bellion bot, so Bellion can't see you there. Ask a server admin to add it.": "هل أنت في قناة بالفعل؟ خادم Discord هذا لا يحتوي على بوت Bellion، لذا لا يستطيع Bellion رؤيتك هناك. اطلب من أحد مشرفي الخادم إضافته.",
  "An idea or something you'd like added": "فكرة أو شيء تودّ إضافته",
+ "Anonymize: leave out names, room codes, servers and this computer's name": "إخفاء الهوية: حذف الأسماء ورموز الغرف والخوادم واسم هذا الكمبيوتر",
+ "Anonymized logs may keep us from finding the problem.": "قد تمنعنا السجلات المجهولة من العثور على المشكلة.",
  "app audio sharing is not available on this OS yet": "مشاركة صوت التطبيقات غير متاحة على نظام التشغيل هذا بعد",
  "Applies to your next session.": "يُطبَّق في جلستك القادمة.",
  "Applies when starting a new session.": "يُطبَّق عند بدء جلسة جديدة.",

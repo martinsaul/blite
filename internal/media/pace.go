@@ -2,6 +2,7 @@ package media
 
 import (
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"blite/internal/gst"
@@ -30,6 +31,7 @@ type pacer struct {
 	fresh   time.Time     // when last came
 	pushed  time.Time     // when a frame last went out
 	slot    time.Time     // the earliest the next new frame goes out
+	again   atomic.Bool   // repeat asked: send last again, as if it were new
 }
 
 // pacerIdle is the longest a pacer waits for a frame at once.
@@ -37,23 +39,36 @@ const pacerIdle = 100 * time.Millisecond
 
 // paceCapture starts pacing a captureBranch of p at fps. Call it before
 // p.start.
-func paceCapture(p *Pipeline, fps int) error {
+func paceCapture(p *Pipeline, fps int) (*pacer, error) {
 	in, err := p.element("fresh")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out, err := p.element("paced")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pc := &pacer{in: in, out: out, fps: fps, frame: time.Second / time.Duration(fps), window: maxDup(fps)}
 	p.goLoop(pc.step)
 	p.atStop(func() { pc.last.Free() })
-	return nil
+	return pc, nil
+}
+
+// repeat sends the newest frame again, with its repeats, as if it had just
+// come. An encoder asked for a keyframe makes it from its next frame, and a
+// still screen gives none: a viewer who joined or switched layer saw
+// nothing until the screen changed.
+func (pc *pacer) repeat() {
+	if pc != nil {
+		pc.again.Store(true)
+	}
 }
 
 // step waits for a frame until the next one is due out, or sends it.
 func (pc *pacer) step() bool {
+	if pc.again.Swap(false) && pc.last != nil {
+		pc.pending, pc.fresh = true, time.Now()
+	}
 	if d := pc.wait(time.Now()); d > 0 {
 		s, err := pc.in.PullSample(min(d, pacerIdle))
 		switch {
