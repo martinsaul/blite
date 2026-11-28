@@ -1,6 +1,8 @@
 package room
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -8,6 +10,8 @@ import (
 
 	"blite/internal/proto"
 )
+
+var bg = context.Background()
 
 type box struct {
 	mu   sync.Mutex
@@ -46,30 +50,30 @@ func TestCodeRoundTrip(t *testing.T) {
 
 func TestCreateJoinErrors(t *testing.T) {
 	m := NewManager(time.Minute)
-	if _, err := m.Create("abc", "a", "", "", 0, false, &box{}); err != ErrBadRequest {
+	if _, err := m.Create(bg, "abc", "a", "", "", 0, false, &box{}); err != ErrBadRequest {
 		t.Fatalf("short password: %v", err)
 	}
-	if _, err := m.Create(pw, "", "", "", 0, false, &box{}); err != ErrBadRequest {
+	if _, err := m.Create(bg, pw, "", "", "", 0, false, &box{}); err != ErrBadRequest {
 		t.Fatalf("empty name: %v", err)
 	}
-	s, err := m.Create(pw, "alice", "k1", "", 0, false, &box{})
+	s, err := m.Create(bg, pw, "alice", "k1", "", 0, false, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Join("ZZZZZZZZ", pw, "bob", "", "", 0, &box{}); err != ErrNoRoom {
+	if _, err := m.Join(bg, "ZZZZZZZZ", pw, "bob", "", "", 0, &box{}); err != ErrNoRoom {
 		t.Fatalf("no room: %v", err)
 	}
-	if _, err := m.Join(s.Room, "wrong password", "bob", "", "", 0, &box{}); err != ErrBadPassword {
+	if _, err := m.Join(bg, s.Room, "wrong password", "bob", "", "", 0, &box{}); err != ErrBadPassword {
 		t.Fatalf("bad password: %v", err)
 	}
 	// No cap by default; the operator's cap counts everyone.
 	for i := 1; i < 12; i++ {
-		if _, err := m.Join(s.Room, pw, "p", "", "", 0, &box{}); err != nil {
+		if _, err := m.Join(bg, s.Room, pw, "p", "", "", 0, &box{}); err != nil {
 			t.Fatalf("join %d: %v", i, err)
 		}
 	}
 	m.MaxPeers = 12
-	if _, err := m.Join(s.Room, pw, "thirteenth", "", "", 0, &box{}); err != ErrRoomFull {
+	if _, err := m.Join(bg, s.Room, pw, "thirteenth", "", "", 0, &box{}); err != ErrRoomFull {
 		t.Fatalf("full: %v", err)
 	}
 }
@@ -92,10 +96,10 @@ func TestRelayPausesInBigRooms(t *testing.T) {
 	m := NewManager(time.Minute)
 	m.MinRelayBuild = 0
 	a := &box{}
-	sa, _ := m.Create(pw, "alice", "ka", "", 0, false, a)
+	sa, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, a)
 	var last Seat
 	for i := 1; i < proto.RelayMaxPeers; i++ {
-		last, _ = m.Join(sa.Room, pw, "p", "", "", 0, &box{})
+		last, _ = m.Join(bg, sa.Room, pw, "p", "", "", 0, &box{})
 	}
 	if err := m.Volunteer(sa.Room, sa.PeerID, true); err != nil {
 		t.Fatal(err)
@@ -103,7 +107,7 @@ func TestRelayPausesInBigRooms(t *testing.T) {
 	if tp, _ := lastTopology(a); tp.Relay() != sa.PeerID || tp.Paused {
 		t.Fatalf("relay at %d members: %+v", proto.RelayMaxPeers, tp)
 	}
-	big, err := m.Join(sa.Room, pw, "sixth", "", "", 0, &box{})
+	big, err := m.Join(bg, sa.Room, pw, "sixth", "", "", 0, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,8 +126,8 @@ func TestRelayPausesInBigRooms(t *testing.T) {
 func TestJoinAnnouncesAndListsPeers(t *testing.T) {
 	m := NewManager(time.Minute)
 	a := &box{}
-	sa, _ := m.Create(pw, "alice", "ka", "", 0, false, a)
-	sb, err := m.Join(sa.Room, pw, "bob", "kb", "", 0, &box{})
+	sa, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, a)
+	sb, err := m.Join(bg, sa.Room, pw, "bob", "kb", "", 0, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,9 +146,9 @@ func TestJoinAnnouncesAndListsPeers(t *testing.T) {
 func TestRelayIsolation(t *testing.T) {
 	m := NewManager(time.Minute)
 	a, b, x := &box{}, &box{}, &box{}
-	sa, _ := m.Create(pw, "alice", "", "", 0, false, a)
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", 0, b)
-	sx, _ := m.Create(pw, "mallory", "", "", 0, false, x)
+	sa, _ := m.Create(bg, pw, "alice", "", "", 0, false, a)
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", 0, b)
+	sx, _ := m.Create(bg, pw, "mallory", "", "", 0, false, x)
 
 	if !m.Relay(sa.Room, sa.PeerID, sb.PeerID, "hi") {
 		t.Fatal("same-room relay failed")
@@ -165,15 +169,15 @@ func TestEmptyRoomGrace(t *testing.T) {
 	m := NewManager(time.Minute)
 	now := time.Unix(1_000_000, 0)
 	m.now = func() time.Time { return now }
-	sa, _ := m.Create(pw, "alice", "", "", 0, false, &box{})
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", 0, &box{})
+	sa, _ := m.Create(bg, pw, "alice", "", "", 0, false, &box{})
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", 0, &box{})
 	m.Leave(sa.Room, sa.PeerID)
 	m.Leave(sb.Room, sb.PeerID)
 
 	// Empty but inside the grace period: the link still works.
 	now = now.Add(DefaultEmptyGrace - time.Second)
 	m.Sweep()
-	sc, err := m.Join(sa.Room, pw, "carol", "", "", 0, &box{})
+	sc, err := m.Join(bg, sa.Room, pw, "carol", "", "", 0, &box{})
 	if err != nil {
 		t.Fatalf("join inside empty grace: %v", err)
 	}
@@ -189,7 +193,7 @@ func TestEmptyRoomGrace(t *testing.T) {
 	if m.Count() != 0 {
 		t.Fatal("room survived its empty grace period")
 	}
-	if _, err := m.Join(sa.Room, pw, "dave", "", "", 0, &box{}); err != ErrNoRoom {
+	if _, err := m.Join(bg, sa.Room, pw, "dave", "", "", 0, &box{}); err != ErrNoRoom {
 		t.Fatalf("join ended room: %v", err)
 	}
 }
@@ -200,8 +204,8 @@ func TestResumeAndSweep(t *testing.T) {
 	m.now = func() time.Time { return now }
 
 	a1, b := &box{}, &box{}
-	sa, _ := m.Create(pw, "alice", "", "", 0, false, a1)
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", 0, b)
+	sa, _ := m.Create(bg, pw, "alice", "", "", 0, false, a1)
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", 0, b)
 
 	m.Disconnected(sa.Room, sa.PeerID, a1)
 	if _, err := m.Resume(sa.Room, sa.PeerID, "wrong", &box{}); err != ErrResumeFailed {
@@ -250,9 +254,9 @@ func TestRelayQueue(t *testing.T) {
 	m := NewManager(time.Minute)
 	b := DefaultMinRelayBuild
 	a, bb, c := &box{}, &box{}, &box{}
-	sa, _ := m.Create(pw, "alice", "", "", b, false, a)
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", b, bb)
-	sc, _ := m.Join(sa.Room, pw, "carol", "", "", b, c)
+	sa, _ := m.Create(bg, pw, "alice", "", "", b, false, a)
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", b, bb)
+	sc, _ := m.Join(bg, sa.Room, pw, "carol", "", "", b, c)
 
 	if err := m.Volunteer(sa.Room, sb.PeerID, true); err != nil {
 		t.Fatal(err)
@@ -265,7 +269,7 @@ func TestRelayQueue(t *testing.T) {
 	}
 
 	// A late joiner learns the queue from its seat.
-	sd, err := m.Join(sa.Room, pw, "dave", "", "", b, &box{})
+	sd, err := m.Join(bg, sa.Room, pw, "dave", "", "", b, &box{})
 	if err != nil || !slices.Equal(sd.RelayQueue, []string{sb.PeerID, sc.PeerID}) {
 		t.Fatalf("dave: %v %v", err, sd.RelayQueue)
 	}
@@ -289,8 +293,8 @@ func TestRelayQueue(t *testing.T) {
 func TestRelayBuildGate(t *testing.T) {
 	m := NewManager(time.Minute)
 	b := DefaultMinRelayBuild
-	sa, _ := m.Create(pw, "alice", "", "", b, false, &box{})
-	sOld, _ := m.Join(sa.Room, pw, "old", "", "", b-1, &box{})
+	sa, _ := m.Create(bg, pw, "alice", "", "", b, false, &box{})
+	sOld, _ := m.Join(bg, sa.Room, pw, "old", "", "", b-1, &box{})
 	if err := m.Volunteer(sa.Room, sa.PeerID, true); err != ErrRelayUnsupported {
 		t.Fatalf("volunteer with an old member: %v", err)
 	}
@@ -298,47 +302,47 @@ func TestRelayBuildGate(t *testing.T) {
 	if err := m.Volunteer(sa.Room, sa.PeerID, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Join(sa.Room, pw, "old", "", "", b-1, &box{}); err != ErrUpdateRequired {
+	if _, err := m.Join(bg, sa.Room, pw, "old", "", "", b-1, &box{}); err != ErrUpdateRequired {
 		t.Fatalf("old join during relay: %v", err)
 	}
 	m.Volunteer(sa.Room, sa.PeerID, false)
-	if _, err := m.Join(sa.Room, pw, "old", "", "", b-1, &box{}); err != nil {
+	if _, err := m.Join(bg, sa.Room, pw, "old", "", "", b-1, &box{}); err != nil {
 		t.Fatalf("old join in mesh: %v", err)
 	}
 }
 
 func TestE2EERoomRefusesOldBuilds(t *testing.T) {
 	m := NewManager(time.Minute)
-	if _, err := m.Create(pw, "old", "k0", "", proto.E2EEBuild-1, true, &box{}); err != ErrBadRequest {
+	if _, err := m.Create(bg, pw, "old", "k0", "", proto.E2EEBuild-1, true, &box{}); err != ErrBadRequest {
 		t.Fatalf("old build created an encrypted room: %v", err)
 	}
-	a, err := m.Create(pw, "alice", "ka", "", proto.E2EEBuild, true, &box{})
+	a, err := m.Create(bg, pw, "alice", "ka", "", proto.E2EEBuild, true, &box{})
 	if err != nil || !a.E2EE {
 		t.Fatalf("create: %+v %v", a, err)
 	}
-	if _, err := m.Join(a.Room, pw, "bob", "kb", "", proto.E2EEBuild-1, &box{}); err != ErrUpdateRequired {
+	if _, err := m.Join(bg, a.Room, pw, "bob", "kb", "", proto.E2EEBuild-1, &box{}); err != ErrUpdateRequired {
 		t.Fatalf("old build joined: %v", err)
 	}
-	b, err := m.Join(a.Room, pw, "carol", "kc", "", proto.E2EEBuild, &box{})
+	b, err := m.Join(bg, a.Room, pw, "carol", "kc", "", proto.E2EEBuild, &box{})
 	if err != nil || !b.E2EE {
 		t.Fatalf("join: %+v %v", b, err)
 	}
 	// Rooms without encryption still take old builds.
-	c, _ := m.Create(pw, "dave", "kd", "", proto.E2EEBuild, false, &box{})
-	if _, err := m.Join(c.Room, pw, "erin", "ke", "", 30, &box{}); err != nil {
+	c, _ := m.Create(bg, pw, "dave", "kd", "", proto.E2EEBuild, false, &box{})
+	if _, err := m.Join(bg, c.Room, pw, "erin", "ke", "", 30, &box{}); err != nil {
 		t.Fatalf("old build refused from a plain room: %v", err)
 	}
 }
 
 func TestOpenRoom(t *testing.T) {
 	m := NewManager(time.Minute)
-	s, err := m.Create("", "alice", "k1", "", 0, false, &box{})
+	s, err := m.Create(bg, "", "alice", "k1", "", 0, false, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// No password, or any password an older client sends, gets in.
 	for _, p := range []string{"", "whatever"} {
-		if _, err := m.Join(s.Room, p, "bob", "", "", 0, &box{}); err != nil {
+		if _, err := m.Join(bg, s.Room, p, "bob", "", "", 0, &box{}); err != nil {
 			t.Fatalf("join with %q: %v", p, err)
 		}
 	}
@@ -349,7 +353,7 @@ func TestChannelTie(t *testing.T) {
 	if _, ok := m.Channel("123456789"); ok {
 		t.Fatal("no room yet")
 	}
-	s, _ := m.Create("", "alice", "k1", "", 0, false, &box{})
+	s, _ := m.Create(bg, "", "alice", "k1", "", 0, false, &box{})
 	if err := m.TieChannel(s.Room, "123456789"); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +361,7 @@ func TestChannelTie(t *testing.T) {
 	if !ok || cr.Room != s.Room || !cr.Open || cr.People != 1 {
 		t.Fatalf("Channel = %+v %v", cr, ok)
 	}
-	s2, _ := m.Create(pw, "bob", "k2", "", 0, false, &box{})
+	s2, _ := m.Create(bg, pw, "bob", "k2", "", 0, false, &box{})
 	if err := m.TieChannel(s2.Room, "123456789"); err != ErrChannelBusy {
 		t.Fatalf("second tie: %v", err)
 	}
@@ -378,7 +382,7 @@ func (b *replBox) CloseWhenSent() { b.closed++ }
 func TestResumeClosesReplaced(t *testing.T) {
 	m := NewManager(time.Minute)
 	old := &replBox{}
-	a, _ := m.Create("", "alice", "", "", 0, false, old)
+	a, _ := m.Create(bg, "", "alice", "", "", 0, false, old)
 	if _, err := m.Resume(a.Room, a.PeerID, a.Resume, old); err != nil || old.closed != 0 {
 		t.Fatalf("same connection: err %v, closed %d", err, old.closed)
 	}
@@ -393,8 +397,8 @@ func TestProbe(t *testing.T) {
 	m.now = func() time.Time { return now }
 
 	a := &box{}
-	sa, _ := m.Create(pw, "alice", "ka", "", 0, false, a)
-	so, _ := m.Create("", "open", "ko", "", 0, false, &box{})
+	sa, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, a)
+	so, _ := m.Create(bg, "", "open", "ko", "", 0, false, &box{})
 
 	if !m.Probe(sa.Room, pw) {
 		t.Fatal("probe with right password failed")
@@ -422,5 +426,88 @@ func TestProbe(t *testing.T) {
 	m.Sweep()
 	if m.Probe(sa.Room, pw) {
 		t.Fatal("probe kept empty room alive past EmptyGrace")
+	}
+}
+
+// MaxRooms stops Create once the server holds that many rooms; joining and
+// hosted fixed rooms still work.
+func TestMaxRooms(t *testing.T) {
+	m := NewManager(time.Minute)
+	m.MaxRooms = 2
+	var seats []Seat
+	for i := range 2 {
+		s, err := m.Create(bg, pw, "alice", "", "", 0, false, &box{})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		seats = append(seats, s)
+	}
+	if _, err := m.Create(bg, pw, "carol", "", "", 0, false, &box{}); err != ErrServerFull {
+		t.Fatalf("third create: %v", err)
+	}
+	if ErrServerFull.Error() != proto.ErrRateLimited {
+		t.Fatalf("ErrServerFull goes out as %q", ErrServerFull)
+	}
+	if _, err := m.Join(bg, seats[0].Room, pw, "bob", "", "", 0, &box{}); err != nil {
+		t.Fatalf("join at the cap: %v", err)
+	}
+	if _, err := m.CreateFixed(bg, NewCode(), pw, "relay", "khost", "", 0, false, nil, &box{}); err != nil {
+		t.Fatalf("hosted room at the cap: %v", err)
+	}
+}
+
+func TestPasswordDeriveTimeoutAndContext(t *testing.T) {
+	m := NewManager(time.Minute)
+	sa, err := m.Create(bg, pw, "alice", "ka", "", 0, false, &box{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Occupy all 4 Argon2 slots.
+	for range cap(hashSem) {
+		hashSem <- struct{}{}
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			for range cap(hashSem) {
+				<-hashSem
+			}
+		}
+	}
+	defer release()
+
+	// Caller context expires while waiting for a slot.
+	cctx, cancel := context.WithTimeout(bg, 25*time.Millisecond)
+	defer cancel()
+	if _, err := m.Join(cctx, sa.Room, pw, "bob", "", "", 0, &box{}); !errors.Is(err, ErrServerBusy) || err.Error() != proto.ErrRateLimited {
+		t.Fatalf("join with full hashSem: %v", err)
+	}
+	if _, err := m.ProbeContext(cctx, sa.Room, pw); !errors.Is(err, ErrServerBusy) {
+		t.Fatalf("probe with cancelled ctx: %v", err)
+	}
+
+	// derive's own timeout fires even when ctx has no deadline.
+	oldTimeout := hashTimeout
+	hashTimeout = 25 * time.Millisecond
+	defer func() { hashTimeout = oldTimeout }()
+	if _, err := m.Create(bg, pw, "carol", "", "", 0, false, &box{}); !errors.Is(err, ErrServerBusy) {
+		t.Fatalf("create past hashTimeout: %v", err)
+	}
+
+	// Open rooms skip Argon2, so they still work while hashSem is full.
+	so, err := m.Create(bg, "", "open", "", "", 0, false, &box{})
+	if err != nil {
+		t.Fatalf("open create while hashSem full: %v", err)
+	}
+	if _, err := m.Join(bg, so.Room, "", "bob", "", "", 0, &box{}); err != nil {
+		t.Fatalf("open join while hashSem full: %v", err)
+	}
+
+	release()
+	hashTimeout = oldTimeout
+	if _, err := m.Join(bg, sa.Room, pw, "bob", "", "", 0, &box{}); err != nil {
+		t.Fatalf("join after slots released: %v", err)
 	}
 }

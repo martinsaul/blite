@@ -102,8 +102,8 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   Typing just the room code works too, and the home screen lists your recent
   rooms for one-click rejoining.
 - End-to-end encryption, on by default: each sender encrypts its media with
-  keys only room members get, so a TURN server or relay passing it on can't
-  read it.
+  keys only room members get, so a TURN server passing it on can't read it;
+  a relay is a room member and can.
 - Each person has an identity key; names show with a 4-digit tag derived from
   it (like Alice#4417), and Bellion Share refuses to connect to someone whose
   encryption keys don't match their identity. A safety code everyone can read
@@ -143,12 +143,19 @@ The full guide, with upload sizing, a systemd unit and troubleshooting:
   allowed (`-udp-port 0` turns that off); STUN by default, TURN for peers
   behind strict NAT. As in any peer-to-peer app, people in a session learn
   each other's IP addresses.
-- Send feedback and logs from the **?** menu. Room passwords are redacted
-  from the log before it's written and from everything the app uploads. On
-  Windows, a crash guard runs Bellion Share and keeps small crash dumps
-  locally (never uploaded; no full memory, at most two, for up to 14 days).
-- Release binaries on bellion.app are built privately, without public CI
-  attestations; for full certainty, build from this repository.
+- Send feedback and logs from the **?** menu. After a crash or unclean exit,
+  the app automatically sends the tail of that log on the next start
+  (including your name and tag, unless you chose **Anonymize** when sending
+  logs). Room passwords are redacted from the log before it's written and from
+  everything the app uploads. On Windows, a crash guard runs Bellion Share
+  and keeps small crash dumps locally (never uploaded; no full memory, at most
+  two, for up to 14 days).
+- Release binaries are built on GitHub Actions
+  ([`.github/workflows/release.yml`](.github/workflows/release.yml)) with build
+  provenance attestations. Verify any release file with
+  `gh attestation verify <file> --repo martinsaul/blite`; the `.deb` also has
+  a detached GPG signature (`.deb.asc`) signed with the key in
+  [`release/bellion-deb-signing.asc`](release/bellion-deb-signing.asc).
 
 **Platforms:** Windows 10 and 11 (64-bit), and Linux on X11 (Ubuntu 24.04,
 Mint 22 or newer for the .deb; Wayland sessions aren't supported yet). The
@@ -237,5 +244,8 @@ terms of the GNU Affero General Public License as published by the Free
 Software Foundation, either version 3 of the License, or (at your option) any
 later version. See [LICENSE](LICENSE).
 
-The Windows release bundles GStreamer and its dependencies (LGPL and other
-licenses), which keep their own terms.
+The Windows release bundles GStreamer and its dependencies (LGPL, GPL for
+x264, and other licenses), which keep their own terms. Every package has a
+`licenses` folder (`/usr/share/doc/blite` in the `.deb`) with these texts, the
+Go modules' licenses (made by `scripts/third-party-notices.py`) and where to
+get the source.

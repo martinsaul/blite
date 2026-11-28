@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,12 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 
@@ -334,7 +338,7 @@ func TestJoinPage(t *testing.T) {
 	_, url := newTestServer(t)
 	base := "http" + strings.TrimPrefix(url, "ws")
 
-	res, err := http.Get(base + "/j/7k3q-x9md")
+	res, err := http.Get(base + "/j/7k3q-x9md?e2ee=1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +349,16 @@ func TestJoinPage(t *testing.T) {
 	}
 	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") {
 		t.Fatalf("CSP: %q", csp)
+	}
+
+	jsRes, err := http.Get(base + "/static/join.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsBody, _ := io.ReadAll(jsRes.Body)
+	jsRes.Body.Close()
+	if jsRes.StatusCode != 200 || !strings.Contains(string(jsBody), `&e2ee=1`) {
+		t.Fatalf("join.js missing e2ee passthrough: %d %s", jsRes.StatusCode, jsBody)
 	}
 
 	res, _ = http.Get(base + "/j/%3Cscript%3E")
@@ -603,3 +617,385 @@ func TestDownloadPageSite(t *testing.T) {
 		}
 	}
 }
+
+// With TrustedProxies, only a listed peer's headers count, and in
+// X-Forwarded-For the client is the last hop that isn't a trusted proxy.
+func TestTrustedProxies(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := New(Config{TrustProxy: true, Log: quiet, TrustedProxies: []netip.Prefix{
+		netip.MustParsePrefix("172.18.0.0/16"), netip.MustParsePrefix("10.9.9.9/32"),
+	}})
+	cases := []struct {
+		remote string
+		hdr    map[string]string
+		want   string
+	}{
+		{"203.0.113.5:4000", map[string]string{"X-Forwarded-For": "1.2.3.4"}, "203.0.113.5"},
+		{"203.0.113.5:4000", map[string]string{"CF-Connecting-IP": "1.2.3.4"}, "203.0.113.5"},
+		{"172.18.0.3:4000", map[string]string{"CF-Connecting-IP": "198.51.100.7"}, "198.51.100.7"},
+		{"172.18.0.3:4000", map[string]string{"X-Forwarded-For": "1.2.3.4, 198.51.100.7, 10.9.9.9"}, "198.51.100.7"},
+		{"172.18.0.3:4000", map[string]string{"X-Forwarded-For": "10.9.9.9"}, "10.9.9.9"},
+		{"172.18.0.3:4000", nil, "172.18.0.3"},
+		{"[::ffff:172.18.0.3]:4000", map[string]string{"X-Forwarded-For": "198.51.100.8"}, "198.51.100.8"},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("GET", "/ws", nil)
+		r.RemoteAddr = c.remote
+		for k, v := range c.hdr {
+			r.Header.Set(k, v)
+		}
+		if got := s.clientIP(r); got != c.want {
+			t.Errorf("%s %v: client %s, want %s", c.remote, c.hdr, got, c.want)
+		}
+	}
+	// Without TrustProxy, headers never count.
+	plain := New(Config{Log: quiet})
+	r := httptest.NewRequest("GET", "/ws", nil)
+	r.RemoteAddr = "172.18.0.3:4000"
+	r.Header.Set("CF-Connecting-IP", "1.2.3.4")
+	if got := plain.clientIP(r); got != "172.18.0.3" {
+		t.Errorf("no TrustProxy: %s", got)
+	}
+}
+
+func TestUnseatedWSTimeout(t *testing.T) {
+	s := New(Config{Log: quietLog()})
+	s.firstMsgTimeout = 80 * time.Millisecond
+	url := serve(t, s)
+
+	// Idle socket: closed shortly after firstMsgTimeout.
+	idle := dial(t, url)
+	rctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := idle.ws.Read(rctx); err == nil || rctx.Err() != nil {
+		t.Fatalf("idle unseated socket stayed open: %v", err)
+	}
+
+	// Bad message doesn't reset or clear the unseated deadline.
+	bad := dial(t, url)
+	bad.send(map[string]any{"t": "bogus"})
+	if e := bad.expect(proto.TError); e["code"] != proto.ErrBadRequest {
+		t.Fatalf("bad first msg: %v", e)
+	}
+	rctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if _, _, err := bad.ws.Read(rctx2); err == nil || rctx2.Err() != nil {
+		t.Fatalf("unseated socket after error stayed open: %v", err)
+	}
+
+	// Seated socket stays alive well past firstMsgTimeout.
+	seated := dial(t, url)
+	seated.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
+	seated.expect(proto.TWelcome)
+	time.Sleep(180 * time.Millisecond)
+	seated.send(proto.Signal{T: proto.TSignal, To: "nobody", Data: []byte(`{}`)})
+	if e := seated.expect(proto.TError); e["code"] != proto.ErrNoPeer {
+		t.Fatalf("seated socket after timeout window: %v", e)
+	}
+}
+
+func TestWSConnLimits(t *testing.T) {
+	s := New(Config{TrustProxy: true, MaxConnsPerIP: 2, MaxConns: 3, Log: quietLog()})
+	url := serve(t, s)
+	dialFrom := func(ip string) (*websocket.Conn, int) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws, resp, err := websocket.Dial(ctx, url+"/ws", &websocket.DialOptions{
+			HTTPHeader: http.Header{"X-Forwarded-For": {ip}},
+		})
+		if err != nil {
+			if resp == nil {
+				t.Fatal(err)
+			}
+			return nil, resp.StatusCode
+		}
+		t.Cleanup(func() { ws.CloseNow() })
+		return ws, 0
+	}
+
+	ws1, st := dialFrom("198.51.100.1")
+	if st != 0 {
+		t.Fatalf("conn 1: %d", st)
+	}
+	if _, st := dialFrom("198.51.100.1"); st != 0 {
+		t.Fatalf("conn 2: %d", st)
+	}
+	if _, st := dialFrom("198.51.100.1"); st != http.StatusTooManyRequests {
+		t.Fatalf("3rd conn from same IP: status %d, want 429", st)
+	}
+	if _, st := dialFrom("198.51.100.2"); st != 0 {
+		t.Fatalf("conn 3 (other IP): %d", st)
+	}
+	if _, st := dialFrom("198.51.100.3"); st != http.StatusServiceUnavailable {
+		t.Fatalf("4th conn over total cap: status %d, want 503", st)
+	}
+
+	ws1.CloseNow()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.connMu.Lock()
+		n := s.conns
+		s.connMu.Unlock()
+		if n == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("conns did not drop after close: %d", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, st := dialFrom("198.51.100.1"); st != 0 {
+		t.Fatalf("after closing one conn: status %d", st)
+	}
+}
+
+func TestPasswordCheckRateLimit(t *testing.T) {
+	s := New(Config{TrustProxy: true, Log: quietLog()})
+	url := serve(t, s)
+	dialFrom := func(ip string) *client {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws, _, err := websocket.Dial(ctx, url+"/ws", &websocket.DialOptions{
+			HTTPHeader: http.Header{"X-Forwarded-For": {ip}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ws.CloseNow() })
+		return &client{t: t, ws: ws}
+	}
+
+	creator := dialFrom("10.0.0.1")
+	creator.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
+	code := creator.expect(proto.TWelcome)["room"].(string)
+
+	// Correct-password joins never touch failIP, yet pwIP caps them at 30/min.
+	for i := range 30 {
+		c := dialFrom("10.0.0.2")
+		c.send(proto.Join{T: proto.TJoin, Room: code, Password: pw, Name: "bob"})
+		c.expect(proto.TWelcome)
+		creator.expect(proto.TPeerJoined)
+		c.send(proto.Leave{T: proto.TLeave})
+		creator.expect(proto.TPeerLeft)
+		c.ws.CloseNow()
+		_ = i
+	}
+	c31 := dialFrom("10.0.0.2")
+	c31.send(proto.Join{T: proto.TJoin, Room: code, Password: pw, Name: "bob"})
+	if e := c31.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("31st password check: %v", e)
+	}
+	p31 := dialFrom("10.0.0.2")
+	p31.send(proto.Probe{T: proto.TProbe, Room: code, Password: pw})
+	if e := p31.expect(proto.TError); e["code"] != proto.ErrRateLimited {
+		t.Fatalf("probe from pwIP-blocked IP: %v", e)
+	}
+	other := dialFrom("10.0.0.3")
+	other.send(proto.Join{T: proto.TJoin, Room: code, Password: pw, Name: "carol"})
+	other.expect(proto.TWelcome)
+}
+
+func TestReportLimitsBudgetAndEscaping(t *testing.T) {
+	dir := t.TempDir()
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	logger := slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.Write(p)
+	}), nil))
+	s := New(Config{TrustProxy: true, ReportDir: dir, ReportMaxBytes: 900, Log: logger})
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	postIP := func(ip string, rep map[string]any) int {
+		b, _ := json.Marshal(rep)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/report", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", ip)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	baseRep := func() map[string]any {
+		return map[string]any{"platform": "linux", "build": 1, "kind": "crash", "log": "ok"}
+	}
+
+	// Field byte caps: 256 for short fields, 8 KiB for Note.
+	for _, f := range []string{"name", "kind", "version", "osVersion", "platform", "file"} {
+		r := baseRep()
+		r[f] = strings.Repeat("a", 257)
+		if got := postIP("10.1.0.1", r); got != http.StatusBadRequest {
+			t.Fatalf("%s 257 bytes: status %d, want 400", f, got)
+		}
+	}
+	rBadNote := baseRep()
+	rBadNote["note"] = strings.Repeat("n", (8<<10)+1)
+	if got := postIP("10.1.0.1", rBadNote); got != http.StatusBadRequest {
+		t.Fatalf("note > 8 KiB: status %d, want 400", got)
+	}
+
+	// SetEscapeHTML(false) and 64-byte log truncation (valid UTF-8 across multi-byte rune).
+	longName := strings.Repeat("a", 63) + "é" + strings.Repeat("b", 40) // 'é' starts at byte 63 (2 bytes -> cut at 63)
+	longKind := strings.Repeat("k", 100)
+	sEsc := New(Config{TrustProxy: true, ReportDir: t.TempDir(), Log: logger})
+	tsEsc := httptest.NewServer(sEsc)
+	defer tsEsc.Close()
+	rOK := map[string]any{
+		"platform": "linux", "build": 2, "kind": longKind, "name": longName,
+		"version": strings.Repeat("v", 256), "osVersion": strings.Repeat("o", 256),
+		"file": strings.Repeat("f", 256), "note": strings.Repeat("n", 8<<10),
+		"log": "panic: a < b && c > d",
+	}
+	bOK, _ := json.Marshal(rOK)
+	res, err := http.Post(tsEsc.URL+"/v1/report", "application/json", bytes.NewReader(bOK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("valid max-field report: status %d, want 202", res.StatusCode)
+	}
+	escFiles, _ := filepath.Glob(filepath.Join(sEsc.cfg.ReportDir, "*.json"))
+	if len(escFiles) != 1 {
+		t.Fatalf("esc files: %v", escFiles)
+	}
+	raw, _ := os.ReadFile(escFiles[0])
+	if !bytes.Contains(raw, []byte("panic: a < b && c > d")) || bytes.Contains(raw, []byte(`\u003c`)) || bytes.Contains(raw, []byte(`\u0026`)) {
+		t.Fatalf("HTML escaped in stored report: %s", raw)
+	}
+	logMu.Lock()
+	var logEntry map[string]any
+	json.Unmarshal(logBuf.Bytes(), &logEntry)
+	logMu.Unlock()
+	gotName, _ := logEntry["name"].(string)
+	gotKind, _ := logEntry["kind"].(string)
+	if len(gotName) > 64 || !utf8.ValidString(gotName) || gotName != strings.Repeat("a", 63) {
+		t.Fatalf("logged name = %q (len %d), want 63 'a's", gotName, len(gotName))
+	}
+	if len(gotKind) != 64 || gotKind != strings.Repeat("k", 64) {
+		t.Fatalf("logged kind = %q (len %d), want 64 'k's", gotKind, len(gotKind))
+	}
+
+	// Disk budget (s has ReportMaxBytes: 900): oversized single report -> 503;
+	// sequential and concurrent reports evict oldest first and stay within budget.
+	if got := postIP("10.1.0.2", map[string]any{"platform": "linux", "build": 1, "kind": "crash", "log": strings.Repeat("x", 1000)}); got != http.StatusServiceUnavailable {
+		t.Fatalf("report larger than ReportMaxBytes: status %d, want 503", got)
+	}
+
+	// Each small report is ~160 bytes; 900 bytes fits ~5, so posting 3 sequentially with spaced mtimes
+	// under a tighter 450-byte budget keeps the newest 2 and deletes the oldest.
+	dirSeq := t.TempDir()
+	sSeq := New(Config{TrustProxy: true, ReportDir: dirSeq, ReportMaxBytes: 420, Log: quietLog()})
+	tsSeq := httptest.NewServer(sSeq)
+	defer tsSeq.Close()
+	postSeq := func(tag string, mtime time.Time) {
+		b, _ := json.Marshal(map[string]any{"platform": "linux", "build": 1, "kind": tag, "log": strings.Repeat("z", 40)})
+		res, err := http.Post(tsSeq.URL+"/v1/report", "application/json", bytes.NewReader(b))
+		if err != nil || res.StatusCode != http.StatusAccepted {
+			t.Fatalf("post %s: %v %v", tag, res, err)
+		}
+		res.Body.Close()
+		fs, _ := filepath.Glob(filepath.Join(dirSeq, "*-"+tag+"-*.json"))
+		if len(fs) == 1 {
+			os.Chtimes(fs[0], mtime, mtime)
+		}
+	}
+	base := time.Now().Add(-time.Minute)
+	postSeq("first", base)
+	postSeq("second", base.Add(10*time.Second))
+	postSeq("third", base.Add(20*time.Second))
+
+	kept, _ := filepath.Glob(filepath.Join(dirSeq, "*.json"))
+	var names string
+	var seqBytes int64
+	for _, f := range kept {
+		names += filepath.Base(f) + " "
+		if st, err := os.Stat(f); err == nil {
+			seqBytes += st.Size()
+		}
+	}
+	if strings.Contains(names, "-first-") || !strings.Contains(names, "-third-") || seqBytes > 420 {
+		t.Fatalf("after budget eviction: files=%q bytes=%d", names, seqBytes)
+	}
+
+	// Concurrent requests cannot exceed ReportMaxBytes.
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			postIP(fmt.Sprintf("10.2.0.%d", i+1), map[string]any{
+				"platform": "linux", "build": i, "kind": "user",
+				"log": strings.Repeat("m", 80),
+				"zip": []byte("PK\x03\x04zzzzzzzz"),
+			})
+		}(i)
+	}
+	wg.Wait()
+	all, _ := os.ReadDir(dir)
+	var total int64
+	for _, e := range all {
+		if st, err := e.Info(); err == nil {
+			total += st.Size()
+		}
+	}
+	if total == 0 || total > 900 {
+		t.Fatalf("concurrent report bytes = %d, want 1..900", total)
+	}
+}
+
+func TestRunSweepsAllLimiters(t *testing.T) {
+	s := New(Config{DiscordClientID: "42", DiscordSecret: "shh", DiscordBotToken: "bot", Log: quietLog()})
+	s.sweepEvery = 15 * time.Millisecond
+	s.lookIP.Period = 5 * time.Millisecond
+	s.pwIP.Period = 5 * time.Millisecond
+	// Point the bot at a local server so Run doesn't dial Discord.
+	fake := httptest.NewServer(http.NotFoundHandler())
+	defer fake.Close()
+	s.discord.bot.APIURL = fake.URL
+
+	s.lookIP.Add("1.1.1.1")
+	s.pwIP.Add("2.2.2.2")
+	s.discord.mu.Lock()
+	s.discord.pending["expired"] = pendingLink{key: "k1", expires: time.Now().Add(-time.Second)}
+	s.discord.pendingByKey["k1"] = "expired"
+	s.discord.mu.Unlock()
+
+	if s.lookIP.Keys() != 1 || s.pwIP.Keys() != 1 {
+		t.Fatal("limiters did not record keys")
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.discord.mu.Lock()
+		n := len(s.discord.pending)
+		s.discord.mu.Unlock()
+		if n == 0 && s.lookIP.Keys() == 0 && s.pwIP.Keys() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("Run sweep incomplete: pending=%d lookIP=%d pwIP=%d", n, s.lookIP.Keys(), s.pwIP.Keys())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

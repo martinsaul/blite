@@ -58,6 +58,10 @@ type Info struct {
 // ErrInstalling: Install was called while an install is already running.
 var ErrInstalling = errors.New("an update is already being installed")
 
+// The oldest update helper we run: an older one, even if validly signed,
+// is refused so a replayed manifest can't bring back a fixed bug.
+func init() { molt.MinSwapBuild = 9 }
+
 // Updater checks for and installs updates for this Blite.
 type Updater struct {
 	c    *molt.Client

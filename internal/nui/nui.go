@@ -37,7 +37,7 @@ type Options struct {
 	Hidden bool
 	// Scene opens a secondary UI surface after the initial draw (for blite-uidemo):
 	// "sharesheet", "advanced", "panel", "gear", "help", "picker", "leave",
-	// "send-logs", "qr".
+	// "send-logs", "crash-ask", "qr".
 	Scene string
 	// Targets and TargetIcons replace what the source picker lists
 	// (capture.List and capture.Icons) for blite-uidemo; nil: the real ones.
@@ -53,6 +53,9 @@ type UI struct {
 	shown bool // the window showed once (Fyne thread)
 	// nameAsked: the first-start name question was shown (Fyne thread).
 	nameAsked bool
+	// crashAsked: the pending crash-report question was shown (Fyne thread).
+	crashAsked bool
+	scene      string
 
 	// closed: a quit was asked for (or Run returned). From then on nothing
 	// may queue work for the driver: once it has quit, fyne.Do runs the
@@ -90,7 +93,7 @@ func Run(a ui.Backend, o Options) {
 	fa := fapp.NewWithID("com.bellion.share")
 	icon := fyne.NewStaticResource("icon.png", iconPNG)
 	fa.SetIcon(icon)
-	u := &UI{a: a, fa: fa, icon: icon}
+	u := &UI{a: a, fa: fa, icon: icon, scene: o.Scene}
 	if o.Targets != nil {
 		listTargets = o.Targets
 	}
@@ -136,9 +139,15 @@ func Run(a ui.Backend, o Options) {
 		}
 	})
 	fa.Lifecycle().SetOnStarted(func() {
+		if !o.Hidden {
+			u.shown = true
+		}
 		fyne.Do(u.refresh) // the first draw, on Fyne's thread
 		if !o.Hidden && o.Scene == "" {
-			fyne.Do(u.askName)
+			fyne.Do(func() {
+				u.askName()
+				u.maybeAskCrash()
+			})
 		}
 		if o.Scene == "" {
 			u.keepWinGeom()
@@ -247,6 +256,7 @@ func (u *UI) Show() {
 		u.shown = true
 		u.askName()
 		u.askAutostart() // the first time the window shows
+		u.maybeAskCrash()
 	} else if u.viewKind == "lobby" && u.lobby != nil {
 		u.lobby.checkClipboard(u)
 		go u.a.ProbeRecentRooms()
@@ -270,6 +280,7 @@ func (u *UI) refresh() {
 	u.st = st
 	u.updateResult(st)
 	u.updateNotice(st)
+	u.maybeAskCrash()
 	if u.sheet != nil {
 		u.sheet.update(st)
 	}
@@ -339,10 +350,18 @@ func (u *UI) applyScene(scene string) {
 		u.qrDialog()
 	case "servers-dialog":
 		u.serversDialog()
+	case "identity-key":
+		u.idKeyDialog()
+	case "identity-backup":
+		if ib, ok := u.a.(identityBackend); ok {
+			u.backupIdentity(ib)
+		}
 	case "leave":
 		u.leave()
 	case "send-logs":
 		u.sendLogs()
+	case "crash-ask":
+		u.crashAskDialog()
 	}
 }
 
@@ -511,6 +530,12 @@ func label(text string) *widget.Label {
 	return l
 }
 
+// identityBackend is what the app adds to back up and restore the identity key.
+type identityBackend interface {
+	BackupIdentity(passphrase string) ([]byte, error)
+	RestoreIdentity(data []byte, passphrase string) (tag string, err error)
+}
+
 // discordBackend is what the app adds for Discord voice channels.
 type discordBackend interface {
 	DiscordLogin()
@@ -518,4 +543,10 @@ type discordBackend interface {
 	GoLiveInChannel(ctx context.Context, password string, e2ee bool) error
 	EnterChannel(ctx context.Context, password string, e2ee bool) error
 	JoinChannel(ctx context.Context, password string) error
+}
+
+// crashBackend is what the app adds for crash-report settings and prompts.
+type crashBackend interface {
+	SetCrashReports(mode string) error
+	AnswerCrashReport(ctx context.Context, send, auto bool) error
 }

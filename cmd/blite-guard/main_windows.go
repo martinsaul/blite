@@ -53,19 +53,19 @@ const (
 	excFailFast     = 0xC0000602
 	excStackOverrun = 0xC0000409
 
-	miniDumpWithDataSegs                   = 0x00000001
-	miniDumpWithUnloadedModules            = 0x00000020
-	miniDumpWithIndirectlyReferencedMemory = 0x00000040
-	miniDumpWithThreadInfo                 = 0x00001000
+	miniDumpWithDataSegs        = 0x00000001
+	miniDumpWithUnloadedModules = 0x00000020
+	miniDumpWithThreadInfo      = 0x00001000
 
 	// MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
-	// MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithUnloadedModules:
-	// captures thread contexts, globals, unloaded DLLs, and memory pointed to
-	// by registers and stacks, while omitting MiniDumpWithFullMemory and
-	// MiniDumpWithHandleData so room passwords, E2EE keys, and media buffers
-	// on the heap aren't written to disk.
+	// MiniDumpWithUnloadedModules: captures thread stacks and contexts,
+	// module data sections (globals), thread times and start addresses, and
+	// unloaded DLLs, while omitting MiniDumpWithFullMemory,
+	// MiniDumpWithIndirectlyReferencedMemory and MiniDumpWithHandleData so
+	// heap memory (room passwords, E2EE keys, media buffers) isn't copied to
+	// disk.
 	dumpType = miniDumpWithDataSegs | miniDumpWithThreadInfo |
-		miniDumpWithIndirectlyReferencedMemory | miniDumpWithUnloadedModules
+		miniDumpWithUnloadedModules
 )
 
 // debugEvent is DEBUG_EVENT on amd64: three DWORDs, padding, then the union.

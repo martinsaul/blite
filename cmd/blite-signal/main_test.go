@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -35,7 +36,7 @@ func TestBlueGreenHooks(t *testing.T) {
 	os.MkdirAll(filepath.Dir(state), 0o700)
 	// Blue's state: one room.
 	blue := server.New(server.Config{StateFile: state, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	if _, err := blue.Rooms().Create("", "alice", "", "", 0, false, nopOut{}); err != nil {
+	if _, err := blue.Rooms().Create(context.Background(), "", "alice", "", "", 0, false, nopOut{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := blue.SaveState(); err != nil {
@@ -157,6 +158,13 @@ func TestBlueGreenHooks(t *testing.T) {
 	if code, out := run(b, "-canary"); code != 2 {
 		t.Fatalf("canary without a URL: %d %s", code, out)
 	}
+
+	// Binary refuses to start when BLITE_TRUST_PROXY=true without BLITE_TRUSTED_PROXIES.
+	bad := exec.Command(bin)
+	bad.Env = append(os.Environ(), "BLITE_ADDR=:"+freePort(t), "BLITE_ADMIN_ADDR=off", "BLITE_TRUST_PROXY=true", "BLITE_TRUSTED_PROXIES=")
+	if out, err := bad.CombinedOutput(); err == nil {
+		t.Fatalf("started with BLITE_TRUST_PROXY and no BLITE_TRUSTED_PROXIES:\n%s", out)
+	}
 }
 
 // syncBuf is a bytes.Buffer the child's output goroutine and the test
@@ -181,4 +189,66 @@ func freePort(t *testing.T) string {
 	}
 	defer l.Close()
 	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+}
+
+func TestParsePrefixes(t *testing.T) {
+	got, err := parsePrefixes(" 172.18.0.0/16, 10.9.9.9 ,::ffff:192.0.2.1,2001:db8::/32,")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"172.18.0.0/16", "10.9.9.9/32", "192.0.2.1/32", "2001:db8::/32"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i, p := range got {
+		if p.String() != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if _, err := parsePrefixes("proxy.local"); err == nil {
+		t.Fatal("a host name parsed")
+	}
+	if p, err := parsePrefixes(""); err != nil || len(p) != 0 {
+		t.Fatalf("empty: %v %v", p, err)
+	}
+}
+
+func TestConfigFromEnv(t *testing.T) {
+	from := func(kv map[string]string) (server.Config, int, string) {
+		cfg, code, msg, _ := configFromEnv(func(k string) string { return kv[k] })
+		return cfg, code, msg
+	}
+
+	cfg, code, msg := from(nil)
+	if code != 0 {
+		t.Fatalf("defaults failed: %d %s", code, msg)
+	}
+	if cfg.MaxPeers != 50 || cfg.MaxConns != 20000 || cfg.MaxConnsPerIP != 0 || cfg.ReportMaxBytes != server.DefaultReportMaxBytes {
+		t.Fatalf("defaults: peers=%d conns=%d perIP=%d reportBytes=%d", cfg.MaxPeers, cfg.MaxConns, cfg.MaxConnsPerIP, cfg.ReportMaxBytes)
+	}
+
+	// 0 disables connection and peer caps.
+	cfg, code, _ = from(map[string]string{
+		"BLITE_MAX_PEERS":        "0",
+		"BLITE_MAX_CONNS":        "0",
+		"BLITE_MAX_CONNS_PER_IP": "0",
+	})
+	if code != 0 || cfg.MaxPeers != 0 || cfg.MaxConns != 0 || cfg.MaxConnsPerIP != 0 {
+		t.Fatalf("zero caps: code=%d cfg=%+v", code, cfg)
+	}
+
+	// BLITE_TRUST_PROXY without BLITE_TRUSTED_PROXIES refuses to start.
+	for _, tp := range []string{"true", "1", "bogus"} {
+		if _, code, _ := from(map[string]string{"BLITE_TRUST_PROXY": tp}); code == 0 {
+			t.Fatalf("BLITE_TRUST_PROXY=%q without BLITE_TRUSTED_PROXIES succeeded", tp)
+		}
+	}
+	cfg, code, _ = from(map[string]string{
+		"BLITE_TRUST_PROXY":     "true",
+		"BLITE_TRUSTED_PROXIES": "127.0.0.1, 172.18.0.0/16",
+		"BLITE_FAILOVER_SECRET": "sec",
+	})
+	if code != 0 || !cfg.TrustProxy || len(cfg.TrustedProxies) != 2 || cfg.FailoverSecret != "sec" {
+		t.Fatalf("trusted proxy config: code=%d cfg=%+v", code, cfg)
+	}
 }

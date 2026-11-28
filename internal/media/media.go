@@ -19,7 +19,25 @@ import (
 )
 
 // Init initialises GStreamer. Safe to call more than once.
-func Init() { gst.Init() }
+func Init() {
+	initOnce.Do(func() {
+		gst.Init()
+		if d := gst.DemoteDecoders("video/x-h264", h264Decoders); len(d) > 0 {
+			slog.Info("video decoders not used for incoming streams", "decoders", strings.Join(d, ","))
+		}
+	})
+}
+
+var initOnce sync.Once
+
+// h264Decoders are the decoders a received stream may reach. Any other H.264
+// decoder on the system (a third-party plugin on Linux, say) is never picked:
+// a room member chooses the bitstream, so it only goes to well-known parsers.
+var h264Decoders = []string{
+	"avdec_h264", "openh264dec", // software
+	"d3d11h264dec", "d3d12h264dec", "nvh264dec", "nvh264sldec", "nvd3d11h264dec", "qsvh264dec", // Windows / NVIDIA / Intel
+	"vah264dec", "vaapih264dec", "v4l2slh264dec", "v4l2h264dec", // Linux
+}
 
 // Layer is one encoded quality level. Every capture is encoded once per layer.
 type Layer struct {
@@ -516,6 +534,7 @@ type Pipeline struct {
 }
 
 func launch(desc string) (*Pipeline, error) {
+	Init()
 	g, err := gst.Launch(desc)
 	if err != nil {
 		return nil, fmt.Errorf("parse pipeline: %w\n  %s", err, desc)

@@ -23,7 +23,7 @@ import (
 //     and switches to it after keySwitchDelay, so the one who left can't
 //     decrypt what follows. Old keys stay usable for keyGrace.
 
-const (
+var (
 	keySwitchDelay = time.Second
 	keyGrace       = 5 * time.Second
 )
@@ -50,11 +50,14 @@ type crypt struct {
 	kxSent  map[string]bool   // members we sent our exchange key to
 	pending map[string]string // sealed keys that arrived before the sender's exchange key
 	owner   map[uint32]string // key id -> member
+
+	switchDelay, grace time.Duration // keySwitchDelay and keyGrace when made
 }
 
 func newCrypt() *crypt {
 	c := &crypt{ex: e2ee.NewExchange(), ring: e2ee.NewKeyring(), cur: e2ee.NewSenderKey(),
-		peerKX: map[string]string{}, kxSent: map[string]bool{}, pending: map[string]string{}, owner: map[uint32]string{}}
+		peerKX: map[string]string{}, kxSent: map[string]bool{}, pending: map[string]string{}, owner: map[uint32]string{},
+		switchDelay: keySwitchDelay, grace: keyGrace}
 	c.ring.Add(c.cur.KID, c.cur.Key) // we decode our own frames too (a relay's renditions loop back in tests)
 	return c
 }
@@ -148,9 +151,8 @@ func (m *Mesh) gotKey(peer string, k keyMsg) {
 	m.pliUpstream(peer, srcScreen)
 }
 
-// cryptLeft forgets a member that left, retires its keys and replaces
-// ours.
-func (m *Mesh) cryptLeft(peer string) {
+// cryptForget drops a member's exchange key and retires its sender keys.
+func (m *Mesh) cryptForget(peer string, grace time.Duration) {
 	c := m.crypt
 	c.mu.Lock()
 	delete(c.peerKX, peer)
@@ -158,10 +160,19 @@ func (m *Mesh) cryptLeft(peer string) {
 	delete(c.pending, peer)
 	for kid, o := range c.owner {
 		if o == peer {
-			c.ring.Retire(kid, keyGrace)
+			c.ring.Retire(kid, grace)
 			delete(c.owner, kid)
 		}
 	}
+	c.mu.Unlock()
+}
+
+// cryptRotate makes a new sender key, hands it to our remaining peers and
+// switches to it after keySwitchDelay.
+func (m *Mesh) cryptRotate() {
+	c := m.crypt
+	delay, grace := c.switchDelay, c.grace
+	c.mu.Lock()
 	next := e2ee.NewSenderKey()
 	c.next = next
 	c.ring.Add(next.KID, next.Key)
@@ -173,7 +184,7 @@ func (m *Mesh) cryptLeft(peer string) {
 	for p, pub := range peers {
 		m.sendKey(p, pub, next)
 	}
-	time.AfterFunc(keySwitchDelay, func() {
+	time.AfterFunc(delay, func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.next != next {
@@ -181,8 +192,15 @@ func (m *Mesh) cryptLeft(peer string) {
 		}
 		old := c.cur
 		c.cur, c.next = next, nil
-		c.ring.Retire(old.KID, keyGrace)
+		c.ring.Retire(old.KID, grace)
 	})
+}
+
+// cryptLeft forgets a member that left, retires its keys and replaces
+// ours.
+func (m *Mesh) cryptLeft(peer string) {
+	m.cryptForget(peer, m.crypt.grace)
+	m.cryptRotate()
 }
 
 // encVideo and encAudio encrypt what we send, when the room is encrypted.

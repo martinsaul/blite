@@ -107,7 +107,7 @@ func ForwardLink(link string) (Instance, error) {
 }
 
 // OpenBrowser opens url in the user's default browser.
-func OpenBrowser(url string) error {
+var OpenBrowser = func(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":

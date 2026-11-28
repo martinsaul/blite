@@ -17,16 +17,21 @@ docker run -p 127.0.0.1:8080:8080 blite-signal</code></pre>
 <pre><code>share.example.com {
     reverse_proxy 127.0.0.1:8080
 }</code></pre>
-<p>Set <code>BLITE_TRUST_PROXY=true</code> only when the proxy sets <code>X-Forwarded-For</code> (rate limits are per client IP). Keep proxy idle timeouts above 30 seconds; the server pings every 30 seconds.</p>
+<p>Set <code>BLITE_TRUST_PROXY=true</code> only when the proxy sets <code>X-Forwarded-For</code> (rate limits are per client IP), and set <code>BLITE_TRUSTED_PROXIES</code> to the proxy's address or network (<code>blite-signal</code> refuses to start with <code>BLITE_TRUST_PROXY=true</code> unless <code>BLITE_TRUSTED_PROXIES</code> is set). Keep proxy idle timeouts above 30 seconds; the server pings every 30 seconds.</p>
 <table>
   <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
   <tr><td><code>BLITE_ADDR</code></td><td><code>:8080</code></td><td>Listen address</td></tr>
-  <tr><td><code>BLITE_TRUST_PROXY</code></td><td><code>false</code></td><td>Take the client IP from <code>CF-Connecting-IP</code> / <code>X-Forwarded-For</code></td></tr>
+  <tr><td><code>BLITE_TRUST_PROXY</code></td><td><code>false</code></td><td>Take the client IP from <code>CF-Connecting-IP</code> / <code>X-Forwarded-For</code> (requires <code>BLITE_TRUSTED_PROXIES</code>)</td></tr>
+  <tr><td><code>BLITE_TRUSTED_PROXIES</code></td><td>unset</td><td>Comma-separated addresses or networks of your proxy; required when <code>BLITE_TRUST_PROXY=true</code></td></tr>
   <tr><td><code>BLITE_TURN_SECRET</code> + <code>BLITE_TURN_URLS</code></td><td>unset</td><td>coturn <code>use-auth-secret</code> credentials handed to peers (6 h lifetime)</td></tr>
   <tr><td><code>BLITE_ICE_JSON</code></td><td>unset</td><td>A fixed ICE server list (JSON array) instead</td></tr>
   <tr><td><code>BLITE_REPORT_DIR</code></td><td>unset</td><td>Accept client log reports into this directory (kept 72 hours)</td></tr>
+  <tr><td><code>BLITE_REPORT_MAX_BYTES</code></td><td><code>2147483648</code></td><td>Total disk budget in bytes for <code>BLITE_REPORT_DIR</code> (2 GiB; oldest deleted first)</td></tr>
   <tr><td><code>BLITE_HOST_KEY</code></td><td>unset</td><td>Shared secret with a hosted relay (fixed room codes)</td></tr>
-  <tr><td><code>BLITE_MAX_PEERS</code></td><td><code>0</code></td><td>Cap room size (0 = no cap)</td></tr>
+  <tr><td><code>BLITE_MAX_PEERS</code></td><td><code>50</code></td><td>Cap room size (0 = no cap)</td></tr>
+  <tr><td><code>BLITE_MAX_ROOMS</code></td><td><code>10000</code></td><td>Cap how many rooms exist at once; past it, creating a room answers "wait a few minutes" (0 = no cap)</td></tr>
+  <tr><td><code>BLITE_MAX_CONNS</code></td><td><code>20000</code></td><td>Cap total concurrent <code>/ws</code> connections (0 = no cap)</td></tr>
+  <tr><td><code>BLITE_MAX_CONNS_PER_IP</code></td><td><code>0</code></td><td>Cap concurrent <code>/ws</code> connections per client IP, e.g. 32 (0 = no cap). Behind a proxy, set it only with <code>BLITE_TRUSTED_PROXIES</code>, or every user counts as the proxy</td></tr>
   <tr><td><code>BLITE_STATE_FILE</code></td><td>unset</td><td>Keep rooms across restarts: saved every 30 s and on shutdown, loaded on start, reloaded on <code>SIGHUP</code> (rooms served since the last load are kept). Members resume into their slots instead of rejoining; after a crash, changes since the last save are lost. It holds password and token hashes, so put it on a private volume</td></tr>
   <tr><td><code>BLITE_MIN_COMPATIBLE_BUILD</code></td><td><code>0</code></td><td>Refuse clients below this build</td></tr>
   <tr><td><code>BLITE_MIN_RECOMMENDED_BUILD</code></td><td><code>0</code></td><td>Ask clients below this build to update</td></tr>

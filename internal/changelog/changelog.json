@@ -1,5 +1,19 @@
 [
  {
+  "build": 2260,
+  "date": "2026-11-28",
+  "changes": [
+   "Security: links to encrypted rooms now say so, and Bellion refuses to join, rejoin or resume such a room if the server claims it isn't encrypted.",
+   "Security: when someone leaves while you were reconnecting, the room's encryption keys change, as they do when someone leaves normally.",
+   "Security: Bellion opens a Discord page in your browser only right after you click Connect Discord, and it no longer stays connected to the server for Discord unless you linked it.",
+   "Security: opening a port on your router only talks to your router.",
+   "After a crash, Bellion asks before sending the end of its log, and reports are anonymous by default. Gear > Crash reports changes this.",
+   "Windows: your identity key and the passwords of recent rooms are now protected with your Windows account.",
+   "Gear > Your identity key... can back up your identity key to a file with a passphrase and restore it on another computer, so you keep your tag and the hosted rooms you own.",
+   "The download now includes the licenses of everything Bellion Share is built with."
+  ]
+ },
+ {
   "build": 223,
   "date": "2026-11-24",
   "changes": [

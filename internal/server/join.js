@@ -4,11 +4,12 @@
 (function () {
   var code = document.body.dataset.code;
   var pw = location.hash.slice(1);
-  history.replaceState(null, "", location.pathname);
+  var e2ee = new URLSearchParams(location.search).get("e2ee") === "1";
+  history.replaceState(null, "", location.pathname + location.search);
   // The room is on this server: the app joins it here, whatever its own
-  // default is. Older apps ignore the parameter. No password: an open room.
+  // default is. Older apps ignore unknown parameters. No password: an open room.
   var server = location.protocol === "http:" ? "ws://" + location.host : location.host;
-  var target = "blite://join/" + encodeURIComponent(code) + "?server=" + encodeURIComponent(server) + (pw ? "#" + pw : "");
+  var target = "blite://join/" + encodeURIComponent(code) + "?server=" + encodeURIComponent(server) + (e2ee ? "&e2ee=1" : "") + (pw ? "#" + pw : "");
   // The desktop app's retry button, or (on Android) the Android app's
   // button: the Android app takes blite:// links too. Its https fallback
   // would only reload this page: Chrome keeps a link to the page it is on.

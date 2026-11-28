@@ -16,8 +16,10 @@ import (
 
 	"github.com/coder/websocket"
 
+	"blite/internal/identity"
 	"blite/internal/media"
 	"blite/internal/proto"
+	"blite/internal/secret"
 	"blite/internal/server"
 	"blite/internal/session"
 )
@@ -144,7 +146,7 @@ func TestRecentRoomsPersistenceCapAndProbe(t *testing.T) {
 
 	// Add an entry on the legacy server (which doesn't support probe) so we test
 	// ProbeUnsupported -> "ready" alongside ProbeExists -> "ready" and ProbeGone -> "gone" -> removed.
-	recorder.recordRecent(legacyWS, "ABCD2345", "")
+	recorder.recordRecent(legacyWS, "ABCD2345", "", false)
 
 	// Simulate app restart: loaded entries start as "checking".
 	restarted := New(session.Config{Server: ws, Name: "alice", View: "none", Log: quiet}, "none")
@@ -323,4 +325,118 @@ func TestDiscordEnterAndShareChannel(t *testing.T) {
 		c := alice.lookupChannel(ctx, "555111")
 		return len(c.Members) == 2 && slices.Equal(c.Sharers, []string{"bob"})
 	})
+}
+
+func TestRecentPasswordsSealedAndResealedOnWindows(t *testing.T) {
+	tempServers(t)
+	rf := tempRecent(t)
+
+	oldEnabled, oldProtect, oldUnprotect := secret.Enabled, secret.Protect, secret.Unprotect
+	t.Cleanup(func() {
+		secret.Enabled = oldEnabled
+		secret.Protect = oldProtect
+		secret.Unprotect = oldUnprotect
+	})
+	secret.Enabled = true
+	secret.Protect = func(b []byte) ([]byte, error) {
+		out := make([]byte, len(b))
+		for i, v := range b {
+			out[i] = v ^ 0x33
+		}
+		return append([]byte("win:"), out...), nil
+	}
+	secret.Unprotect = func(b []byte) ([]byte, error) {
+		rest, ok := strings.CutPrefix(string(b), "win:")
+		if !ok {
+			return nil, os.ErrPermission
+		}
+		out := make([]byte, len(rest))
+		for i := range len(rest) {
+			out[i] = rest[i] ^ 0x33
+		}
+		return out, nil
+	}
+
+	// Seed recent.json with an old plaintext entry.
+	const ws = "ws://127.0.0.1:18080/ws"
+	legacy := []recentDiskEntry{
+		{Server: ws, Code: "ABCD2345", Password: "legacy-plain-password"},
+	}
+	if err := os.MkdirAll(filepath.Dir(rf), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lb, _ := json.Marshal(legacy)
+	if err := os.WriteFile(rf, lb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := New(session.Config{Server: ws, Name: "alice", View: "none", Log: quiet}, "none")
+	defer a.Shutdown()
+
+	// Loaded old entry works in memory.
+	if len(a.recent) != 1 || a.recent[0].password != "legacy-plain-password" {
+		t.Fatalf("loaded legacy recent = %+v", a.recent)
+	}
+
+	// Recording a new room writes recent.json and re-seals all saved passwords.
+	a.recordRecent(ws, "K7PQ2M4X", "new-secret-pw", false)
+	a.recordRecent(ws, "NOPASS23", "", false)
+
+	raw, err := os.ReadFile(rf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "legacy-plain-password") || strings.Contains(string(raw), "new-secret-pw") {
+		t.Fatalf("recent.json leaked plaintext password: %s", raw)
+	}
+	var disk []recentDiskEntry
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatal(err)
+	}
+	if len(disk) != 3 {
+		t.Fatalf("disk len = %d, want 3", len(disk))
+	}
+	if disk[0].Password != "" {
+		t.Fatalf("empty password should stay empty, got %q", disk[0].Password)
+	}
+	if !secret.Sealed(disk[1].Password) || !secret.Sealed(disk[2].Password) {
+		t.Fatalf("passwords not dpapi-sealed on disk: %+v", disk)
+	}
+
+	// Reloading opens both sealed passwords back to plaintext in memory.
+	loaded := loadRecent(ws)
+	if len(loaded) != 3 || loaded[0].password != "" || loaded[1].password != "new-secret-pw" || loaded[2].password != "legacy-plain-password" {
+		t.Fatalf("reloaded recent = %+v", loaded)
+	}
+
+	// If profile is copied to another machine where Unprotect fails, dpapi: blob is not kept as password.
+	secret.Unprotect = func([]byte) ([]byte, error) { return nil, os.ErrPermission }
+	foreign := loadRecent(ws)
+	if len(foreign) != 3 || foreign[1].password != "" || foreign[2].password != "" {
+		t.Fatalf("foreign machine loadRecent kept unreadable password: %+v", foreign)
+	}
+}
+
+func TestIdentityErrorShownAndBlocksSession(t *testing.T) {
+	tempServers(t)
+	tempRecent(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := New(session.Config{Server: "ws://127.0.0.1:18080/ws", Name: "alice", View: "none", Log: quiet}, "none")
+	defer a.Shutdown()
+
+	a.SetIdentityError(identity.ErrWrongAccount)
+	st := a.State().(UIState)
+	if st.Error != identity.ErrWrongAccount.Error() {
+		t.Fatalf("UIState.Error = %q, want %q", st.Error, identity.ErrWrongAccount.Error())
+	}
+	if err := a.Create(context.Background(), "", true); err != identity.ErrWrongAccount {
+		t.Fatalf("Create with identity error = %v, want ErrWrongAccount", err)
+	}
+	if err := a.JoinLink(context.Background(), "ABCD2345"); err != identity.ErrWrongAccount {
+		t.Fatalf("JoinLink with identity error = %v, want ErrWrongAccount", err)
+	}
+	if _, err := a.BackupIdentity("correct horse"); err != identity.ErrWrongAccount {
+		t.Fatalf("BackupIdentity with identity error = %v, want ErrWrongAccount", err)
+	}
 }

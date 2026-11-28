@@ -201,6 +201,20 @@ func TestDiscordFollowOffWithoutBot(t *testing.T) {
 	}
 }
 
+func TestDiscordFollowProbeWithBot(t *testing.T) {
+	s := New(Config{DiscordClientID: "42", DiscordSecret: "shh", DiscordBotToken: "bot"})
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+	res, err := http.Get(ts.URL + "/v1/discord/follow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode >= 500 {
+		t.Fatalf("plain GET probe with bot = %d, want non-404 client error (e.g. 426)", res.StatusCode)
+	}
+}
+
 // TestBotLink: /bot, the link users send their server's admin, opens the
 // docs section with the Add to Discord button.
 func TestBotLink(t *testing.T) {
@@ -223,5 +237,136 @@ func TestBotLink(t *testing.T) {
 	res.Body.Close()
 	if !strings.Contains(string(b), `id="add-the-bot"`) || !strings.Contains(string(b), "scope=bot") {
 		t.Fatal("the docs page lacks the add-the-bot section")
+	}
+}
+
+func TestDiscordLinkPendingCapAndReplace(t *testing.T) {
+	s := New(Config{DiscordClientID: "42", DiscordSecret: "shh", DiscordBotToken: "bot", Log: quietLog()})
+	s.discord.maxPending = 2
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	k1, k2, k3 := identity.Ephemeral(), identity.Ephemeral(), identity.Ephemeral()
+	c1 := dialFollow(t, srv.URL, k1)
+	c1.next() // initial state
+
+	// Two link requests from the same key keep only the newest state.
+	c1.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	u1, _ := url.Parse(c1.next().LinkURL)
+	st1 := u1.Query().Get("state")
+
+	c1.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	u2, _ := url.Parse(c1.next().LinkURL)
+	st2 := u2.Query().Get("state")
+	if st1 == "" || st2 == "" || st1 == st2 {
+		t.Fatalf("states %q %q", st1, st2)
+	}
+	s.discord.mu.Lock()
+	nPending := len(s.discord.pending)
+	s.discord.mu.Unlock()
+	if nPending != 1 {
+		t.Fatalf("pending count for one key = %d, want 1", nPending)
+	}
+	if res, _ := http.Get(srv.URL + "/v1/discord/linked?code=c0de&state=" + url.QueryEscape(st1)); res.StatusCode != 400 {
+		t.Fatalf("replaced state still accepted: %d", res.StatusCode)
+	}
+
+	// Fill the map (maxPending = 2): k2 fits, k3 is refused until an entry expires.
+	c2 := dialFollow(t, srv.URL, k2)
+	c2.next()
+	c2.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	if m := c2.next(); m.LinkURL == "" {
+		t.Fatalf("k2 refused below cap: %+v", m)
+	}
+
+	c3 := dialFollow(t, srv.URL, k3)
+	c3.next()
+	c3.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	if m := c3.next(); m.LinkURL != "" || m.Error != proto.ErrRateLimited {
+		t.Fatalf("k3 over pending cap: %+v", m)
+	}
+
+	// Expire k1's pending entry: k3 now gets a link URL.
+	s.discord.mu.Lock()
+	p := s.discord.pending[st2]
+	p.expires = time.Now().Add(-time.Second)
+	s.discord.pending[st2] = p
+	s.discord.mu.Unlock()
+
+	c3.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	if m := c3.next(); m.LinkURL == "" {
+		t.Fatalf("k3 after expiry: %+v", m)
+	}
+}
+
+func TestDiscordFollowPerConnRateLimitAndUnlinkNoRewrite(t *testing.T) {
+	links := filepath.Join(t.TempDir(), "links.json")
+	s := New(Config{DiscordClientID: "42", DiscordSecret: "shh", DiscordBotToken: "bot", DiscordLinksFile: links, Log: quietLog()})
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	k := identity.Ephemeral()
+	c := dialFollow(t, srv.URL, k)
+	c.next() // initial state
+
+	// Unlinking a key that isn't linked must not create or rewrite links.json.
+	c.send(proto.DiscordMsg{T: proto.TDiscordUnlink})
+	c.next()
+	if _, err := os.Stat(links); !os.IsNotExist(err) {
+		t.Fatalf("unlink of unlinked key wrote %s: %v", links, err)
+	}
+
+	// Seed a link for another key, backdate mtime, and verify unlinking k leaves the file untouched.
+	other := identity.Ephemeral()
+	if _, err := s.discord.links.set(other.Public(), &discordLink{User: "999", Name: "Bob", At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-10 * time.Second).Truncate(time.Second)
+	if err := os.Chtimes(links, past, past); err != nil {
+		t.Fatal(err)
+	}
+	s.discord.links.mu.Lock()
+	s.discord.links.mtime = past
+	s.discord.links.mu.Unlock()
+
+	c.send(proto.DiscordMsg{T: proto.TDiscordUnlink})
+	c.next()
+	if fi, err := os.Stat(links); err != nil || !fi.ModTime().Equal(past) {
+		t.Fatalf("unlinked key rewrote links file: mtime %v, want %v", fi.ModTime(), past)
+	}
+
+	// Per-connection limit: 5 link and 5 unlink messages/min; extras are ignored.
+	var fifthState string
+	for i := range 5 {
+		c.send(proto.DiscordMsg{T: proto.TDiscordLink})
+		m := c.next()
+		if m.LinkURL == "" {
+			t.Fatalf("link %d empty", i)
+		}
+		u, _ := url.Parse(m.LinkURL)
+		fifthState = u.Query().Get("state")
+	}
+	// 6th and 7th link messages are ignored (fifthState stays active, nothing sent).
+	c.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	c.send(proto.DiscordMsg{T: proto.TDiscordLink})
+	// We already sent 2 unlinks above; 3 more reach 5, then 6th is ignored.
+	for range 3 {
+		c.send(proto.DiscordMsg{T: proto.TDiscordUnlink})
+		if m := c.next(); m.LinkURL != "" {
+			t.Fatalf("expected unlink state, got extra link URL %q", m.LinkURL)
+		}
+	}
+	c.send(proto.DiscordMsg{T: proto.TDiscordUnlink}) // 6th unlink: ignored
+	rctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, b, err := c.ws.Read(rctx); err == nil {
+		t.Fatalf("6th unlink was not ignored: %s", b)
+	}
+
+	s.discord.mu.Lock()
+	_, kept := s.discord.pending[fifthState]
+	s.discord.mu.Unlock()
+	if !kept {
+		t.Fatal("ignored 6th link replaced the 5th pending state")
 	}
 }

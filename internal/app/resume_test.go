@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -12,12 +14,17 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"blite/internal/audio"
+	"blite/internal/i18n"
 	"blite/internal/identity"
 	"blite/internal/media"
+	"blite/internal/proto"
 	"blite/internal/server"
 	"blite/internal/session"
 )
@@ -35,7 +42,7 @@ func tempResume(t *testing.T) string {
 func TestResumeFile(t *testing.T) {
 	f := tempResume(t)
 	now := time.Now()
-	want := session.Rejoin{Room: "ABCD2345", Password: "pw-1234", Source: media.SourceKind("window:42"),
+	want := session.Rejoin{Room: "ABCD2345", Password: "pw-1234", Encrypted: true, Source: media.SourceKind("window:42"),
 		Resolution: "1080p", Audio: audio.Selection{Mode: "apps", Apps: []string{"firefox"}}, Output: "dev1"}
 	if err := writeResume(want, now); err != nil {
 		t.Fatal(err)
@@ -44,7 +51,7 @@ func TestResumeFile(t *testing.T) {
 		t.Fatalf("resume file mode: %v %v", st.Mode(), err)
 	}
 	got, ok := readResume(now.Add(ResumeWindow - time.Second))
-	if !ok || got.Room != want.Room || got.Password != want.Password || got.Source != want.Source ||
+	if !ok || got.Room != want.Room || got.Password != want.Password || !got.Encrypted || got.Source != want.Source ||
 		got.Resolution != want.Resolution || got.Audio.Mode != "apps" || len(got.Audio.Apps) != 1 || got.Output != "dev1" {
 		t.Fatalf("read back %+v ok=%v", got, ok)
 	}
@@ -220,5 +227,163 @@ func TestLostSlotRejoins(t *testing.T) {
 	}
 	if st := a.State().(UIState).Session; st == nil {
 		t.Fatal("alice's session ended")
+	}
+}
+
+// JoinLink, rejoinLost and Resume all refuse an E2EE downgrade when the link
+// or saved session state says the room was encrypted.
+func TestE2EEDowngradeEnforcedAcrossJoinRejoinAndResume(t *testing.T) {
+	tempServers(t)
+	tempRecent(t)
+	tempResume(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	srv := server.New(server.Config{Log: quiet})
+	upTS := httptest.NewServer(srv)
+	defer upTS.Close()
+	upWS := "ws" + strings.TrimPrefix(upTS.URL, "http") + "/ws"
+
+	var downgrade atomic.Bool
+	var mu sync.Mutex
+	var downSocks []net.Conn
+	proxyTS := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		down, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer down.CloseNow()
+		up, _, err := websocket.Dial(r.Context(), upWS, nil)
+		if err != nil {
+			return
+		}
+		defer up.CloseNow()
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		go func() {
+			defer cancel()
+			for {
+				typ, b, err := down.Read(ctx)
+				if err != nil {
+					return
+				}
+				if up.Write(ctx, typ, b) != nil {
+					return
+				}
+			}
+		}()
+		for {
+			typ, b, err := up.Read(ctx)
+			if err != nil {
+				return
+			}
+			if downgrade.Load() {
+				var env proto.Envelope
+				if json.Unmarshal(b, &env) == nil && env.T == proto.TWelcome {
+					var wl proto.Welcome
+					if json.Unmarshal(b, &wl) == nil {
+						wl.E2EE = false
+						b, _ = json.Marshal(wl)
+					}
+				}
+			}
+			if down.Write(ctx, typ, b) != nil {
+				return
+			}
+		}
+	}))
+	proxyTS.Config.ConnState = func(c net.Conn, st http.ConnState) {
+		if st == http.StateHijacked {
+			mu.Lock()
+			downSocks = append(downSocks, c)
+			mu.Unlock()
+		}
+	}
+	proxyTS.Start()
+	defer proxyTS.Close()
+	proxyWS := "ws" + strings.TrimPrefix(proxyTS.URL, "http") + "/ws"
+
+	cm := &proto.ClientMeta{AppVersion: "0.1.0", Build: proto.E2EEBuild}
+	mk := func(serverURL, name string, k identity.Key) *App {
+		a := New(session.Config{Server: serverURL, Name: name, View: media.ViewCount, Client: cm, Identity: k, Log: quiet}, media.SourceTest)
+		a.ConfirmServer = func(string) bool { return true }
+		return a
+	}
+
+	ctx := context.Background()
+	aliceKey := identity.Ephemeral()
+	a := mk(proxyWS, "alice", aliceKey)
+	defer a.Shutdown()
+	if err := a.Create(ctx, "pw-e2ee", true); err != nil {
+		t.Fatal(err)
+	}
+	stA := a.State().(UIState).Session
+	if stA == nil || !stA.Encrypted {
+		t.Fatalf("expected encrypted session, got %+v", stA)
+	}
+	encLink := strings.Replace(stA.Link, "https://", "http://", 1)
+	code := strings.ReplaceAll(stA.Room, "-", "")
+
+	// 1. JoinLink with marker fails when proxy downgrades Welcome.E2EE to false.
+	downgrade.Store(true)
+	b := mk(proxyWS, "bob", identity.Ephemeral())
+	defer b.Shutdown()
+	if err := b.JoinLink(ctx, encLink); !errors.Is(err, session.ErrE2EEDowngrade) {
+		t.Fatalf("JoinLink with marker on downgraded room: %v, want ErrE2EEDowngrade", err)
+	}
+	if b.State().(UIState).Session != nil {
+		t.Fatal("bob has an active session after E2EE downgrade")
+	}
+	if tr := i18n.Err(session.ErrE2EEDowngrade); tr == nil {
+		t.Fatal("nil translated error")
+	}
+
+	// 2. When Welcome.E2EE is true, bob joins; then if bob's slot is lost and
+	// the server downgrades on rejoinLost, bob refuses to rejoin unencrypted.
+	downgrade.Store(false)
+	if err := b.JoinLink(ctx, encLink); err != nil {
+		t.Fatalf("JoinLink with marker on honest room: %v", err)
+	}
+	var bobID string
+	for end := time.Now().Add(10 * time.Second); bobID == ""; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("timed out waiting for alice to see bob")
+		}
+		for _, m := range a.State().(UIState).Session.Members {
+			if m.Name == "bob" {
+				bobID = m.ID
+			}
+		}
+	}
+
+	downgrade.Store(true)
+	srv.Rooms().Leave(code, bobID)
+	mu.Lock()
+	conns := append([]net.Conn(nil), downSocks...)
+	mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+	for end := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		ui := b.State().(UIState)
+		if ui.Session == nil && strings.Contains(ui.Error, session.ErrE2EEDowngrade.Error()) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("rejoinLost did not fail with ErrE2EEDowngrade: session=%+v err=%q", ui.Session, ui.Error)
+		}
+	}
+
+	// 3. Resume from resume.json enforces E2EE too.
+	if !a.leaveForUpdate() {
+		t.Fatal("alice not in call for update")
+	}
+	a2 := mk(proxyWS, "alice", aliceKey)
+	defer a2.Shutdown()
+	ok, err := a2.Resume(ctx)
+	if !ok || !errors.Is(err, session.ErrE2EEDowngrade) {
+		t.Fatalf("Resume on downgraded server: ok=%v err=%v, want true, ErrE2EEDowngrade", ok, err)
+	}
+	if a2.State().(UIState).Session != nil {
+		t.Fatal("alice resumed into downgraded session")
 	}
 }

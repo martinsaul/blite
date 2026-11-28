@@ -32,16 +32,19 @@ func parseURLRedacted(raw string) (*url.URL, error) {
 }
 
 // ParseLinkServer is ParseLink plus the link's signaling server, normalized
-// (wss://host/ws); "" = the link doesn't name one (the built-in default).
-func ParseLinkServer(s string) (server, code, pw string, err error) {
+// (wss://host/ws; "" = the link doesn't name one, the built-in default), and
+// whether the link marks the room as end-to-end encrypted.
+func ParseLinkServer(s string) (server, code, pw string, e2ee bool, err error) {
 	code, pw, err = ParseLink(s)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	u, err := parseURLRedacted(strings.TrimSpace(s))
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
+	q := u.Query()
+	e2ee = q.Get("e2ee") == "1"
 	switch u.Scheme {
 	case "https", "http":
 		server = u.Host
@@ -49,15 +52,15 @@ func ParseLinkServer(s string) (server, code, pw string, err error) {
 			server = "ws://" + u.Host
 		}
 	default: // bshare, blite
-		server = u.Query().Get("server")
+		server = q.Get("server")
 	}
 	if server == "" {
-		return "", code, pw, nil
+		return "", code, pw, e2ee, nil
 	}
 	if server, err = NormalizeServer(server); err != nil {
-		return "", "", "", errors.New("the link's server isn't valid: " + err.Error())
+		return "", "", "", false, errors.New("the link's server isn't valid: " + err.Error())
 	}
-	return server, code, pw, nil
+	return server, code, pw, e2ee, nil
 }
 
 // ParseJoinInput parses either a share link (https://HOST/j/CODE#pw,
@@ -65,23 +68,23 @@ func ParseLinkServer(s string) (server, code, pw string, err error) {
 // (e.g. K7PQ-2M4X or a 4-12 character hosted room code like MAMACO, optionally
 // followed by #password). When isLink is false, the caller should join on the
 // currently selected server rather than the built-in default.
-func ParseJoinInput(s string) (server, code, pw string, isLink bool, err error) {
+func ParseJoinInput(s string) (server, code, pw string, e2ee, isLink bool, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", "", "", false, errors.New("enter a share link or room code")
+		return "", "", "", false, false, errors.New("enter a share link or room code")
 	}
 	rawCode, frag, hasFrag := strings.Cut(s, "#")
 	if strings.Contains(rawCode, "://") {
-		server, code, pw, err = ParseLinkServer(s)
-		return server, code, pw, true, err
+		server, code, pw, e2ee, err = ParseLinkServer(s)
+		return server, code, pw, e2ee, true, err
 	}
 	if strings.Contains(rawCode, "/j/") {
-		server, code, pw, err = ParseLinkServer("https://" + s)
-		return server, code, pw, true, err
+		server, code, pw, e2ee, err = ParseLinkServer("https://" + s)
+		return server, code, pw, e2ee, true, err
 	}
 	code = room.NormalizeCode(rawCode)
 	if code == "" {
-		return "", "", "", false, errors.New("enter a share link or room code")
+		return "", "", "", false, false, errors.New("enter a share link or room code")
 	}
 	if hasFrag {
 		if unesc, uerr := url.PathUnescape(frag); uerr == nil {
@@ -90,19 +93,26 @@ func ParseJoinInput(s string) (server, code, pw string, isLink bool, err error) 
 			pw = frag
 		}
 	}
-	return "", code, pw, false, nil
+	return "", code, pw, false, false, nil
 }
 
 // AppLink builds the bshare:// link that opens the app on a room. It names
 // the server unless that is def, the built-in default, so older builds
-// (which ignore the server) still open links to the default server.
-func AppLink(server, def, room, pw string) string {
+// (which ignore unknown parameters) still open links to the default server.
+func AppLink(server, def, room, pw string, e2ee bool) string {
 	l := "bshare://join/" + url.PathEscape(room)
+	var q []string
 	if h := ServerHost(server); h != "" && !SameServer(server, def) {
 		if strings.HasPrefix(server, "ws://") {
 			h = "ws://" + h // local test servers
 		}
-		l += "?server=" + url.QueryEscape(h)
+		q = append(q, "server="+url.QueryEscape(h))
+	}
+	if e2ee {
+		q = append(q, "e2ee=1")
+	}
+	if len(q) > 0 {
+		l += "?" + strings.Join(q, "&")
 	}
 	if pw != "" {
 		l += "#" + url.PathEscape(pw)

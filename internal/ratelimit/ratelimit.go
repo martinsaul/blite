@@ -59,3 +59,10 @@ func (w *Window) Sweep() {
 		w.pruneLocked(k)
 	}
 }
+
+// Keys returns the number of keys currently tracked in memory.
+func (w *Window) Keys() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.events)
+}

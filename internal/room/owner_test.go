@@ -32,12 +32,12 @@ func TestOwnership(t *testing.T) {
 	now := time.Now()
 	m.now = func() time.Time { return now }
 	ba, bb, bc := &box{}, &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
 	if a.Owner != a.PeerID {
 		t.Fatalf("creator not owner: %q", a.Owner)
 	}
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
-	c, _ := m.Join(a.Room, pw, "carol", "kc", "", 0, bc)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
+	c, _ := m.Join(bg, a.Room, pw, "carol", "kc", "", 0, bc)
 	if b.Owner != a.PeerID || c.Owner != a.PeerID {
 		t.Fatal("joiners don't see alice as owner")
 	}
@@ -82,7 +82,7 @@ func TestOwnership(t *testing.T) {
 	}
 	m.Leave(a.Room, a.PeerID)
 	m.Leave(a.Room, b.PeerID)
-	d, err := m.Join(a.Room, pw, "dave", "kd", "", 0, &box{})
+	d, err := m.Join(bg, a.Room, pw, "dave", "kd", "", 0, &box{})
 	if err != nil || d.Owner != d.PeerID {
 		t.Fatalf("joiner of an empty room: owner %q err %v", d.Owner, err)
 	}
@@ -92,8 +92,8 @@ func TestOwnership(t *testing.T) {
 func TestKick(t *testing.T) {
 	m := NewManager(time.Minute)
 	ba, bb := &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
 	if err := m.Kick(a.Room, b.PeerID, a.PeerID, false); err != ErrNotOwner {
 		t.Fatalf("non-owner kick: %v", err)
 	}
@@ -107,17 +107,17 @@ func TestKick(t *testing.T) {
 	if _, err := m.Resume(a.Room, b.PeerID, b.Resume, bb); err != ErrResumeFailed {
 		t.Fatalf("kicked member resumed: %v", err)
 	}
-	b2, err := m.Join(a.Room, pw, "bob", "kb", "", 0, &box{})
+	b2, err := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, &box{})
 	if err != nil {
 		t.Fatalf("disconnected member can't rejoin: %v", err)
 	}
 	if err := m.Kick(a.Room, a.PeerID, b2.PeerID, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Join(a.Room, pw, "bob", "kb", "", 0, &box{}); err != ErrBanned {
+	if _, err := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, &box{}); err != ErrBanned {
 		t.Fatalf("banned member rejoined: %v", err)
 	}
-	if _, err := m.Join(a.Room, pw, "bob2", "kother", "", 0, &box{}); err != nil {
+	if _, err := m.Join(bg, a.Room, pw, "bob2", "kother", "", 0, &box{}); err != nil {
 		t.Fatalf("another key: %v", err)
 	}
 }
@@ -128,23 +128,23 @@ func TestKick(t *testing.T) {
 func TestHostedOwnership(t *testing.T) {
 	m := NewManager(time.Minute)
 	code := NewCode()
-	h, err := m.CreateFixed(code, pw, "relay", "khost", "", 0, false, []string{"kb", "kc"}, &box{})
+	h, err := m.CreateFixed(bg, code, pw, "relay", "khost", "", 0, false, []string{"kb", "kc"}, &box{})
 	if err != nil || h.Owner != h.PeerID {
 		t.Fatalf("host not owner: %q %v", h.Owner, err)
 	}
 	ba, bb := &box{}, &box{}
-	a, _ := m.Join(code, pw, "alice", "ka", "", 0, ba)
+	a, _ := m.Join(bg, code, pw, "alice", "ka", "", 0, ba)
 	if ownerOf(m, code) != h.PeerID {
 		t.Fatal("unlisted member took ownership")
 	}
-	b, _ := m.Join(code, pw, "bob", "kb", "", 0, bb)
+	b, _ := m.Join(bg, code, pw, "bob", "kb", "", 0, bb)
 	if b.Owner != b.PeerID {
 		t.Fatalf("listed bob: owner %q", b.Owner)
 	}
 	if o, _ := lastOwnerMsg(ba); o != b.PeerID {
 		t.Fatal("alice not told")
 	}
-	c, _ := m.Join(code, pw, "carol", "kc", "", 0, &box{})
+	c, _ := m.Join(bg, code, pw, "carol", "kc", "", 0, &box{})
 	now := time.Now()
 	m.now = func() time.Time { return now }
 	m.Disconnected(code, b.PeerID, bb)
@@ -165,7 +165,7 @@ func TestHostedOwnership(t *testing.T) {
 	}
 	_ = a
 	// The relay restarting re-joins the existing room and is its host again.
-	h2, err := m.CreateFixed(code, pw, "relay", "khost", "", 0, false, []string{"ka"}, &box{})
+	h2, err := m.CreateFixed(bg, code, pw, "relay", "khost", "", 0, false, []string{"ka"}, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +179,8 @@ func TestHostedOwnership(t *testing.T) {
 func TestOwnerFastResumeKeeps(t *testing.T) {
 	m := NewManager(time.Minute)
 	ba, bb := &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
 	if err := m.Transfer(a.Room, a.PeerID, b.PeerID); err != nil {
 		t.Fatal(err)
 	}
@@ -197,12 +197,12 @@ func TestOwnerFastResumeKeeps(t *testing.T) {
 func TestRename(t *testing.T) {
 	m := NewManager(time.Minute)
 	ba, bb := &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
 	if err := m.Rename(a.Room, b.PeerID, "bob#0001"); err != ErrBadRequest {
 		t.Fatalf("'#' accepted: %v", err)
 	}
-	if _, err := m.Join(a.Room, pw, "eve#1234", "ke", "", 0, &box{}); err != ErrBadRequest {
+	if _, err := m.Join(bg, a.Room, pw, "eve#1234", "ke", "", 0, &box{}); err != ErrBadRequest {
 		t.Fatalf("join with '#': %v", err)
 	}
 	if err := m.Rename(a.Room, b.PeerID, "Robert"); err != nil {
@@ -212,7 +212,7 @@ func TestRename(t *testing.T) {
 	if r, ok := all[len(all)-1].(proto.PeerRenamed); !ok || r.PeerID != b.PeerID || r.Name != "Robert" {
 		t.Fatalf("alice got %#v", all[len(all)-1])
 	}
-	c, _ := m.Join(a.Room, pw, "carol", "kc", "", 0, &box{})
+	c, _ := m.Join(bg, a.Room, pw, "carol", "kc", "", 0, &box{})
 	for _, p := range c.Others {
 		if p.PeerID == b.PeerID && p.Name != "Robert" {
 			t.Fatalf("newcomer sees %q", p.Name)
@@ -229,19 +229,19 @@ func TestOwnerReturnsAfterUpdate(t *testing.T) {
 	m := NewManager(time.Minute)
 	m.now = func() time.Time { return now }
 	ba, bb := &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
 
 	m.LeaveForUpdate(a.Room, a.PeerID)
 	if got := ownerOf(m, a.Room); got != a.PeerID {
 		t.Fatalf("alice left to update: owner %q, want alice (held)", got)
 	}
-	if c, _ := m.Join(a.Room, pw, "carol", "kc", "", 0, &box{}); c.Owner != a.PeerID {
+	if c, _ := m.Join(bg, a.Room, pw, "carol", "kc", "", 0, &box{}); c.Owner != a.PeerID {
 		t.Fatalf("another identity took the room: owner %q", c.Owner)
 	}
 	now = now.Add(OwnerReturnWindow - time.Second)
 	m.Sweep()
-	a2, err := m.Join(a.Room, pw, "alice", "ka", "", 0, ba)
+	a2, err := m.Join(bg, a.Room, pw, "alice", "ka", "", 0, ba)
 	if err != nil || a2.Owner != a2.PeerID {
 		t.Fatalf("alice rejoined in time: owner %q err %v, want alice", a2.Owner, err)
 	}
@@ -262,7 +262,7 @@ func TestOwnerReturnsAfterUpdate(t *testing.T) {
 	if got := ownerOf(m, a.Room); got == b.PeerID || got == "" {
 		t.Fatalf("after the window: owner %q, want carol", got)
 	}
-	if b2, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb); b2.Owner == b2.PeerID {
+	if b2, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb); b2.Owner == b2.PeerID {
 		t.Fatal("bob reclaimed after the window")
 	}
 }
@@ -273,10 +273,10 @@ func TestOwnerReturnsAfterUpdate(t *testing.T) {
 func TestOwnerReclaimsDroppedSlot(t *testing.T) {
 	m := NewManager(time.Minute)
 	ba, bb := &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
 	m.Disconnected(a.Room, a.PeerID, ba)
-	a2, _ := m.Join(a.Room, pw, "alice", "ka", "", 0, &box{})
+	a2, _ := m.Join(bg, a.Room, pw, "alice", "ka", "", 0, &box{})
 	if a2.Owner != a2.PeerID {
 		t.Fatalf("owner %q, want the new alice", a2.Owner)
 	}

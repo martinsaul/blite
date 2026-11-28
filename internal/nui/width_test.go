@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"blite/internal/app"
 	"blite/internal/audio"
@@ -64,6 +66,8 @@ type fakeBackend struct {
 	dcEnterCalls  int
 	dcGoLiveCalls int
 	dcJoinCalls   int
+	crashModes    []string
+	crashAnswers  [][2]bool
 }
 
 func (f *fakeBackend) State() any {
@@ -248,9 +252,32 @@ func (f *fakeBackend) JoinChannel(context.Context, string) error {
 	return nil
 }
 
+func (f *fakeBackend) SetCrashReports(mode string) error {
+	f.mu.Lock()
+	f.crashModes = append(f.crashModes, mode)
+	f.st.CrashReports = mode
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeBackend) AnswerCrashReport(_ context.Context, send, auto bool) error {
+	f.mu.Lock()
+	f.crashAnswers = append(f.crashAnswers, [2]bool{send, auto})
+	f.st.CrashReport = false
+	if auto {
+		if send {
+			f.st.CrashReports = app.CrashReportsAlways
+		} else {
+			f.st.CrashReports = app.CrashReportsNever
+		}
+	}
+	f.mu.Unlock()
+	return nil
+}
+
 func demoState(inCall bool) app.UIState {
 	auto := true
-	st := app.UIState{Version: "0.1.0 (84) linux", Name: "Alice", Tag: "4417", Autostart: &auto, AutoWatch: true, PlaySounds: true,
+	st := app.UIState{Version: "0.1.0 (84) linux", Name: "Alice", Tag: "4417", Autostart: &auto, AutoWatch: true, PlaySounds: true, AnonymizeLogs: true, CrashReports: app.CrashReportsAsk,
 		Share: app.ShareConfig{
 			Source:        "primary",
 			Resolution:    "1080p",
@@ -383,7 +410,7 @@ func TestControlWindowInteractions(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Your name...", "Your identity key...", "Servers...", "Language",
-		"Open at sign-in", "Check for updates",
+		"Open at sign-in", "Crash reports", "Check for updates",
 	} {
 		if !slices.Contains(gearLabels, want) {
 			t.Errorf("gear menu missing %q (got %v)", want, gearLabels)
@@ -968,8 +995,8 @@ func TestApplyScenes(t *testing.T) {
 	defer a.Quit()
 	a.Settings().SetTheme(themeFor())
 
-	// Lobby scenes: sharesheet, advanced, gear, help.
-	for _, sc := range []string{"sharesheet", "advanced", "gear", "help"} {
+	// Lobby scenes: sharesheet, advanced, gear, help, crash-ask.
+	for _, sc := range []string{"sharesheet", "advanced", "gear", "help", "crash-ask"} {
 		u := &UI{a: &fakeBackend{st: demoState(false)}, fa: a, win: test.NewWindow(nil)}
 		u.view = container.NewStack()
 		u.win.SetContent(u.view)
@@ -1009,5 +1036,193 @@ func TestApplyScenes(t *testing.T) {
 		}
 		u.closed.Store(true)
 		u.win.Close()
+	}
+}
+
+func walkWidgets(o fyne.CanvasObject, fn func(fyne.CanvasObject)) {
+	if o == nil {
+		return
+	}
+	fn(o)
+	switch x := o.(type) {
+	case *fyne.Container:
+		for _, c := range x.Objects {
+			walkWidgets(c, fn)
+		}
+	case fyne.Widget:
+		r := test.WidgetRenderer(x)
+		if r != nil {
+			for _, c := range r.Objects() {
+				walkWidgets(c, fn)
+			}
+		}
+	}
+}
+
+func TestCrashReportsMenuAndDialogs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	i18n.SetPreference("en")
+	defer i18n.SetPreference("")
+
+	a := test.NewApp()
+	defer a.Quit()
+	a.Settings().SetTheme(themeFor())
+
+	// 1. Gear > Crash reports submenu reflects current setting and updates it.
+	st := demoState(false)
+	be := &fakeBackend{st: st}
+	u := &UI{a: be, fa: a, win: test.NewWindow(nil)}
+	defer func() {
+		u.closed.Store(true)
+		u.win.Close()
+	}()
+	u.view = container.NewStack()
+	u.win.SetContent(u.view)
+	u.refresh()
+
+	cm := u.crashReportsMenu()
+	if cm == nil || cm.ChildMenu == nil || len(cm.ChildMenu.Items) != 3 {
+		t.Fatalf("crashReportsMenu = %+v", cm)
+	}
+	items := cm.ChildMenu.Items
+	if items[0].Label != "Ask each time" || !items[0].Checked ||
+		items[1].Label != "Send automatically" || items[1].Checked ||
+		items[2].Label != "Don't send" || items[2].Checked {
+		t.Fatalf("unexpected crash submenu items: %+v %+v %+v", items[0], items[1], items[2])
+	}
+	items[2].Action()
+	for i := 0; i < 50; i++ {
+		be.mu.Lock()
+		n := len(be.crashModes)
+		be.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	be.mu.Lock()
+	if !slices.Equal(be.crashModes, []string{app.CrashReportsNever}) {
+		t.Fatalf("crashModes = %v, want [never]", be.crashModes)
+	}
+	be.mu.Unlock()
+
+	// 2. Send logs dialog checkbox starts ticked by default (AnonymizeLogs=true).
+	u.sendLogs()
+	ovs := u.win.Canvas().Overlays().List()
+	if len(ovs) != 1 {
+		t.Fatalf("expected Send logs overlay, got %d", len(ovs))
+	}
+	var anonCheck *widget.Check
+	walkWidgets(ovs[0], func(o fyne.CanvasObject) {
+		if c, ok := o.(*widget.Check); ok && strings.HasPrefix(c.Text, "Anonymize:") {
+			anonCheck = c
+		}
+	})
+	if anonCheck == nil || !anonCheck.Checked {
+		t.Fatalf("Send logs Anonymize checkbox = %+v, want checked by default", anonCheck)
+	}
+	u.win.Canvas().Overlays().Remove(ovs[0])
+
+	// 3. Pending crash report waits until window is shown, then shows dialog and sends answer.
+	st2 := demoState(false)
+	st2.CrashReport = true
+	be2 := &fakeBackend{st: st2}
+	u2 := &UI{a: be2, fa: a, win: test.NewWindow(nil)} // shown=false (hidden in tray)
+	defer func() {
+		u2.closed.Store(true)
+		u2.win.Close()
+	}()
+	u2.view = container.NewStack()
+	u2.win.SetContent(u2.view)
+	u2.refresh()
+	if len(u2.win.Canvas().Overlays().List()) != 0 {
+		t.Fatal("crash dialog must not open while window is hidden")
+	}
+
+	u2.shown = true
+	u2.maybeAskCrash()
+	ovs2 := u2.win.Canvas().Overlays().List()
+	if len(ovs2) != 1 {
+		t.Fatalf("expected crash dialog once window is shown, got %d overlays", len(ovs2))
+	}
+	var (
+		autoCheck  *widget.Check
+		sendBtn    *widget.Button
+		dontBtn    *widget.Button
+		foundBody  bool
+		foundTitle bool
+	)
+	walkWidgets(ovs2[0], func(o fyne.CanvasObject) {
+		switch w := o.(type) {
+		case *widget.Label:
+			if w.Text == "Bellion Share closed unexpectedly" {
+				foundTitle = true
+			}
+			if strings.Contains(w.Text, "Send the end of its log to the developers so we can fix it?") {
+				foundBody = true
+			}
+		case *widget.Check:
+			if w.Text == "Send automatically next time" {
+				autoCheck = w
+			}
+		case *widget.Button:
+			switch w.Text {
+			case "Send":
+				sendBtn = w
+			case "Don't send":
+				dontBtn = w
+			}
+		}
+	})
+	if !foundTitle || !foundBody || autoCheck == nil || sendBtn == nil || dontBtn == nil {
+		t.Fatalf("crash dialog widgets: title=%v body=%v check=%v send=%v dont=%v",
+			foundTitle, foundBody, autoCheck != nil, sendBtn != nil, dontBtn != nil)
+	}
+	test.Tap(autoCheck)
+	test.Tap(sendBtn)
+	for i := 0; i < 50; i++ {
+		be2.mu.Lock()
+		n := len(be2.crashAnswers)
+		be2.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	be2.mu.Lock()
+	if !slices.Equal(be2.crashAnswers, [][2]bool{{true, true}}) {
+		t.Fatalf("crashAnswers = %v, want [[true true]]", be2.crashAnswers)
+	}
+	be2.mu.Unlock()
+
+	// Also verify Don't send + checkbox ticked -> AnswerCrashReport(false, true).
+	u2.crashAskDialog()
+	ovs3 := u2.win.Canvas().Overlays().List()
+	autoCheck, dontBtn = nil, nil
+	walkWidgets(ovs3[len(ovs3)-1], func(o fyne.CanvasObject) {
+		if c, ok := o.(*widget.Check); ok && c.Text == "Send automatically next time" {
+			autoCheck = c
+		}
+		if b, ok := o.(*widget.Button); ok && b.Text == "Don't send" {
+			dontBtn = b
+		}
+	})
+	test.Tap(autoCheck)
+	test.Tap(dontBtn)
+	for i := 0; i < 50; i++ {
+		be2.mu.Lock()
+		n := len(be2.crashAnswers)
+		be2.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	be2.mu.Lock()
+	defer be2.mu.Unlock()
+	if !slices.Equal(be2.crashAnswers, [][2]bool{{true, true}, {false, true}}) {
+		t.Fatalf("crashAnswers = %v, want [[true true] [false true]]", be2.crashAnswers)
 	}
 }

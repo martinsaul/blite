@@ -1,18 +1,24 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 
 	"blite/internal/redact"
+	"blite/internal/room"
 )
 
 func TestParseLink(t *testing.T) {
 	for _, s := range []string{
 		"https://share.example.com/j/7K3QX9MD#se%20cret",
+		"https://share.example.com/j/7K3QX9MD?e2ee=1#se%20cret",
 		"bshare://join/7K3QX9MD#se%20cret",
+		"bshare://join/7K3QX9MD?e2ee=1#se%20cret",
 		"blite://join/7K3QX9MD#se%20cret", // links shared before the rename
+		"blite://join/7K3QX9MD?server=share.example.com&e2ee=1#se%20cret",
 	} {
 		code, pw, err := ParseLink(s)
 		if err != nil || code != "7K3QX9MD" || pw != "se cret" {
@@ -43,56 +49,170 @@ func TestParseLink(t *testing.T) {
 }
 
 func TestParseLinkServer(t *testing.T) {
-	for _, c := range []struct{ link, server string }{
-		{"https://share.example.com/j/7K3QX9MD#pw", "wss://share.example.com/ws"},
-		{"https://Share.Example.com:8443/j/7K3QX9MD#pw", "wss://share.example.com:8443/ws"},
-		{"http://localhost:8080/j/7K3QX9MD#pw", "ws://localhost:8080/ws"},
-		{"bshare://join/7K3QX9MD#pw", ""}, // older links: the built-in default
-		{"blite://join/7K3QX9MD#pw", ""},
-		{"bshare://join/7K3QX9MD?server=share.example.com#pw", "wss://share.example.com/ws"},
-		{"blite://join/7K3QX9MD?server=share.example.com%3A8443#pw", "wss://share.example.com:8443/ws"},
-		{"bshare://join/7K3QX9MD?server=ws%3A%2F%2Flocalhost%3A8080#pw", "ws://localhost:8080/ws"},
+	for _, c := range []struct {
+		link   string
+		server string
+		e2ee   bool
+	}{
+		{"https://share.example.com/j/7K3QX9MD#pw", "wss://share.example.com/ws", false},
+		{"https://share.example.com/j/7K3QX9MD?e2ee=1#pw", "wss://share.example.com/ws", true},
+		{"https://Share.Example.com:8443/j/7K3QX9MD#pw", "wss://share.example.com:8443/ws", false},
+		{"http://localhost:8080/j/7K3QX9MD?e2ee=1#pw", "ws://localhost:8080/ws", true},
+		{"bshare://join/7K3QX9MD#pw", "", false}, // older links: the built-in default
+		{"bshare://join/7K3QX9MD?e2ee=1#pw", "", true},
+		{"blite://join/7K3QX9MD#pw", "", false},
+		{"bshare://join/7K3QX9MD?server=share.example.com#pw", "wss://share.example.com/ws", false},
+		{"bshare://join/7K3QX9MD?server=share.example.com&e2ee=1#pw", "wss://share.example.com/ws", true},
+		{"blite://join/7K3QX9MD?server=share.example.com%3A8443&e2ee=1#pw", "wss://share.example.com:8443/ws", true},
+		{"bshare://join/7K3QX9MD?server=ws%3A%2F%2Flocalhost%3A8080#pw", "ws://localhost:8080/ws", false},
 	} {
-		server, code, pw, err := ParseLinkServer(c.link)
-		if err != nil || server != c.server || code != "7K3QX9MD" || pw != "pw" {
-			t.Errorf("%s: got %q %q %q %v, want server %q", c.link, server, code, pw, err, c.server)
+		server, code, pw, e2ee, err := ParseLinkServer(c.link)
+		if err != nil || server != c.server || code != "7K3QX9MD" || pw != "pw" || e2ee != c.e2ee {
+			t.Errorf("%s: got %q %q %q e2ee=%v %v, want server %q e2ee=%v", c.link, server, code, pw, e2ee, err, c.server, c.e2ee)
 		}
 	}
 	for _, s := range []string{"bshare://join/7K3QX9MD?server=not%20a%20host#pw", "bshare://join/7K3QX9MD?server=evil.example.com%2Fpath#pw"} {
-		if _, _, _, err := ParseLinkServer(s); err == nil {
+		if _, _, _, _, err := ParseLinkServer(s); err == nil {
 			t.Errorf("%s: want an error", s)
 		}
 	}
 }
 
-// The links a room hands out lead back to the same room, server and
-// password.
+// The links a room hands out lead back to the same room, server, password and
+// encryption requirement, and still parse with older clients' link logic.
 func TestLinkRoundTrip(t *testing.T) {
 	const def = "wss://bellion.example.com/ws"
 	for _, server := range []string{def, "wss://share.example.com/ws", "wss://share.example.com:8443/ws", "ws://localhost:8080/ws"} {
 		for _, pw := range []string{"", "se cret/#?"} {
-			app := AppLink(server, def, "7K3QX9MD", pw)
-			want := server
-			if server == def {
-				want = "" // not named: older builds open it too
-				if strings.Contains(app, "server=") {
-					t.Errorf("%s: names the default server", app)
+			for _, e2ee := range []bool{false, true} {
+				app := AppLink(server, def, "7K3QX9MD", pw, e2ee)
+				want := server
+				if server == def {
+					want = "" // not named: older builds open it too
+					if strings.Contains(app, "server=") {
+						t.Errorf("%s: names the default server", app)
+					}
 				}
-			}
-			s, code, p, err := ParseLinkServer(app)
-			if err != nil || s != want || code != "7K3QX9MD" || p != pw {
-				t.Errorf("%s: got %q %q %q %v", app, s, code, p, err)
-			}
-			share := ShareLink(server, "7K3QX9MD", pw)
-			s, code, p, err = ParseLinkServer(share)
-			if server == "ws://localhost:8080/ws" {
-				continue // share links are https; local test servers aren't
-			}
-			if err != nil || s != server || code != "7K3QX9MD" || p != pw {
-				t.Errorf("%s: got %q %q %q %v", share, s, code, p, err)
+				if before, _, _ := strings.Cut(app, "#"); strings.Contains(before, "e2ee=1") != e2ee {
+					t.Errorf("%s: marker mismatch for e2ee=%v", app, e2ee)
+				}
+				s, code, p, gotE2EE, err := ParseLinkServer(app)
+				if err != nil || s != want || code != "7K3QX9MD" || p != pw || gotE2EE != e2ee {
+					t.Errorf("%s: got %q %q %q e2ee=%v %v", app, s, code, p, gotE2EE, err)
+				}
+				if os, oc, op, oerr := legacyParseLinkServer(app); oerr != nil || os != want || oc != "7K3QX9MD" || op != pw {
+					t.Errorf("legacyParseLinkServer(%s): got %q %q %q %v", app, os, oc, op, oerr)
+				}
+
+				share := ShareLink(server, "7K3QX9MD", pw, e2ee)
+				if before, _, _ := strings.Cut(share, "#"); strings.Contains(before, "e2ee=1") != e2ee {
+					t.Errorf("%s: marker mismatch for e2ee=%v", share, e2ee)
+				}
+				s, code, p, gotE2EE, err = ParseLinkServer(share)
+				if server == "ws://localhost:8080/ws" {
+					continue // share links are https; local test servers aren't
+				}
+				if err != nil || s != server || code != "7K3QX9MD" || p != pw || gotE2EE != e2ee {
+					t.Errorf("%s: got %q %q %q e2ee=%v %v", share, s, code, p, gotE2EE, err)
+				}
+				if os, oc, op, oerr := legacyParseLinkServer(share); oerr != nil || os != server || oc != "7K3QX9MD" || op != pw {
+					t.Errorf("legacyParseLinkServer(%s): got %q %q %q %v", share, os, oc, op, oerr)
+				}
+				if os, oc, op, olink, oerr := legacyParseJoinInput(share); oerr != nil || !olink || os != server || oc != "7K3QX9MD" || op != pw {
+					t.Errorf("legacyParseJoinInput(%s): got %q %q %q %v %v", share, os, oc, op, olink, oerr)
+				}
 			}
 		}
 	}
+
+	// Simulate the blite:// link join.js builds when /j/{code}?e2ee=1#pw opens.
+	joinPageTarget := "blite://join/7K3QX9MD?server=share.example.com&e2ee=1#se%20cret"
+	if s, c, p, e2ee, err := ParseLinkServer(joinPageTarget); err != nil || s != "wss://share.example.com/ws" || c != "7K3QX9MD" || p != "se cret" || !e2ee {
+		t.Fatalf("join.js target parse: %q %q %q %v %v", s, c, p, e2ee, err)
+	}
+	if s, c, p, err := legacyParseLinkServer(joinPageTarget); err != nil || s != "wss://share.example.com/ws" || c != "7K3QX9MD" || p != "se cret" {
+		t.Fatalf("legacy join.js target parse: %q %q %q %v", s, c, p, err)
+	}
+}
+
+// legacyParseLink, legacyParseLinkServer and legacyParseJoinInput keep the
+// pre-marker parser logic verbatim to verify backward compatibility with older
+// clients.
+func legacyParseLink(s string) (code, pw string, err error) {
+	u, err := parseURLRedacted(strings.TrimSpace(s))
+	if err != nil {
+		return "", "", err
+	}
+	var path string
+	switch u.Scheme {
+	case "bshare", "blite":
+		path = strings.TrimPrefix(u.Host+u.Path, "join")
+	case "https", "http":
+		path = strings.TrimPrefix(u.Path, "/j")
+	default:
+		return "", "", fmt.Errorf("unknown link scheme %q", u.Scheme)
+	}
+	code = strings.Trim(path, "/")
+	pw = u.Fragment
+	if code == "" {
+		return "", "", errors.New("link needs a room code")
+	}
+	return code, pw, nil
+}
+
+func legacyParseLinkServer(s string) (server, code, pw string, err error) {
+	code, pw, err = legacyParseLink(s)
+	if err != nil {
+		return "", "", "", err
+	}
+	u, err := parseURLRedacted(strings.TrimSpace(s))
+	if err != nil {
+		return "", "", "", err
+	}
+	switch u.Scheme {
+	case "https", "http":
+		server = u.Host
+		if u.Scheme == "http" {
+			server = "ws://" + u.Host
+		}
+	default:
+		server = u.Query().Get("server")
+	}
+	if server == "" {
+		return "", code, pw, nil
+	}
+	if server, err = NormalizeServer(server); err != nil {
+		return "", "", "", errors.New("the link's server isn't valid: " + err.Error())
+	}
+	return server, code, pw, nil
+}
+
+func legacyParseJoinInput(s string) (server, code, pw string, isLink bool, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", "", false, errors.New("enter a share link or room code")
+	}
+	rawCode, frag, hasFrag := strings.Cut(s, "#")
+	if strings.Contains(rawCode, "://") {
+		server, code, pw, err = legacyParseLinkServer(s)
+		return server, code, pw, true, err
+	}
+	if strings.Contains(rawCode, "/j/") {
+		server, code, pw, err = legacyParseLinkServer("https://" + s)
+		return server, code, pw, true, err
+	}
+	code = room.NormalizeCode(rawCode)
+	if code == "" {
+		return "", "", "", false, errors.New("enter a share link or room code")
+	}
+	if hasFrag {
+		if unesc, uerr := url.PathUnescape(frag); uerr == nil {
+			pw = unesc
+		} else {
+			pw = frag
+		}
+	}
+	return "", code, pw, false, nil
 }
 
 func TestNormalizeServer(t *testing.T) {
@@ -129,26 +249,32 @@ func TestParseJoinInput(t *testing.T) {
 		server string
 		code   string
 		pw     string
+		e2ee   bool
 		isLink bool
 	}{
-		{"https://share.example.com/j/7K3QX9MD#se%20cret", "wss://share.example.com/ws", "7K3QX9MD", "se cret", true},
-		{"share.example.com/j/7K3QX9MD#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", true},
-		{"bshare://join/7K3QX9MD", "", "7K3QX9MD", "", true},
-		{"bshare://join/7K3QX9MD?server=share.example.com#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", true},
-		{"blite://join/7K3QX9MD#pw", "", "7K3QX9MD", "pw", true},
-		{"K7PQ-2M4X", "", "K7PQ2M4X", "", false},
-		{"  k7pq 2m4x  ", "", "K7PQ2M4X", "", false},
-		{"MAMACO", "", "MAMAC0", "", false},             // Crockford O -> 0, 6-char hosted code
-		{"GAME", "", "GAME", "", false},                 // 4-char hosted code
-		{"ABCDEFGHJKMN", "", "ABCDEFGHJKMN", "", false}, // 12-char hosted code
-		{"K7PQ-2M4X#se%20cret", "", "K7PQ2M4X", "se cret", false},
-		{"K7PQ-2M4X#pw/j/bar", "", "K7PQ2M4X", "pw/j/bar", false},
+		{"https://share.example.com/j/7K3QX9MD#se%20cret", "wss://share.example.com/ws", "7K3QX9MD", "se cret", false, true},
+		{"https://share.example.com/j/7K3QX9MD?e2ee=1#se%20cret", "wss://share.example.com/ws", "7K3QX9MD", "se cret", true, true},
+		{"share.example.com/j/7K3QX9MD#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", false, true},
+		{"share.example.com/j/7K3QX9MD?e2ee=1#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", true, true},
+		{"bshare://join/7K3QX9MD", "", "7K3QX9MD", "", false, true},
+		{"bshare://join/7K3QX9MD?e2ee=1", "", "7K3QX9MD", "", true, true},
+		{"bshare://join/7K3QX9MD?server=share.example.com#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", false, true},
+		{"bshare://join/7K3QX9MD?server=share.example.com&e2ee=1#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", true, true},
+		{"blite://join/7K3QX9MD#pw", "", "7K3QX9MD", "pw", false, true},
+		{"blite://join/7K3QX9MD?server=share.example.com&e2ee=1#pw", "wss://share.example.com/ws", "7K3QX9MD", "pw", true, true},
+		{"K7PQ-2M4X", "", "K7PQ2M4X", "", false, false},
+		{"  k7pq 2m4x  ", "", "K7PQ2M4X", "", false, false},
+		{"MAMACO", "", "MAMAC0", "", false, false},             // Crockford O -> 0, 6-char hosted code
+		{"GAME", "", "GAME", "", false, false},                 // 4-char hosted code
+		{"ABCDEFGHJKMN", "", "ABCDEFGHJKMN", "", false, false}, // 12-char hosted code
+		{"K7PQ-2M4X#se%20cret", "", "K7PQ2M4X", "se cret", false, false},
+		{"K7PQ-2M4X#pw/j/bar", "", "K7PQ2M4X", "pw/j/bar", false, false},
 	}
 	for _, c := range cases {
-		server, code, pw, isLink, err := ParseJoinInput(c.in)
-		if err != nil || server != c.server || code != c.code || pw != c.pw || isLink != c.isLink {
-			t.Errorf("%q: got (%q, %q, %q, %v, %v), want (%q, %q, %q, %v, nil)",
-				c.in, server, code, pw, isLink, err, c.server, c.code, c.pw, c.isLink)
+		server, code, pw, e2ee, isLink, err := ParseJoinInput(c.in)
+		if err != nil || server != c.server || code != c.code || pw != c.pw || e2ee != c.e2ee || isLink != c.isLink {
+			t.Errorf("%q: got (%q, %q, %q, %v, %v, %v), want (%q, %q, %q, %v, %v, nil)",
+				c.in, server, code, pw, e2ee, isLink, err, c.server, c.code, c.pw, c.e2ee, c.isLink)
 		}
 	}
 	for _, bad := range []string{
@@ -161,24 +287,28 @@ func TestParseJoinInput(t *testing.T) {
 		"bshare://join/#pw",   // empty code
 		"not a valid room code!",
 	} {
-		if _, _, _, _, err := ParseJoinInput(bad); err == nil {
+		if _, _, _, _, _, err := ParseJoinInput(bad); err == nil {
 			t.Errorf("%q: expected error, got nil", bad)
 		}
 	}
 }
 
 func TestParseJoinInputRedacted(t *testing.T) {
-	codes := []string{
+	inputs := []string{
 		"K7PQ-2M4X",
 		"  k7pq 2m4x  ",
 		"MAMACO",
 		"GAME",
 		"ABCDEFGHJKMN",
 		"7K3QX9MD",
+		"https://share.example.com/j/7K3QX9MD?e2ee=1",
+		"bshare://join/7K3QX9MD?e2ee=1",
+		"blite://join/7K3QX9MD?server=share.example.com&e2ee=1",
+		"share.example.com/j/7K3QX9MD?e2ee=1",
 	}
-	for _, raw := range codes {
+	for _, raw := range inputs {
 		withFrag := raw + "#s3cretJoinPw"
-		if _, _, pw, _, err := ParseJoinInput(withFrag); err != nil || pw != "s3cretJoinPw" {
+		if _, _, pw, _, _, err := ParseJoinInput(withFrag); err != nil || pw != "s3cretJoinPw" {
 			t.Fatalf("ParseJoinInput(%q) = pw %q, err %v", withFrag, pw, err)
 		}
 		line := fmt.Sprintf("msg=%q", withFrag)

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +31,11 @@ import (
 )
 
 const (
-	maxMessage   = 64 << 10
-	sendBuffer   = 64
-	pingInterval = 30 * time.Second // some proxies drop idle WebSockets after ~100 s
-	writeTimeout = 10 * time.Second
+	maxMessage      = 64 << 10
+	sendBuffer      = 64
+	pingInterval    = 30 * time.Second // some proxies drop idle WebSockets after ~100 s
+	writeTimeout    = 10 * time.Second
+	firstMsgTimeout = 10 * time.Second
 )
 
 // Config controls a Server.
@@ -45,7 +47,12 @@ type Config struct {
 	// TrustProxy makes the server take the client IP from CF-Connecting-IP /
 	// X-Forwarded-For. Only enable it behind a reverse proxy that sets them.
 	TrustProxy bool
-	ICE        turn.Provider
+	// TrustedProxies, when set, limits TrustProxy to requests whose TCP peer
+	// is in one of these networks; anyone else's headers are ignored. In
+	// X-Forwarded-For the client is the last address that isn't a trusted
+	// proxy. Empty = trust the headers from every peer (the old behavior).
+	TrustedProxies []netip.Prefix
+	ICE            turn.Provider
 	// MinCompatibleBuild refuses create/join from clients with a lower build
 	// number (update_required). IMPORTANT: bump it ONLY for a breaking protocol
 	// change; it locks out everyone below it. For anything else bump
@@ -53,7 +60,13 @@ type Config struct {
 	// 0 = accept any.
 	MinCompatibleBuild int
 	// MaxPeers caps room size (0 = no cap).
-	MaxPeers            int
+	MaxPeers int
+	// MaxRooms caps how many rooms clients can create (0 = no cap).
+	MaxRooms int
+	// MaxConns caps total concurrent /ws connections (0 = no cap).
+	MaxConns int
+	// MaxConnsPerIP caps concurrent /ws connections per client IP (0 = no cap).
+	MaxConnsPerIP       int
 	MinRecommendedBuild int
 	// HostKey lets a hosted relay create rooms with a fixed code
 	// (proto.Create.Room). Empty = nobody can.
@@ -77,8 +90,10 @@ type Config struct {
 	DiscordLinksFile    string
 	DiscordLinkRedirect string
 	// ReportDir stores client log reports (POST /v1/report). Empty = the
-	// endpoint is off.
-	ReportDir string
+	// endpoint is off. ReportMaxBytes bounds total report storage on disk
+	// (0 = DefaultReportMaxBytes).
+	ReportDir      string
+	ReportMaxBytes int64
 	// UpdateURL and UpdateChannel: where the download page finds the latest
 	// builds (molt). Empty UpdateURL = no download page.
 	UpdateURL     string
@@ -99,28 +114,37 @@ type Config struct {
 	// through the Worker only on a failover or once ActiveFile exists;
 	// LiveFile exists while it serves sessions of its own. Both default
 	// to files next to StateFile ("active", StateFile+".live").
-	Standby    bool
-	ActiveFile string
-	LiveFile   string
-	Log        *slog.Logger
+	// FailoverSecret authenticates FailoverHeader (empty = header ignored).
+	Standby        bool
+	FailoverSecret string
+	ActiveFile     string
+	LiveFile       string
+	Log            *slog.Logger
 }
 
 // Server serves Blite signaling.
 type Server struct {
-	cfg           Config
-	rooms         *room.Manager
-	failIP        *ratelimit.Window
-	failRoom      *ratelimit.Window
-	createIP      *ratelimit.Window
-	reportIP      *ratelimit.Window
-	lookIP        *ratelimit.Window
-	mux           *http.ServeMux
-	releases      *releases    // the download page (nil = off)
-	android       *androidInfo // the Android APK on the download page (nil = off)
-	discordPubKey ed25519.PublicKey
-	discord       *discordFollow // nil = no Discord bot
-	started       time.Time
-	saveMu        sync.Mutex // one SaveState at a time; guards blueGreen's mode changes
+	cfg             Config
+	rooms           *room.Manager
+	failIP          *ratelimit.Window
+	failRoom        *ratelimit.Window
+	createIP        *ratelimit.Window
+	reportIP        *ratelimit.Window
+	lookIP          *ratelimit.Window
+	pwIP            *ratelimit.Window
+	mux             *http.ServeMux
+	releases        *releases    // the download page (nil = off)
+	android         *androidInfo // the Android APK on the download page (nil = off)
+	discordPubKey   ed25519.PublicKey
+	discord         *discordFollow // nil = no Discord bot
+	started         time.Time
+	firstMsgTimeout time.Duration
+	sweepEvery      time.Duration
+	connMu          sync.Mutex
+	conns           int
+	connsIP         map[string]int
+	reportMu        sync.Mutex
+	saveMu          sync.Mutex // one SaveState at a time; guards blueGreen's mode changes
 	standbyState
 	blueGreen
 }
@@ -135,6 +159,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.StateEvery == 0 {
 		cfg.StateEvery = 30 * time.Second
+	}
+	if cfg.ReportMaxBytes == 0 {
+		cfg.ReportMaxBytes = DefaultReportMaxBytes
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
@@ -151,17 +178,22 @@ func New(cfg Config) *Server {
 		cfg.ActiveFile, cfg.LiveFile = "", ""
 	}
 	s := &Server{
-		cfg:      cfg,
-		rooms:    room.NewManager(cfg.ResumeGrace),
-		failIP:   ratelimit.New(5, 10*time.Minute),
-		failRoom: ratelimit.New(20, 10*time.Minute),
-		createIP: ratelimit.New(10, 10*time.Minute),
-		reportIP: ratelimit.New(20, time.Hour),
-		lookIP:   ratelimit.New(120, time.Minute),
-		mux:      http.NewServeMux(),
-		started:  time.Now(),
+		cfg:             cfg,
+		rooms:           room.NewManager(cfg.ResumeGrace),
+		failIP:          ratelimit.New(5, 10*time.Minute),
+		failRoom:        ratelimit.New(20, 10*time.Minute),
+		createIP:        ratelimit.New(10, 10*time.Minute),
+		reportIP:        ratelimit.New(20, time.Hour),
+		lookIP:          ratelimit.New(120, time.Minute),
+		pwIP:            ratelimit.New(30, time.Minute),
+		mux:             http.NewServeMux(),
+		started:         time.Now(),
+		firstMsgTimeout: firstMsgTimeout,
+		sweepEvery:      5 * time.Second,
+		connsIP:         map[string]int{},
 	}
 	s.rooms.MaxPeers = cfg.MaxPeers
+	s.rooms.MaxRooms = cfg.MaxRooms
 	if cfg.DeferState {
 		s.mode.Store(persistDeferred)
 	}
@@ -243,7 +275,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Run sweeps expired resume slots and rate-limit state, and saves the
 // StateFile, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(s.sweepEvery)
 	defer t.Stop()
 	if s.cfg.LiveFile != "" {
 		// Kept across a restart (statesync must not overwrite the state
@@ -294,6 +326,11 @@ func (s *Server) Run(ctx context.Context) {
 			s.failRoom.Sweep()
 			s.createIP.Sweep()
 			s.reportIP.Sweep()
+			s.lookIP.Sweep()
+			s.pwIP.Sweep()
+			if s.discord != nil {
+				s.discord.sweepPending()
+			}
 		}
 	}
 }
@@ -302,19 +339,55 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) Rooms() *room.Manager { return s.rooms }
 
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if !s.cfg.TrustProxy {
+		return host
+	}
+	if len(s.cfg.TrustedProxies) == 0 {
 		if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
 			return ip
 		}
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			return strings.TrimSpace(strings.Split(xff, ",")[0])
 		}
+		return host
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	if !s.trustedProxy(host) {
+		return host
+	}
+	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+		return ip
+	}
+	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" {
+			continue
+		}
+		if !s.trustedProxy(hop) {
+			return hop
+		}
+		host = hop
 	}
 	return host
+}
+
+// trustedProxy reports whether ip is in Config.TrustedProxies.
+func (s *Server) trustedProxy(ip string) bool {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range s.cfg.TrustedProxies {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // conn is one WebSocket client. It implements room.Outbox.
@@ -411,6 +484,31 @@ func (c *conn) pingLoop(ctx context.Context) {
 	}
 }
 
+func (s *Server) acquireConn(ip string) int {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.cfg.MaxConnsPerIP > 0 && s.connsIP[ip] >= s.cfg.MaxConnsPerIP {
+		return http.StatusTooManyRequests
+	}
+	if s.cfg.MaxConns > 0 && s.conns >= s.cfg.MaxConns {
+		return http.StatusServiceUnavailable
+	}
+	s.conns++
+	s.connsIP[ip]++
+	return 0
+}
+
+func (s *Server) releaseConn(ip string) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns--
+	if n := s.connsIP[ip] - 1; n <= 0 {
+		delete(s.connsIP, ip)
+	} else {
+		s.connsIP[ip] = n
+	}
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if s.draining.Load() {
 		s.refuseDrained(w)
@@ -420,6 +518,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.refuseStandby(w)
 		return
 	}
+	ip := s.clientIP(r)
+	if status := s.acquireConn(ip); status != 0 {
+		http.Error(w, "too many connections", status)
+		return
+	}
+	defer s.releaseConn(ip)
+
 	ws, err := websocket.Accept(w, r, nil) // default Origin check: same host or no Origin (native client)
 	if err != nil {
 		return
@@ -432,10 +537,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go c.writeLoop(ctx)
 	go c.pingLoop(ctx)
 
-	ip := s.clientIP(r)
 	var seat room.Seat
 	left, updating := false, false
 	lim := rate.NewLimiter(50, 100)
+	seatCtx, seatCancel := context.WithTimeout(ctx, s.firstMsgTimeout)
+	defer seatCancel()
 
 	defer func() {
 		if seat.PeerID != "" {
@@ -451,7 +557,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
-		_, data, err := ws.Read(ctx)
+		rctx := ctx
+		if seat.PeerID == "" {
+			rctx = seatCtx
+		}
+		_, data, err := ws.Read(rctx)
 		if err != nil {
 			if seat.PeerID != "" && !left && !updating && ctx.Err() == nil {
 				s.cfg.Log.Info("dropped", "status", websocket.CloseStatus(err), "err", err)
@@ -477,8 +587,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				c.close(websocket.StatusTryAgainLater, "draining: try again")
 				return
 			}
-			seat = s.enter(env.T, data, ip, c)
+			seat = s.enter(seatCtx, env.T, data, ip, c)
 			s.enterMu.RUnlock()
+			if seat.PeerID != "" {
+				seatCancel()
+			}
 			continue
 		}
 		switch env.T {
@@ -575,7 +688,7 @@ func osOf(c *proto.ClientMeta) string {
 
 // enter handles the first message on a connection: create, join or resume.
 // It returns the seat, or a zero Seat after sending an error.
-func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
+func (s *Server) enter(ctx context.Context, t string, data []byte, ip string, c *conn) room.Seat {
 	fail := func(code string) room.Seat {
 		c.Send(proto.Error{T: proto.TError, Code: code})
 		return room.Seat{}
@@ -591,7 +704,7 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 		if json.Unmarshal(data, &m) != nil {
 			return fail(proto.ErrBadRequest)
 		}
-		if s.createIP.Blocked(ip) {
+		if s.createIP.Blocked(ip) || (m.Password != "" && s.pwIP.Blocked(ip)) {
 			return fail(proto.ErrRateLimited)
 		}
 		if cm = m.Client; build(cm) < s.cfg.MinCompatibleBuild {
@@ -604,7 +717,10 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 					return fail(proto.ErrChannelBusy)
 				}
 			}
-			seat, err = s.rooms.Create(m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, c)
+			if m.Password != "" {
+				s.pwIP.Add(ip)
+			}
+			seat, err = s.rooms.Create(ctx, m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, c)
 			if err == nil && m.Channel != "" {
 				if terr := s.rooms.TieChannel(seat.Room, m.Channel); terr != nil {
 					s.cfg.Log.Warn("tie channel", "room", seat.Room, "err", terr)
@@ -616,7 +732,10 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 			s.failIP.Add(ip)
 			return fail(proto.ErrBadRequest)
 		}
-		seat, err = s.rooms.CreateFixed(room.NormalizeCode(m.Room), m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, m.Owners, c)
+		if m.Password != "" {
+			s.pwIP.Add(ip)
+		}
+		seat, err = s.rooms.CreateFixed(ctx, room.NormalizeCode(m.Room), m.Password, m.Name, m.IDKey, cm.Label(), build(cm), m.E2EE, m.Owners, c)
 	case proto.TJoin:
 		var m proto.Join
 		if json.Unmarshal(data, &m) != nil {
@@ -629,10 +748,11 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 		if code == "" {
 			return fail(proto.ErrNoRoom)
 		}
-		if s.failIP.Blocked(ip) || s.failRoom.Blocked(code) {
+		if s.failIP.Blocked(ip) || s.pwIP.Blocked(ip) || s.failRoom.Blocked(code) {
 			return fail(proto.ErrRateLimited)
 		}
-		seat, err = s.rooms.Join(code, m.Password, m.Name, m.IDKey, cm.Label(), build(cm), c)
+		s.pwIP.Add(ip)
+		seat, err = s.rooms.Join(ctx, code, m.Password, m.Name, m.IDKey, cm.Label(), build(cm), c)
 		if errors.Is(err, room.ErrBadPassword) || errors.Is(err, room.ErrNoRoom) {
 			s.failIP.Add(ip)
 			s.failRoom.Add(code)
@@ -655,10 +775,17 @@ func (s *Server) enter(t string, data []byte, ip string, c *conn) room.Seat {
 			return fail(proto.ErrBadRequest)
 		}
 		code := room.NormalizeCode(m.Room)
-		if s.failIP.Blocked(ip) || (code != "" && s.failRoom.Blocked(code)) {
+		if s.failIP.Blocked(ip) || s.pwIP.Blocked(ip) || (code != "" && s.failRoom.Blocked(code)) {
 			return fail(proto.ErrRateLimited)
 		}
-		exists := code != "" && s.rooms.Probe(code, m.Password)
+		var exists bool
+		if code != "" {
+			s.pwIP.Add(ip)
+			exists, err = s.rooms.ProbeContext(ctx, code, m.Password)
+			if err != nil {
+				return fail(err.Error())
+			}
+		}
 		if !exists {
 			s.failIP.Add(ip)
 			if code != "" {

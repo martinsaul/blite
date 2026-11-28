@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,9 @@ const (
 
 // SwapPackage is the Molt package that distributes molt-swap itself.
 const SwapPackage = "molt-swap"
+
+// MinSwapBuild is the lowest molt-swap build this client will accept (0 = no floor).
+var MinSwapBuild int
 
 // ApplyOptions describes how molt-swap should install and relaunch the app.
 type ApplyOptions struct {
@@ -156,11 +160,44 @@ func (c *Client) fetchSwap(ctx context.Context, cache string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("molt-swap: %w", err)
 	}
-	path, err := download(ctx, p, filepath.Join(cache, "swap", itoa(p.Build)), c.UserAgent(), nil)
+	swapDir := filepath.Join(cache, "swap")
+	markFile := filepath.Join(swapDir, "high-water-build")
+	high, err := readBuildMark(markFile)
 	if err != nil {
 		return "", fmt.Errorf("molt-swap: %w", err)
 	}
-	return path, os.Chmod(path, 0o755)
+	floor := max(int64(MinSwapBuild), high)
+	if p.Build <= 0 || p.Build < floor {
+		return "", fmt.Errorf("molt-swap: %w: build %d is below minimum %d", ErrBadSignature, p.Build, floor)
+	}
+	path, err := download(ctx, p, filepath.Join(swapDir, itoa(p.Build)), c.UserAgent(), nil)
+	if err != nil {
+		return "", fmt.Errorf("molt-swap: %w", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		return "", fmt.Errorf("molt-swap: %w", err)
+	}
+	if p.Build > high {
+		if err := os.WriteFile(markFile, []byte(itoa(p.Build)+"\n"), 0o600); err != nil {
+			return "", fmt.Errorf("molt-swap: %w", err)
+		}
+	}
+	return path, nil
+}
+
+func readBuildMark(path string) (int64, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%w: corrupt helper build mark", ErrBadSignature)
+	}
+	return n, nil
 }
 
 // ReportHealthy tells molt-swap this freshly installed version is up. It is a

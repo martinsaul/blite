@@ -33,20 +33,27 @@ blite.example.com {
 ```
 
 Set `BLITE_TRUST_PROXY=true` only when the proxy sets `X-Forwarded-For`
-(rate limits are per client IP). Keep proxy idle timeouts above 30 s; the
-server pings every 30 s.
+(rate limits are per client IP), and set `BLITE_TRUSTED_PROXIES` to the
+proxy's address or network (`blite-signal` refuses to start with
+`BLITE_TRUST_PROXY=true` unless `BLITE_TRUSTED_PROXIES` is set). Keep proxy
+idle timeouts above 30 s; the server pings every 30 s.
 
 | Env | Default | Meaning |
 |---|---|---|
 | `BLITE_ADDR` | `:8080` | Listen address |
-| `BLITE_TRUST_PROXY` | `false` | Take the client IP from `CF-Connecting-IP` / `X-Forwarded-For` |
+| `BLITE_TRUST_PROXY` | `false` | Take the client IP from `CF-Connecting-IP` / `X-Forwarded-For` (requires `BLITE_TRUSTED_PROXIES`) |
+| `BLITE_TRUSTED_PROXIES` | unset | Comma-separated addresses or networks of your proxy; required when `BLITE_TRUST_PROXY=true` |
 | `BLITE_TURN_SECRET` + `BLITE_TURN_URLS` | unset | coturn `use-auth-secret` credentials handed to peers (6 h TTL) |
 | `BLITE_ICE_JSON` | unset | Fixed ICE server list (JSON array) instead |
 | `BLITE_REPORT_DIR` | unset | Accept client log reports into this directory (kept 72 hours) |
+| `BLITE_REPORT_MAX_BYTES` | `2147483648` | Total disk budget in bytes for `BLITE_REPORT_DIR` (2 GiB; oldest deleted first) |
 | `BLITE_HOST_KEY` | unset | Shared secret with a hosted relay (fixed room codes) |
-| `BLITE_MAX_PEERS` | `0` | Cap room size (0 = no cap) |
+| `BLITE_MAX_PEERS` | `50` | Cap room size (0 = no cap) |
+| `BLITE_MAX_ROOMS` | `10000` | Cap how many rooms exist at once; past it, creating a room answers "wait a few minutes" (0 = no cap) |
+| `BLITE_MAX_CONNS` | `20000` | Cap total concurrent `/ws` connections (0 = no cap) |
+| `BLITE_MAX_CONNS_PER_IP` | `0` | Cap concurrent `/ws` connections per client IP, e.g. 32 (0 = no cap). Behind a proxy, set it only with `BLITE_TRUSTED_PROXIES`, or every user counts as the proxy |
 | `BLITE_STATE_FILE` | unset | Keep rooms across restarts: saved every 30 s and on shutdown, loaded on start, reloaded on `SIGHUP` (rooms served since the last load are kept). Members resume into their slots instead of rejoining; after a crash, changes since the last save are lost. It holds password and token hashes, so put it on a private volume |
-| `BLITE_COLOR` | unset | Blue/green deploys: this instance's color. With `.ci-deploy-defer-<color>` next to the state file at startup it starts deferred (see [BLUE_GREEN.md](BLUE_GREEN.md)) |
+| `BLITE_COLOR` | unset | Blue/green deploys: this instance's color. With `.ci-deploy-defer-<color>` next to the state file at startup it starts deferred until `-adopt` is called |
 | `BLITE_ADMIN_ADDR` | `127.0.0.1:8081` | Loopback-only listener for the deploy hooks (`-drain`, `-adopt`, `-undrain`, `-status`); `off` = none |
 | `BLITE_MIN_COMPATIBLE_BUILD` | `0` | Refuse clients below this build |
 | `BLITE_MIN_RECOMMENDED_BUILD` | `0` | Ask clients below this build to update |

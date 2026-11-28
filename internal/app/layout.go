@@ -12,6 +12,13 @@ import (
 	"blite/internal/session"
 )
 
+// Crash-report preferences (CrashReports, SetCrashReports).
+const (
+	CrashReportsAsk    = "ask"
+	CrashReportsAlways = "always"
+	CrashReportsNever  = "never"
+)
+
 type appSettings struct {
 	AutoWatch  *bool `json:"autoWatch,omitempty"`
 	PlaySounds *bool `json:"playSounds,omitempty"`
@@ -37,7 +44,14 @@ type appSettings struct {
 	Presets []QualityPreset `json:"presets,omitempty"`
 	// AnonymizeLogs: reports (Send logs, crash reports) leave out names,
 	// room codes, servers, window titles and this computer's names.
-	AnonymizeLogs bool `json:"anonymizeLogs,omitempty"`
+	// nil = never chose (default true).
+	AnonymizeLogs *bool `json:"anonymizeLogs,omitempty"`
+	// CrashReports: when crash logs from earlier runs are sent
+	// (CrashReportsAsk, CrashReportsAlways, CrashReportsNever; "" = ask).
+	CrashReports string `json:"crashReports,omitempty"`
+	// DiscordLinked: this install linked a Discord account on the server,
+	// so RunDiscord opens the follow socket at start.
+	DiscordLinked bool `json:"discordLinked,omitempty"`
 }
 
 func settingsFile() (string, error) {
@@ -100,6 +114,38 @@ func loadAutoWatch() bool {
 func loadPlaySounds() bool {
 	st := loadSettings()
 	return st.PlaySounds == nil || *st.PlaySounds
+}
+
+func anonymizeLogs(st appSettings) bool {
+	return st.AnonymizeLogs == nil || *st.AnonymizeLogs
+}
+
+func normalizeCrashReports(v string) string {
+	switch v {
+	case CrashReportsAlways, CrashReportsNever:
+		return v
+	default:
+		return CrashReportsAsk
+	}
+}
+
+// SaveAnonymizeLogs keeps the anonymize setting on disk.
+func SaveAnonymizeLogs(anon bool) error {
+	return updateSettings(func(st *appSettings) {
+		st.AnonymizeLogs = &anon
+	})
+}
+
+// CrashReports returns when crash logs from earlier runs are sent ("ask",
+// "always" or "never").
+func CrashReports() string { return normalizeCrashReports(loadSettings().CrashReports) }
+
+// SaveCrashReports keeps the crash-report setting on disk.
+func SaveCrashReports(mode string) error {
+	mode = normalizeCrashReports(mode)
+	return updateSettings(func(st *appSettings) {
+		st.CrashReports = mode
+	})
 }
 
 // LoadPortMap reports whether "Open a port on my router automatically" is
@@ -214,6 +260,17 @@ func saveHideChangelog(on bool) error {
 	return updateSettings(func(st *appSettings) {
 		st.HideChangelog = on
 	})
+}
+
+func discordLinked() bool { return loadSettings().DiscordLinked }
+
+func (a *App) setDiscordLinked(on bool) {
+	if discordLinked() == on {
+		return
+	}
+	if err := updateSettings(func(st *appSettings) { st.DiscordLinked = on }); err != nil {
+		a.log.Warn("save settings", "err", err)
+	}
 }
 
 func savePlaySounds(on bool) error {

@@ -77,6 +77,9 @@ func removeResume() {
 // Resume rejoins the call an in-call update left, if there is one, and
 // shares what we shared then. ok is false when there was nothing to resume.
 func (a *App) Resume(ctx context.Context) (ok bool, err error) {
+	if err := a.identityError(); err != nil {
+		return false, err
+	}
 	r, ok := readResume(time.Now())
 	if !ok {
 		return false, nil
@@ -115,6 +118,7 @@ func (a *App) Resume(ctx context.Context) (ok bool, err error) {
 	if r.Server != "" { // the server the call was on; older files: the default
 		cfg.Server = r.Server
 	}
+	cfg.E2EE = r.Encrypted
 	s, err := session.Join(ctx, cfg, r.Room, r.Password)
 	// Keep the file until a join worked or clearly can't: a build that
 	// crashes before this point is rolled back, and the old one rejoins.

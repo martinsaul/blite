@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,7 +48,10 @@ func dialHost(t *testing.T, url, host string, hdr http.Header) (*client, int) {
 func TestStandby(t *testing.T) {
 	dir := t.TempDir()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := New(Config{Standby: true, StateFile: filepath.Join(dir, "rooms.json"), Log: quiet})
+	const secret = "failover-hmac-secret"
+	now := time.Unix(1_700_000_010, 0)
+	s := New(Config{Standby: true, FailoverSecret: secret, StateFile: filepath.Join(dir, "rooms.json"), Log: quiet})
+	s.standbyNow = func() time.Time { return now }
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 	url := "ws" + strings.TrimPrefix(ts.URL, "http")
@@ -61,6 +65,18 @@ func TestStandby(t *testing.T) {
 			t.Fatalf("%s through the Worker, no failover: status %d, want 503", host, st)
 		}
 	}
+	// Unauthenticated or stale/wrong failover headers are refused.
+	min := now.Unix() / 60
+	for _, bad := range []string{
+		"o1.bellion.app:503 x5 over 6s",
+		hex.EncodeToString(failoverMAC("wrong-secret", min)),
+		hex.EncodeToString(failoverMAC(secret, min-2)),
+		hex.EncodeToString(failoverMAC(secret, min+1)),
+	} {
+		if _, st := dialHost(t, url, "bellion.app", http.Header{FailoverHeader: {bad}}); st != http.StatusServiceUnavailable {
+			t.Fatalf("bad failover header %q: status %d, want 503", bad, st)
+		}
+	}
 	// The old names don't go through the Worker: served.
 	old, st := dialHost(t, url, "old.example.net", nil)
 	if st != 0 {
@@ -69,10 +85,11 @@ func TestStandby(t *testing.T) {
 	old.send(proto.Create{T: proto.TCreate, Password: pw, Name: "old"})
 	old.expect(proto.TWelcome)
 
-	// The Worker gave up on the primary.
-	c, st := dialHost(t, url, "bellion.app", http.Header{FailoverHeader: {"o1.bellion.app:503 x5 over 6s"}})
+	// The Worker gave up on the primary: current and previous minute MACs work.
+	curTok := hex.EncodeToString(failoverMAC(secret, min))
+	c, st := dialHost(t, url, "bellion.app", http.Header{FailoverHeader: {curTok}})
 	if st != 0 {
-		t.Fatalf("failover refused: %d", st)
+		t.Fatalf("failover (current minute) refused: %d", st)
 	}
 	c.send(proto.Create{T: proto.TCreate, Password: pw, Name: "alice"})
 	w := c.expect(proto.TWelcome)
@@ -80,6 +97,13 @@ func TestStandby(t *testing.T) {
 	if _, err := os.Stat(live); err != nil {
 		t.Fatalf("live file while serving: %v", err)
 	}
+	prevTok := hex.EncodeToString(failoverMAC(secret, min-1))
+	cPrev, st := dialHost(t, url, "bellion.app", http.Header{FailoverHeader: {prevTok}})
+	if st != 0 {
+		t.Fatalf("failover (previous minute) refused: %d", st)
+	}
+	cPrev.send(proto.Join{T: proto.TJoin, Room: w["room"].(string), Password: pw, Name: "erin"})
+	cPrev.expect(proto.TWelcome)
 
 	// Promoted by hand.
 	os.WriteFile(active, nil, 0o600)
@@ -95,7 +119,7 @@ func TestStandby(t *testing.T) {
 	}
 
 	// Everyone leaves: no sessions of its own, no live file.
-	for _, cl := range []*client{old, c, c2} {
+	for _, cl := range []*client{old, c, cPrev, c2} {
 		cl.send(proto.Leave{T: proto.TLeave})
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -122,5 +146,17 @@ func TestNotStandby(t *testing.T) {
 	}
 	if s.cfg.LiveFile != "" || s.cfg.ActiveFile != "" {
 		t.Fatal("standby files set on a primary")
+	}
+}
+
+// With no FailoverSecret configured, FailoverHeader is ignored on a standby.
+func TestStandbyNoSecretIgnoresFailoverHeader(t *testing.T) {
+	s := New(Config{Standby: true, StateFile: filepath.Join(t.TempDir(), "rooms.json"), Log: quietLog()})
+	url := serve(t, s)
+	min := time.Now().Unix() / 60
+	for _, hdr := range []string{"anything", hex.EncodeToString(failoverMAC("", min))} {
+		if _, st := dialHost(t, url, "bellion.app", http.Header{FailoverHeader: {hdr}}); st != http.StatusServiceUnavailable {
+			t.Fatalf("no secret with header %q: status %d, want 503", hdr, st)
+		}
 	}
 }

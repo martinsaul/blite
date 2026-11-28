@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -173,6 +174,9 @@ var retryDelay = 2 * time.Second
 var stallTimeout = 60 * time.Second
 
 func download(ctx context.Context, p Payload, dir, ua string, progress func(done, total int64)) (string, error) {
+	if err := checkPayloadURL(p.URL); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -266,7 +270,15 @@ func fetchRange(ctx context.Context, p Payload, part, ua string, progress func(d
 	if have > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(have, 10)+"-")
 	}
-	resp, err := (&http.Client{}).Do(req)
+	hc := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return checkPayloadURL(req.URL.String())
+		},
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return false, stallErr(err)
 	}
@@ -307,6 +319,26 @@ func fetchRange(ctx context.Context, p Payload, part, ua string, progress func(d
 		return false, fmt.Errorf("download ended at %d of %d bytes", got, p.Size)
 	}
 	return true, nil
+}
+
+func checkPayloadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%w: invalid payload URL", ErrBadPayload)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		h := u.Hostname()
+		if strings.EqualFold(h, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: payload URL must use https", ErrBadPayload)
 }
 
 func fileMatches(path string, p Payload) (bool, error) {

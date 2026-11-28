@@ -16,12 +16,12 @@ import (
 func TestSnapshotRoundTrip(t *testing.T) {
 	m := NewManager(time.Minute)
 	ba, bb, bc := &box{}, &box{}, &box{}
-	a, err := m.Create(pw, "alice", "ka", "", 40, false, ba)
+	a, err := m.Create(bg, pw, "alice", "ka", "", 40, false, ba)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 40, bb)
-	c, _ := m.Join(a.Room, pw, "carol", "kc", "", 40, bc)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 40, bb)
+	c, _ := m.Join(bg, a.Room, pw, "carol", "kc", "", 40, bc)
 	if err := m.Volunteer(a.Room, b.PeerID, true); err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +73,13 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil || ra.Owner != a.PeerID || ra.Resume != a.Resume {
 		t.Fatalf("alice resume: %+v %v", ra, err)
 	}
-	if _, err := m2.Join(a.Room, "wrong password", "dave", "kd", "", 40, &box{}); err != ErrBadPassword {
+	if _, err := m2.Join(bg, a.Room, "wrong password", "dave", "kd", "", 40, &box{}); err != ErrBadPassword {
 		t.Fatalf("wrong password: %v", err)
 	}
-	if _, err := m2.Join(a.Room, pw, "carol", "kc", "", 40, &box{}); err != ErrBanned {
+	if _, err := m2.Join(bg, a.Room, pw, "carol", "kc", "", 40, &box{}); err != ErrBanned {
 		t.Fatalf("ban lost: %v", err)
 	}
-	if _, err := m2.Join(a.Room, pw, "dave", "kd", "", 40, &box{}); err != nil {
+	if _, err := m2.Join(bg, a.Room, pw, "dave", "kd", "", 40, &box{}); err != nil {
 		t.Fatalf("join after restore: %v", err)
 	}
 }
@@ -93,9 +93,9 @@ func TestSnapshotGrace(t *testing.T) {
 	now := time.Now()
 	m.now = func() time.Time { return now }
 	ba, bb, bc := &box{}, &box{}, &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, bb)
-	c, _ := m.Join(a.Room, pw, "carol", "kc", "", 0, bc)
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, bb)
+	c, _ := m.Join(bg, a.Room, pw, "carol", "kc", "", 0, bc)
 	now = now.Add(-30 * time.Second)
 	m.Disconnected(a.Room, c.PeerID, bc) // carol dropped 30 s before the snapshot
 	now = now.Add(30 * time.Second)
@@ -141,7 +141,7 @@ func TestSnapshotGrace(t *testing.T) {
 // a kick.
 func TestSnapshotRestoreMerge(t *testing.T) {
 	src := NewManager(time.Minute)
-	a, _ := src.Create(pw, "alice", "ka", "", 0, false, &box{})
+	a, _ := src.Create(bg, pw, "alice", "ka", "", 0, false, &box{})
 	data, _ := src.Snapshot()
 	src.Rename(a.Room, a.PeerID, "alice2")
 	data2, _ := src.Snapshot()
@@ -176,14 +176,14 @@ func TestSnapshotChannelTakeover(t *testing.T) {
 	for range 20 { // Restore walks rooms in map order
 		m := NewManager(time.Minute)
 		ba := &box{}
-		a, _ := m.Create("", "alice", "ka", "", 0, false, ba)
+		a, _ := m.Create(bg, "", "alice", "ka", "", 0, false, ba)
 		m.TieChannel(a.Room, "123456789")
 		m.Leave(a.Room, a.PeerID) // room A is empty but alive
-		b, _ := m.Create("", "bob", "kb", "", 0, false, &box{})
+		b, _ := m.Create(bg, "", "bob", "kb", "", 0, false, &box{})
 		if err := m.TieChannel(b.Room, "123456789"); err != nil {
 			t.Fatal(err)
 		}
-		m.Join(a.Room, "", "carol", "kc", "", 0, &box{}) // A has people again
+		m.Join(bg, a.Room, "", "carol", "kc", "", 0, &box{}) // A has people again
 		data, _ := m.Snapshot()
 		m2 := NewManager(time.Minute)
 		if _, err := m2.Restore(data); err != nil {
@@ -199,7 +199,7 @@ func TestSnapshotChannelTakeover(t *testing.T) {
 // race (run with -race).
 func TestSnapshotDuringTraffic(t *testing.T) {
 	m := NewManager(time.Minute)
-	a, _ := m.Create(pw, "alice", "ka", "", 40, false, &box{})
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 40, false, &box{})
 	m.mu.Lock()
 	m.rooms[a.Room].pw = passwordHash{} // an open room: no Argon2 per join
 	m.mu.Unlock()
@@ -207,7 +207,7 @@ func TestSnapshotDuringTraffic(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := range 200 {
-			s, err := m.Join(a.Room, "", "bob", string(rune('a'+i%26))+"k", "", 40, &box{})
+			s, err := m.Join(bg, a.Room, "", "bob", string(rune('a'+i%26))+"k", "", 40, &box{})
 			if err != nil {
 				continue
 			}
@@ -233,8 +233,8 @@ func TestSnapshotOwnerReclaims(t *testing.T) {
 	m := NewManager(time.Minute)
 	now := time.Now()
 	m.now = func() time.Time { return now }
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, &box{})
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, &box{})
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, &box{})
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, &box{})
 	data, _ := m.Snapshot()
 
 	m2 := NewManager(time.Minute)
@@ -243,7 +243,7 @@ func TestSnapshotOwnerReclaims(t *testing.T) {
 	m2.Resume(a.Room, b.PeerID, b.Resume, &box{})
 	now = now.Add(90 * time.Second) // alice's slot is gone, her hold isn't
 	m2.Sweep()
-	a2, err := m2.Join(a.Room, pw, "alice", "ka", "", 0, &box{})
+	a2, err := m2.Join(bg, a.Room, pw, "alice", "ka", "", 0, &box{})
 	if err != nil || a2.Owner != a2.PeerID {
 		t.Fatalf("alice rejoined: owner %q err %v, want her new ID %q", a2.Owner, err, a2.PeerID)
 	}
@@ -329,8 +329,8 @@ func TestSnapshotDuringOwnerHold(t *testing.T) {
 	m := NewManager(time.Minute)
 	m.now = func() time.Time { return now }
 	ba := &box{}
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, ba)
-	b, _ := m.Join(a.Room, pw, "bob", "kb", "", 0, &box{})
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, ba)
+	b, _ := m.Join(bg, a.Room, pw, "bob", "kb", "", 0, &box{})
 	m.Disconnected(a.Room, a.PeerID, ba)
 	now = now.Add(90 * time.Second) // her slot is gone, her hold isn't
 	m.Sweep()
@@ -345,7 +345,7 @@ func TestSnapshotDuringOwnerHold(t *testing.T) {
 	if got := ownerOf(m2, a.Room); got != a.PeerID {
 		t.Fatalf("restored owner %q, want alice (still held)", got)
 	}
-	a2, err := m2.Join(a.Room, pw, "alice", "ka", "", 0, &box{})
+	a2, err := m2.Join(bg, a.Room, pw, "alice", "ka", "", 0, &box{})
 	if err != nil || a2.Owner != a2.PeerID {
 		t.Fatalf("alice rejoined: owner %q err %v", a2.Owner, err)
 	}
@@ -355,8 +355,8 @@ func TestSnapshotDuringOwnerHold(t *testing.T) {
 	m3 := NewManager(time.Minute)
 	m3.now = m.now
 	bc := &box{}
-	c, _ := m3.Create(pw, "carol", "", "", 0, false, bc)
-	d, _ := m3.Join(c.Room, pw, "dave", "kd", "", 0, &box{})
+	c, _ := m3.Create(bg, pw, "carol", "", "", 0, false, bc)
+	d, _ := m3.Join(bg, c.Room, pw, "dave", "kd", "", 0, &box{})
 	m3.Disconnected(c.Room, c.PeerID, bc)
 	now = now.Add(61 * time.Second)
 	m3.Sweep()
@@ -370,11 +370,11 @@ func TestSnapshotDuringOwnerHold(t *testing.T) {
 // restores (host stayed set and the restore dropped every room).
 func TestSnapshotAfterHostLeft(t *testing.T) {
 	m := NewManager(time.Minute)
-	h, err := m.CreateFixed("7K3QX9MD", pw, "relay", "kh", "", 40, false, []string{"ka"}, &box{})
+	h, err := m.CreateFixed(bg, "7K3QX9MD", pw, "relay", "kh", "", 40, false, []string{"ka"}, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := m.Join(h.Room, pw, "bob", "kb", "", 40, &box{})
+	b, _ := m.Join(bg, h.Room, pw, "bob", "kb", "", 40, &box{})
 	m.Leave(h.Room, h.PeerID)
 	m.mu.Lock()
 	host := m.rooms[h.Room].host
@@ -386,7 +386,7 @@ func TestSnapshotAfterHostLeft(t *testing.T) {
 		t.Fatalf("owner %q, want bob", got)
 	}
 	m2 := restoreAll(t, m)
-	h2, err := m2.CreateFixed("7K3QX9MD", pw, "relay", "kh", "", 40, false, []string{"ka"}, &box{})
+	h2, err := m2.CreateFixed(bg, "7K3QX9MD", pw, "relay", "kh", "", 40, false, []string{"ka"}, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,9 +402,9 @@ func TestSnapshotAfterHostLeft(t *testing.T) {
 // members resume.
 func TestSnapshotMixed(t *testing.T) {
 	m := NewManager(time.Minute)
-	a, _ := m.Create(pw, "alice", "ka", "", 0, false, &box{})
-	b, _ := m.Create(pw, "bob", "kb", "", 0, false, &box{})
-	c, _ := m.Create(pw, "carol", "kc", "", 0, false, &box{})
+	a, _ := m.Create(bg, pw, "alice", "ka", "", 0, false, &box{})
+	b, _ := m.Create(bg, pw, "bob", "kb", "", 0, false, &box{})
+	c, _ := m.Create(bg, pw, "carol", "kc", "", 0, false, &box{})
 	data, _ := m.Snapshot()
 	var snap map[string]any
 	json.Unmarshal(data, &snap)
@@ -441,15 +441,15 @@ func TestSnapshotMixed(t *testing.T) {
 // isn't Served, and is deleted as soon as its last peer leaves.
 func TestCanaryRoomEphemeral(t *testing.T) {
 	m := NewManager(time.Minute)
-	c, err := m.Create("", CanaryPrefix+"-a", "", "", 0, false, &box{})
+	c, err := m.Create(bg, "", CanaryPrefix+"-a", "", "", 0, false, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := m.Join(c.Room, "", CanaryPrefix+"-b", "", "", 0, &box{})
+	j, err := m.Join(bg, c.Room, "", CanaryPrefix+"-b", "", "", 0, &box{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Create("", "alice", "", "", 0, false, &box{}); err != nil {
+	if _, err := m.Create(bg, "", "alice", "", "", 0, false, &box{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := m.Snapshot()
@@ -472,9 +472,9 @@ func TestCanaryRoomEphemeral(t *testing.T) {
 // Reset drops every room and hands back the live connections.
 func TestReset(t *testing.T) {
 	m := NewManager(time.Minute)
-	s, _ := m.Create("", "alice", "", "", 0, false, &box{})
-	m.Join(s.Room, "", "bob", "", "", 0, &box{})
-	b, _ := m.Create("", "carol", "", "", 0, false, &box{})
+	s, _ := m.Create(bg, "", "alice", "", "", 0, false, &box{})
+	m.Join(bg, s.Room, "", "bob", "", "", 0, &box{})
+	b, _ := m.Create(bg, "", "carol", "", "", 0, false, &box{})
 	m.Disconnected(b.Room, b.PeerID, nil) // no-op: out doesn't match
 	rooms, outs := m.Reset()
 	if rooms != 2 || len(outs) != 3 || m.Count() != 0 {

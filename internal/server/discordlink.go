@@ -21,6 +21,7 @@ import (
 	"blite/internal/discordbot"
 	"blite/internal/identity"
 	"blite/internal/proto"
+	"blite/internal/ratelimit"
 )
 
 // Discord links: a user ties their install (identity key) to their Discord
@@ -75,8 +76,9 @@ func (l *discordLinks) get(key string) (discordLink, bool) {
 	return k, ok
 }
 
-// set links key to dl, or unlinks it (dl nil).
-func (l *discordLinks) set(key string, dl *discordLink) error {
+// set links key to dl, or unlinks it (dl nil). It reports whether the link
+// state changed.
+func (l *discordLinks) set(key string, dl *discordLink) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.reloadLocked()
@@ -86,31 +88,38 @@ func (l *discordLinks) set(key string, dl *discordLink) error {
 	if dl != nil {
 		l.links[key] = *dl
 	} else {
+		if _, ok := l.links[key]; !ok {
+			return false, nil
+		}
 		delete(l.links, key)
 	}
 	if l.file == "" {
-		return nil
+		return true, nil
 	}
 	b, _ := json.Marshal(l.links)
 	tmp, err := os.CreateTemp(filepath.Dir(l.file), ".discord-links-*")
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = tmp.Write(b)
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return false, err
 	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), l.file)
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return false, err
 	}
-	if err != nil {
-		os.Remove(tmp.Name())
-		return err
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp.Name(), l.file); err != nil {
+		return false, err
 	}
 	if fi, err := os.Stat(l.file); err == nil {
 		l.mtime = fi.ModTime()
 	}
-	return nil
+	return true, nil
 }
 
 // follower is one connected app.
@@ -127,15 +136,22 @@ func (f *follower) send(m proto.DiscordMsg) {
 	}
 }
 
+const (
+	maxDiscordPending = 10000
+	discordMsgPerMin  = 5
+)
+
 // discordFollow is the server's side of Discord following.
 type discordFollow struct {
-	bot   *discordbot.Bot
-	links *discordLinks
+	bot        *discordbot.Bot
+	links      *discordLinks
+	maxPending int
 
-	mu      sync.Mutex
-	byUser  map[string]map[*follower]bool // linked followers
-	byKey   map[string]map[*follower]bool // all followers
-	pending map[string]pendingLink        // OAuth state -> who asked
+	mu           sync.Mutex
+	byUser       map[string]map[*follower]bool // linked followers
+	byKey        map[string]map[*follower]bool // all followers
+	pending      map[string]pendingLink        // OAuth state -> who asked
+	pendingByKey map[string]string             // identity key -> OAuth state
 }
 
 type pendingLink struct {
@@ -149,13 +165,32 @@ func newDiscordFollow(s *Server) *discordFollow {
 		file = filepath.Join(filepath.Dir(s.cfg.StateFile), "discord-links.json")
 	}
 	d := &discordFollow{
-		links:   &discordLinks{file: file},
-		byUser:  map[string]map[*follower]bool{},
-		byKey:   map[string]map[*follower]bool{},
-		pending: map[string]pendingLink{},
+		links:        &discordLinks{file: file},
+		maxPending:   maxDiscordPending,
+		byUser:       map[string]map[*follower]bool{},
+		byKey:        map[string]map[*follower]bool{},
+		pending:      map[string]pendingLink{},
+		pendingByKey: map[string]string{},
 	}
 	d.bot = &discordbot.Bot{Token: s.cfg.DiscordBotToken, Log: s.cfg.Log, Active: d.active, OnVoice: d.onVoice}
 	return d
+}
+
+func (d *discordFollow) sweepPending() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sweepPendingLocked(time.Now())
+}
+
+func (d *discordFollow) sweepPendingLocked(now time.Time) {
+	for st, p := range d.pending {
+		if now.After(p.expires) {
+			delete(d.pending, st)
+			if d.pendingByKey[p.key] == st {
+				delete(d.pendingByKey, p.key)
+			}
+		}
+	}
 }
 
 // active: someone with this Discord id has a linked app connected now.
@@ -267,18 +302,26 @@ func (s *Server) discordRedirect() string {
 	return siteURL + "/v1/discord/linked"
 }
 
-// linkURL starts linking key: the Discord page to open in a browser.
+// linkURL starts linking key: the Discord page to open in a browser, or ""
+// when the pending map is full.
 func (s *Server) linkURL(key string) string {
 	d := s.discord
 	st := randomToken()
-	d.mu.Lock()
 	now := time.Now()
-	for k, p := range d.pending {
-		if now.After(p.expires) {
-			delete(d.pending, k)
+	d.mu.Lock()
+	if old, ok := d.pendingByKey[key]; ok {
+		delete(d.pending, old)
+		delete(d.pendingByKey, key)
+	}
+	if d.maxPending > 0 && len(d.pending) >= d.maxPending {
+		d.sweepPendingLocked(now)
+		if len(d.pending) >= d.maxPending {
+			d.mu.Unlock()
+			return ""
 		}
 	}
 	d.pending[st] = pendingLink{key: key, expires: now.Add(15 * time.Minute)}
+	d.pendingByKey[key] = st
 	d.mu.Unlock()
 	q := url.Values{
 		"client_id":     {s.cfg.DiscordClientID},
@@ -371,6 +414,8 @@ func (s *Server) handleDiscordFollow(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	linkLim := ratelimit.New(discordMsgPerMin, time.Minute)
+	unlinkLim := ratelimit.New(discordMsgPerMin, time.Minute)
 	for {
 		m, err := read()
 		if err != nil {
@@ -378,9 +423,23 @@ func (s *Server) handleDiscordFollow(w http.ResponseWriter, r *http.Request) {
 		}
 		switch m.T {
 		case proto.TDiscordLink:
-			f.send(proto.DiscordMsg{T: proto.TDiscordState, LinkURL: s.linkURL(f.key)})
+			if linkLim.Blocked("") {
+				continue
+			}
+			linkLim.Add("")
+			if u := s.linkURL(f.key); u != "" {
+				f.send(proto.DiscordMsg{T: proto.TDiscordState, LinkURL: u})
+			} else {
+				st := d.state(f)
+				st.Error = proto.ErrRateLimited
+				f.send(st)
+			}
 		case proto.TDiscordUnlink:
-			if err := d.links.set(f.key, nil); err != nil {
+			if unlinkLim.Blocked("") {
+				continue
+			}
+			unlinkLim.Add("")
+			if _, err := d.links.set(f.key, nil); err != nil {
 				s.cfg.Log.Error("discord unlink", "err", err)
 			}
 			d.relink(ctx, f.key)
@@ -401,7 +460,12 @@ func (s *Server) handleDiscordLinked(w http.ResponseWriter, r *http.Request) {
 	st := r.URL.Query().Get("state")
 	d.mu.Lock()
 	p, ok := d.pending[st]
-	delete(d.pending, st)
+	if ok {
+		delete(d.pending, st)
+		if d.pendingByKey[p.key] == st {
+			delete(d.pendingByKey, p.key)
+		}
+	}
 	d.mu.Unlock()
 	if !ok || time.Now().After(p.expires) {
 		linkedPage(w, http.StatusBadRequest, "This link has expired. Click Connect Discord in Bellion Share again.")
@@ -418,7 +482,7 @@ func (s *Server) handleDiscordLinked(w http.ResponseWriter, r *http.Request) {
 		linkedPage(w, http.StatusBadGateway, "Discord didn't answer. Click Connect Discord in Bellion Share to try again.")
 		return
 	}
-	if err := d.links.set(p.key, &discordLink{User: user, Name: name, At: time.Now().UTC()}); err != nil {
+	if _, err := d.links.set(p.key, &discordLink{User: user, Name: name, At: time.Now().UTC()}); err != nil {
 		s.cfg.Log.Error("discord link", "err", err)
 		linkedPage(w, http.StatusInternalServerError, "The server couldn't save the link. Please try again later.")
 		return

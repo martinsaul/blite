@@ -147,6 +147,7 @@ func (u *UI) gearMenuItems() []*fyne.MenuItem {
 		unlink,
 		fyne.NewMenuItemSeparator(),
 		autostart,
+		u.crashReportsMenu(),
 		fyne.NewMenuItemSeparator(),
 		checkUp,
 		install,
@@ -208,6 +209,28 @@ func (u *UI) uiScaleMenu() *fyne.MenuItem {
 		}
 	}
 	return sub(i18n.L("Interface size"), items...)
+}
+
+// crashReportsMenu picks when crash logs from earlier runs are sent.
+func (u *UI) crashReportsMenu() *fyne.MenuItem {
+	cb, ok := u.a.(crashBackend)
+	if !ok {
+		return nil
+	}
+	cur := u.st.CrashReports
+	if cur == "" {
+		cur = app.CrashReportsAsk
+	}
+	set := func(mode string) func() {
+		return func() {
+			u.do(func() error { return cb.SetCrashReports(mode) })
+		}
+	}
+	return sub(i18n.L("Crash reports"),
+		check(i18n.L("Ask each time"), cur == app.CrashReportsAsk, set(app.CrashReportsAsk)),
+		check(i18n.L("Send automatically"), cur == app.CrashReportsAlways, set(app.CrashReportsAlways)),
+		check(i18n.L("Don't send"), cur == app.CrashReportsNever, set(app.CrashReportsNever)),
+	)
 }
 
 // languageMenu picks the app's language: the system's, or one by hand.

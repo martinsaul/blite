@@ -39,7 +39,7 @@
 <p><em>Share options</em> also has an <em>Advanced...</em> section with more sources (all screens combined, a test pattern, or nothing, to only watch), a custom frame rate, and the session's security:</p>
 <ul>
   <li><strong>Require a password</strong>: the session gets a password you choose. Without one, the session is open to anyone who has the link. Either way the link carries everything needed to join, so only send it to people you want in.</li>
-  <li><strong>Encrypt end to end</strong> (on by default): each sender encrypts its video and audio with keys that only people in the room get, so a TURN server passing them on can't read them. Everyone in the room needs build 72 or newer.</li>
+  <li><strong>Encrypt end to end</strong> (on by default): each sender encrypts its video and audio with keys that only people in the room get, so a TURN server passing them on can't read them; a relay is a room member and can. Everyone in the room needs build 72 or newer: the server turns older versions away instead of letting them in unencrypted. If you turn it off, everyone in the room sees <em>Not end-to-end encrypted</em> next to the room code.</li>
 </ul>
 <p>A password or turned-off encryption shows as a small tag on the card, so you see it before you go live. Both apply when you start a new session.</p>
 <p>If you use Discord, you can also go live straight in your voice channel: see <a href="/docs/discord">Discord</a>. Until Discord approves the Bellion app, this works only for a few people added as testers.</p>

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -46,66 +47,18 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	addr := env("BLITE_ADDR", ":8080")
-	ice, err := iceFromEnv()
+	cfg, code, msg, err := configFromEnv(os.Getenv)
 	if err != nil {
-		log.Error("bad ICE config", "err", err)
-		os.Exit(2)
+		log.Error(msg, "err", err)
+		os.Exit(code)
 	}
-	// Client build gates (see server.Config): BLITE_MIN_COMPATIBLE_BUILD only
-	// for breaking protocol changes, BLITE_MIN_RECOMMENDED_BUILD otherwise.
-	minCompat, err1 := strconv.Atoi(env("BLITE_MIN_COMPATIBLE_BUILD", "0"))
-	minRec, err2 := strconv.Atoi(env("BLITE_MIN_RECOMMENDED_BUILD", "0"))
-	if err1 != nil || err2 != nil {
-		log.Error("BLITE_MIN_COMPATIBLE_BUILD / BLITE_MIN_RECOMMENDED_BUILD must be build numbers")
-		os.Exit(1)
+	if code != 0 {
+		log.Error(msg)
+		os.Exit(code)
 	}
-	// Rooms are uncapped unless the operator sets BLITE_MAX_PEERS.
-	maxPeers, err := strconv.Atoi(env("BLITE_MAX_PEERS", "0"))
-	if err != nil || maxPeers < 0 {
-		log.Error("BLITE_MAX_PEERS must be a number (0 = no cap)")
-		os.Exit(1)
-	}
-	s := server.New(server.Config{
-		TrustProxy:          env("BLITE_TRUST_PROXY", "false") == "true",
-		ICE:                 ice,
-		MinCompatibleBuild:  minCompat,
-		MinRecommendedBuild: minRec,
-		MaxPeers:            maxPeers,
-		HostKey:             os.Getenv("BLITE_HOST_KEY"),
-		SiteAliases:         siteAliases(os.Getenv("BLITE_SITE_ALIASES")),
-		ReportDir:           os.Getenv("BLITE_REPORT_DIR"),
-		DiscordClientID:     os.Getenv("BLITE_DISCORD_CLIENT_ID"),
-		DiscordSecret:       os.Getenv("BLITE_DISCORD_SECRET"),
-		DiscordPublicKey:    os.Getenv("BLITE_DISCORD_PUBLIC_KEY"),
-		DiscordBotToken:     os.Getenv("BLITE_DISCORD_BOT_TOKEN"),
-		DiscordLinksFile:    os.Getenv("BLITE_DISCORD_LINKS_FILE"),
-		DiscordLinkRedirect: os.Getenv("BLITE_DISCORD_LINK_REDIRECT"),
-		UpdateURL:           os.Getenv("BLITE_UPDATE_URL"),
-		UpdateChannel:       env("BLITE_DOWNLOAD_CHANNEL", "beta"),
-		// BLITE_ANDROID_MANIFEST: the Android APK's manifest (blite-ops
-		// aws/android-publish.sh); "off" = no Android download.
-		AndroidManifest: androidManifest(env("BLITE_ANDROID_MANIFEST", "https://bellion.app/download/android.json")),
-		// BLITE_STATE_FILE keeps rooms across restarts: members resume
-		// instead of rejoining. It holds password and token hashes; keep
-		// it on a private volume.
-		StateFile: os.Getenv("BLITE_STATE_FILE"),
-		// Blue/green: BLITE_COLOR=green plus the file
-		// .ci-deploy-defer-green next to the state file at startup =
-		// deferred: the state file is neither loaded nor written until
-		// adopt (SIGHUP or -adopt).
-		DeferState: server.ShouldDefer(os.Getenv("BLITE_STATE_FILE"), os.Getenv("BLITE_COLOR")),
-		// BLITE_STANDBY=1: the warm standby behind the Worker.
-		// It takes sessions through the Worker only on a failover, or
-		// once BLITE_ACTIVE_FILE (default "active" next to the state
-		// file) exists.
-		Standby:    env("BLITE_STANDBY", "") == "1",
-		ActiveFile: os.Getenv("BLITE_ACTIVE_FILE"),
-		Log:        log,
-	})
-	if standby := env("BLITE_STANDBY", ""); standby != "" && standby != "0" && standby != "1" {
-		log.Error("BLITE_STANDBY must be 1 or unset")
-		os.Exit(1)
-	} else if standby == "1" {
+	cfg.Log = log
+	s := server.New(cfg)
+	if cfg.Standby {
 		log.Info("standby mode: sessions through the Worker only on a failover or when promoted")
 	}
 	if s.Deferred() {
@@ -232,25 +185,112 @@ func canaryCmd(args []string) int {
 }
 
 func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
+	return envFrom(os.Getenv, k, def)
+}
+
+func envFrom(getenv func(string) string, k, def string) string {
+	if v := getenv(k); v != "" {
 		return v
 	}
 	return def
 }
 
-// iceFromEnv picks the ICE provider:
+func configFromEnv(getenv func(string) string) (cfg server.Config, exitCode int, errMsg string, err error) {
+	ice, err := iceFrom(getenv)
+	if err != nil {
+		return cfg, 2, "bad ICE config", err
+	}
+	// Client build gates (see server.Config): BLITE_MIN_COMPATIBLE_BUILD only
+	// for breaking protocol changes, BLITE_MIN_RECOMMENDED_BUILD otherwise.
+	minCompat, err1 := strconv.Atoi(envFrom(getenv, "BLITE_MIN_COMPATIBLE_BUILD", "0"))
+	minRec, err2 := strconv.Atoi(envFrom(getenv, "BLITE_MIN_RECOMMENDED_BUILD", "0"))
+	if err1 != nil || err2 != nil {
+		return cfg, 1, "BLITE_MIN_COMPATIBLE_BUILD / BLITE_MIN_RECOMMENDED_BUILD must be build numbers", nil
+	}
+	maxPeers, err := strconv.Atoi(envFrom(getenv, "BLITE_MAX_PEERS", "50"))
+	if err != nil || maxPeers < 0 {
+		return cfg, 1, "BLITE_MAX_PEERS must be a number (0 = no cap)", nil
+	}
+	maxRooms, err := strconv.Atoi(envFrom(getenv, "BLITE_MAX_ROOMS", "10000"))
+	if err != nil || maxRooms < 0 {
+		return cfg, 1, "BLITE_MAX_ROOMS must be a number (0 = no cap)", nil
+	}
+	maxConns, err := strconv.Atoi(envFrom(getenv, "BLITE_MAX_CONNS", "20000"))
+	if err != nil || maxConns < 0 {
+		return cfg, 1, "BLITE_MAX_CONNS must be a number (0 = no cap)", nil
+	}
+	maxConnsPerIP, err := strconv.Atoi(envFrom(getenv, "BLITE_MAX_CONNS_PER_IP", "0"))
+	if err != nil || maxConnsPerIP < 0 {
+		return cfg, 1, "BLITE_MAX_CONNS_PER_IP must be a number (0 = no cap)", nil
+	}
+	reportMaxBytes, err := strconv.ParseInt(envFrom(getenv, "BLITE_REPORT_MAX_BYTES", strconv.FormatInt(server.DefaultReportMaxBytes, 10)), 10, 64)
+	if err != nil || reportMaxBytes <= 0 {
+		return cfg, 1, "BLITE_REPORT_MAX_BYTES must be a positive number of bytes", nil
+	}
+	proxies, err := parsePrefixes(getenv("BLITE_TRUSTED_PROXIES"))
+	if err != nil {
+		return cfg, 1, "BLITE_TRUSTED_PROXIES must be comma-separated addresses or networks", err
+	}
+	var trustProxy bool
+	switch envFrom(getenv, "BLITE_TRUST_PROXY", "false") {
+	case "true", "1":
+		trustProxy = true
+	case "false", "0":
+	default:
+		return cfg, 1, "BLITE_TRUST_PROXY must be true or false", nil
+	}
+	if trustProxy && len(proxies) == 0 {
+		return cfg, 1, "BLITE_TRUST_PROXY requires BLITE_TRUSTED_PROXIES", nil
+	}
+	standby := envFrom(getenv, "BLITE_STANDBY", "")
+	if standby != "" && standby != "0" && standby != "1" {
+		return cfg, 1, "BLITE_STANDBY must be 1 or unset", nil
+	}
+	stateFile := getenv("BLITE_STATE_FILE")
+	return server.Config{
+		TrustProxy:          trustProxy,
+		TrustedProxies:      proxies,
+		MaxRooms:            maxRooms,
+		MaxConns:            maxConns,
+		MaxConnsPerIP:       maxConnsPerIP,
+		ICE:                 ice,
+		MinCompatibleBuild:  minCompat,
+		MinRecommendedBuild: minRec,
+		MaxPeers:            maxPeers,
+		HostKey:             getenv("BLITE_HOST_KEY"),
+		SiteAliases:         siteAliases(getenv("BLITE_SITE_ALIASES")),
+		ReportDir:           getenv("BLITE_REPORT_DIR"),
+		ReportMaxBytes:      reportMaxBytes,
+		DiscordClientID:     getenv("BLITE_DISCORD_CLIENT_ID"),
+		DiscordSecret:       getenv("BLITE_DISCORD_SECRET"),
+		DiscordPublicKey:    getenv("BLITE_DISCORD_PUBLIC_KEY"),
+		DiscordBotToken:     getenv("BLITE_DISCORD_BOT_TOKEN"),
+		DiscordLinksFile:    getenv("BLITE_DISCORD_LINKS_FILE"),
+		DiscordLinkRedirect: getenv("BLITE_DISCORD_LINK_REDIRECT"),
+		UpdateURL:           getenv("BLITE_UPDATE_URL"),
+		UpdateChannel:       envFrom(getenv, "BLITE_DOWNLOAD_CHANNEL", "beta"),
+		AndroidManifest:     androidManifest(envFrom(getenv, "BLITE_ANDROID_MANIFEST", "https://bellion.app/download/android.json")),
+		StateFile:           stateFile,
+		DeferState:          server.ShouldDefer(stateFile, getenv("BLITE_COLOR")),
+		Standby:             standby == "1",
+		FailoverSecret:      getenv("BLITE_FAILOVER_SECRET"),
+		ActiveFile:          getenv("BLITE_ACTIVE_FILE"),
+	}, 0, "", nil
+}
+
+// iceFrom picks the ICE provider:
 //   - BLITE_TURN_SECRET + BLITE_TURN_URLS (comma-separated): coturn REST credentials
 //   - BLITE_ICE_JSON: a fixed JSON array of ICE servers
 //   - otherwise: public STUN only
-func iceFromEnv() (turn.Provider, error) {
-	if secret := os.Getenv("BLITE_TURN_SECRET"); secret != "" {
-		urls := strings.Split(env("BLITE_TURN_URLS", ""), ",")
+func iceFrom(getenv func(string) string) (turn.Provider, error) {
+	if secret := getenv("BLITE_TURN_SECRET"); secret != "" {
+		urls := strings.Split(envFrom(getenv, "BLITE_TURN_URLS", ""), ",")
 		if urls[0] == "" {
 			return nil, errors.New("BLITE_TURN_SECRET set without BLITE_TURN_URLS")
 		}
 		return turn.Coturn{URLs: urls, Secret: []byte(secret), TTL: 6 * time.Hour, Extra: turn.DefaultSTUN}, nil
 	}
-	if js := os.Getenv("BLITE_ICE_JSON"); js != "" {
+	if js := getenv("BLITE_ICE_JSON"); js != "" {
 		var s turn.Static
 		if err := json.Unmarshal([]byte(js), &s); err != nil {
 			return nil, err
@@ -276,4 +316,27 @@ func androidManifest(v string) string {
 		return ""
 	}
 	return v
+}
+
+// parsePrefixes reads a comma-separated list of addresses (one host each) and
+// CIDR networks.
+func parsePrefixes(v string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, f := range strings.Split(v, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(f); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			return nil, fmt.Errorf("%q: not an address or network", f)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
 }

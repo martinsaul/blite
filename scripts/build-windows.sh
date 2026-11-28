@@ -64,7 +64,18 @@ Share links open in Bellion Share once it has run once.
 Per-app audio needs Windows 11 (or Windows 10 build 20348+).
 Updates: Bellion Share checks the ${BLITE_DEFAULT_CHANNEL:-beta} channel and offers new builds in its window.
 Logs: %LOCALAPPDATA%\\Blite\\logs. Crash dumps: %LOCALAPPDATA%\\Blite\\crash.
+Licenses and where to get the source: licenses\\README.txt.
 TXT
+# Licenses: the app's, every Go module's, and GStreamer's (the SDK's texts
+# for GStreamer and each library it bundles), plus where to get the source.
+lic=$out/blite/licenses
+mkdir -p "$lic"
+cp LICENSE "$lic/LICENSE.txt"
+python3 -I scripts/third-party-notices.py "$lic/GO-MODULES.txt" ./cmd/blite ./cmd/blite-guard
+[ -d "$gst/share/licenses" ] || { echo "no share/licenses in the GStreamer SDK" >&2; exit 1; }
+cp -r "$gst/share/licenses" "$lic/gstreamer"
+gstver=$(pkg-config --modversion gstreamer-1.0 | cut -d. -f1-3)
+scripts/source-notice.sh "$BUILD" windows "$gstver" > "$lic/README.txt"
 rm -f "$out/blite-windows.zip"
 python3 -I scripts/detzip.py "$out/blite-windows.zip" "$out/blite"
 du -sh "$out/blite" "$out/blite-windows.zip"

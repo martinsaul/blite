@@ -122,6 +122,8 @@ type Options struct {
 	OnSending func(origin string, height, top int, congested bool)
 	// OnRenamed is told a member's new display name.
 	OnRenamed func(peerID, name string)
+	// OnKeyChanged is told when a member's identity key changes on resume.
+	OnKeyChanged func(peerID, name string)
 	// OnOwner is told the room's owner whenever it changes ("" = none).
 	OnOwner func(peerID string)
 	// OnKicked is told the owner (by name) removed us; ban: for good.
@@ -609,32 +611,60 @@ func (m *Mesh) loop() {
 		case ev.Resumed != nil:
 			// Back on signaling: forget peers that left while we were away.
 			present := map[string]bool{}
-			var joined []proto.Peer
+			var joined, keyChanged, renamed []proto.Peer
+			m.mu.Lock()
 			for _, p := range ev.Resumed {
 				present[p.PeerID] = true
-				m.mu.Lock()
 				if !m.members[p.PeerID] {
 					joined = append(joined, p)
 					m.joinedAt[p.PeerID] = time.Now()
+				} else if m.idKeys[p.PeerID] != p.IDKey {
+					keyChanged = append(keyChanged, p)
+				} else if m.names[p.PeerID] != p.Name {
+					renamed = append(renamed, p)
 				}
 				m.names[p.PeerID], m.idKeys[p.PeerID], m.vers[p.PeerID] = p.Name, p.IDKey, p.Client
 				m.builds[p.PeerID] = p.Build
-				m.mu.Unlock()
 			}
-			m.mu.Lock()
+			var gone []string
+			relayGone := false
 			for id := range m.members {
 				if !present[id] {
+					gone = append(gone, id)
+					if m.isRelayLocked(id) {
+						relayGone = true
+					}
+					delete(m.caps, id)
 					delete(m.watchingPeer, id)
 					delete(m.rehomingWatch, id)
+					delete(m.origins, id)
+					delete(m.joinedAt, id)
+					delete(m.redials, id)
 				}
 			}
+			for id := range m.peers {
+				if !present[id] && !slices.Contains(gone, id) {
+					gone = append(gone, id)
+				}
+			}
+			changedID := map[string]bool{}
+			for _, p := range keyChanged {
+				changedID[p.PeerID] = true
+				if m.isRelayLocked(p.PeerID) {
+					relayGone = true
+				}
+				delete(m.watchingPeer, p.PeerID)
+				delete(m.rehomingWatch, p.PeerID)
+				delete(m.origins, p.PeerID)
+				delete(m.redials, p.PeerID)
+			}
+			if relayGone {
+				clear(m.rehomingWatch)
+			}
 			m.members = present
-			var gone []string
 			var kept []*remote
 			for id, r := range m.peers {
-				if !present[id] {
-					gone = append(gone, id)
-				} else {
+				if present[id] && !changedID[id] {
 					kept = append(kept, r)
 				}
 			}
@@ -642,6 +672,24 @@ func (m *Mesh) loop() {
 			m.mu.Unlock()
 			for _, id := range gone {
 				m.drop(id)
+			}
+			for _, p := range keyChanged {
+				m.dropConn(p.PeerID)
+				m.forgetDemand(p.PeerID)
+			}
+			if m.crypt != nil {
+				for _, id := range gone {
+					m.cryptForget(id, m.crypt.grace)
+				}
+				for _, p := range keyChanged {
+					m.cryptForget(p.PeerID, 0)
+				}
+				if len(gone) > 0 || len(keyChanged) > 0 {
+					m.cryptRotate()
+				}
+				for _, p := range joined {
+					m.sendKX(p.PeerID)
+				}
 			}
 			for _, r := range kept {
 				r.polMu.Lock()
@@ -653,11 +701,24 @@ func (m *Mesh) loop() {
 			m.resendCaps()
 			m.pushDemand()
 			m.checkAllWatching()
+			if len(gone) > 0 || len(keyChanged) > 0 {
+				m.triggerRebalance()
+			}
 			for _, r := range kept {
 				m.sig.Signal(r.id, signalMsg{Resumed: true})
 				if r.connected.Load() {
 					m.resendSending(r)
 					m.resendRelaySending(r)
+				}
+			}
+			if m.opt.OnKeyChanged != nil {
+				for _, p := range keyChanged {
+					m.opt.OnKeyChanged(p.PeerID, p.Name)
+				}
+			}
+			if m.opt.OnRenamed != nil {
+				for _, p := range renamed {
+					m.opt.OnRenamed(p.PeerID, p.Name)
 				}
 			}
 			if m.opt.OnJoined != nil {
@@ -1745,10 +1806,17 @@ func (m *Mesh) flushICE(r *remote) {
 }
 
 func (m *Mesh) drop(id string) {
+	name, had := m.dropConn(id)
+	if (had || name != "") && m.opt.OnPeer != nil {
+		m.opt.OnPeer(id, name, "gone")
+	}
+}
+
+func (m *Mesh) dropConn(id string) (name string, had bool) {
 	m.mu.Lock()
 	r := m.peers[id]
 	delete(m.peers, id)
-	name := m.names[id]
+	name = m.names[id]
 	m.mu.Unlock()
 	m.stopTranscoder(id)
 	m.forgetView(id)
@@ -1756,10 +1824,9 @@ func (m *Mesh) drop(id string) {
 	if r != nil {
 		m.closePC(r)
 		m.updateLowBitrate() // the worst-off peer may have left
-		if m.opt.OnPeer != nil {
-			m.opt.OnPeer(id, name, "gone")
-		}
+		return name, true
 	}
+	return name, false
 }
 
 // Rename sets our display name in the room.

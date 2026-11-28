@@ -5,6 +5,7 @@
 package identity
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,11 +14,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"blite/internal/secret"
 )
 
 // Key is this device's identity.
@@ -38,20 +42,94 @@ func dir() (string, error) {
 	return filepath.Join(d, "blite"), nil
 }
 
-// LoadOrCreate reads the key from the user's config dir (0600 file), creating it
-// on first run. POC: a file, not the OS keystore.
+// ErrWrongAccount means identity.key was protected with DPAPI on another
+// computer or Windows account and cannot be opened here.
+var ErrWrongAccount = errors.New("this identity key was protected on another computer or Windows account; restore it from a backup")
+
+func encodeSeed(seed []byte) ([]byte, error) {
+	if secret.Enabled {
+		s, err := secret.Seal(seed)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(s + "\n"), nil
+	}
+	return []byte(base64.StdEncoding.EncodeToString(seed) + "\n"), nil
+}
+
+func migrateKey(p string, seed []byte) error {
+	sealed, err := secret.Seal(seed)
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(sealed+"\n"), 0o600); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	rb, err := os.ReadFile(tmp)
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	raw := strings.TrimSpace(string(rb))
+	if !secret.Sealed(raw) {
+		os.Remove(tmp)
+		return errors.New("migrated key lacks dpapi prefix")
+	}
+	got, err := secret.Open(raw)
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	defer clear(got)
+	if !bytes.Equal(got, seed) {
+		os.Remove(tmp)
+		return errors.New("migrated key mismatch")
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// LoadOrCreate reads the key from the user's config dir (DPAPI-sealed on
+// Windows, 0600 file elsewhere), creating it on first run.
 func LoadOrCreate() (Key, error) {
 	d, err := dir()
 	if err != nil {
 		return Key{}, err
 	}
 	p := filepath.Join(d, "identity.key")
-	if b, err := os.ReadFile(p); err == nil {
-		seed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
+	b, err := os.ReadFile(p)
+	if err == nil {
+		raw := strings.TrimSpace(string(b))
+		if secret.Sealed(raw) {
+			seed, err := secret.Open(raw)
+			if err != nil {
+				return Key{}, ErrWrongAccount
+			}
+			defer clear(seed)
+			if len(seed) != ed25519.SeedSize {
+				return Key{}, fmt.Errorf("corrupt identity key %s", p)
+			}
+			return Key{Private: ed25519.NewKeyFromSeed(seed)}, nil
+		}
+		seed, err := base64.StdEncoding.DecodeString(raw)
 		if err != nil || len(seed) != ed25519.SeedSize {
 			return Key{}, fmt.Errorf("corrupt identity key %s", p)
 		}
+		defer clear(seed)
+		if secret.Enabled {
+			if err := migrateKey(p, seed); err != nil {
+				slog.Warn("migrate identity key", "err", err)
+			}
+		}
 		return Key{Private: ed25519.NewKeyFromSeed(seed)}, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return Key{}, err
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -60,7 +138,11 @@ func LoadOrCreate() (Key, error) {
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		return Key{}, err
 	}
-	if err := os.WriteFile(p, []byte(base64.StdEncoding.EncodeToString(priv.Seed())+"\n"), 0o600); err != nil {
+	enc, err := encodeSeed(priv.Seed())
+	if err != nil {
+		return Key{}, err
+	}
+	if err := os.WriteFile(p, enc, 0o600); err != nil {
 		return Key{}, err
 	}
 	return Key{Private: priv}, nil

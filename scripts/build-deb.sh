@@ -14,6 +14,30 @@ pkg=$(mktemp -d)
 trap 'rm -rf "$pkg"' EXIT
 install -Dm755 "$out/bin/blite" "$pkg/usr/bin/blite"
 install -d "$pkg/usr/share/applications" "$pkg/DEBIAN"
+# Licenses: the app's and every Go module's, plus where to get the source.
+# GStreamer comes from the distribution's packages.
+lic=$(mktemp -d)
+trap 'rm -rf "$pkg" "$lic"' EXIT
+cp LICENSE "$lic/LICENSE.txt"
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 python3 -I scripts/third-party-notices.py "$lic/GO-MODULES.txt" ./cmd/blite
+scripts/source-notice.sh "$BUILD" linux > "$lic/README.txt"
+doc=$pkg/usr/share/doc/blite
+install -Dm644 -t "$doc" "$lic/LICENSE.txt" "$lic/GO-MODULES.txt" "$lic/README.txt"
+cat > "$doc/copyright" <<COPY
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Bellion Share
+Source: https://github.com/martinsaul/blite
+
+Files: *
+Copyright: 2026 Martin Saul
+License: AGPL-3+
+ The full text is in /usr/share/doc/blite/LICENSE.txt.
+
+Files: usr/bin/blite
+Copyright: 2026 Martin Saul, and the authors of the Go modules built into it
+License: AGPL-3+ and others
+ The Go modules' licenses are in /usr/share/doc/blite/GO-MODULES.txt.
+COPY
 cat > "$pkg/usr/share/applications/blite.desktop" <<DESK
 [Desktop Entry]
 Type=Application
@@ -54,16 +78,19 @@ ls -l "$deb"
 # /usr/bin/blite starts from ~/.local/share/bellion/app and molt-swap updates
 # without root.
 home=$(mktemp -d)
-trap 'rm -rf "$pkg" "$home"' EXIT
+trap 'rm -rf "$pkg" "$lic" "$home"' EXIT
 install -Dm755 "$out/bin/blite" "$home/bin/blite"
 echo "$BUILD" > "$home/build"
+cp -r "$lic" "$home/licenses"
 zip="$(realpath "$out")/blite-linux-home_${APP_VERSION}-${BUILD}.zip"
 rm -f "$zip"
 python3 - "$home" "$zip" <<'PY'
-import sys, zipfile
+import os, sys, zipfile
 src, dst = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
-    for name, mode in (("bin/blite", 0o755), ("build", 0o644)):
+    names = sorted(os.path.relpath(os.path.join(d, f), src) for d, _, fs in os.walk(src) for f in fs)
+    for name in names:
+        mode = 0o755 if name == "bin/blite" else 0o644
         info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
         info.external_attr = (0o100000 | mode) << 16  # a regular file; keeps the exec bit
         info.compress_type = zipfile.ZIP_DEFLATED

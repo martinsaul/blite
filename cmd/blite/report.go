@@ -174,12 +174,44 @@ func markSent(dir string, names ...string) {
 	}
 }
 
+// crashAction is what to do with earlier runs' crash logs at start.
+type crashAction string
+
+const (
+	crashSkip crashAction = "skip"
+	crashSend crashAction = "send"
+	crashAsk  crashAction = "ask"
+)
+
+// decideCrashReport decides what to do at start from the crash-report
+// setting ("ask", "always", "never", or ""), whether an earlier run left a
+// crash log, and whether this run is headless (no window).
+func decideCrashReport(setting string, crashed, headless bool) crashAction {
+	if !crashed {
+		return crashSkip
+	}
+	switch setting {
+	case app.CrashReportsNever:
+		return crashSkip
+	case app.CrashReportsAlways:
+		return crashSend
+	default:
+		if headless {
+			return crashSkip
+		}
+		return crashAsk
+	}
+}
+
 // reporter sends logs for the tray app.
 type reporter struct {
-	server string
-	base   proto.Report // platform, version, build, OS
-	name   func() string
-	log    *slog.Logger
+	server   string
+	base     proto.Report // platform, version, build, OS
+	name     func() string
+	log      *slog.Logger
+	headless bool
+	// offer registers a pending crash report with the UI for "ask" mode.
+	offer func(func(ctx context.Context, send bool) error)
 	// system is a plain-text summary of this computer and our state for
 	// the zip (system.txt), short and without names when anon; nil = none.
 	system func(anon bool) string
@@ -266,35 +298,69 @@ func buildZip(dir string, names, bins []string, system string, scrub func(string
 	return nil, nil, errors.New("logs too large to zip")
 }
 
-// previous reports earlier runs' crashes, once each, in the background.
+// sendCrash uploads one crash log and marks it sent when accepted.
+func (r *reporter) sendCrash(ctx context.Context, l logInfo, name string) bool {
+	t, err := tail(filepath.Join(l.Dir, name), crashRead)
+	if err != nil {
+		return true
+	}
+	rep := r.base
+	// crashLog redacts what it takes from t; anonymous unless the user
+	// turned anonymizing off in Send logs.
+	anon := app.AnonymizeLogs()
+	scrub := r.scrub(anon)
+	rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.reportName(anon), "crash", name, crashLog(t, reportTail), scrub(l.Guard)
+	if anon {
+		rep.Log = scrub(rep.Log)
+	}
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	err = diag.SendReport(sctx, r.server, rep)
+	cancel()
+	if err != nil {
+		r.log.Warn("crash report", "file", name, "err", err)
+		return false // offline: try again next start
+	}
+	markSent(l.Dir, name)
+	r.log.Info("crash report sent", "file", name, "anon", anon)
+	return true
+}
+
+// previous handles earlier runs' crashes according to the crash-report setting.
 func (r *reporter) previous() {
 	l := logState()
 	if l.Dir == "" {
 		return
 	}
-	for _, name := range crashedLogs(l.Dir, l.File, time.Now()) {
-		t, err := tail(filepath.Join(l.Dir, name), crashRead)
-		if err != nil {
-			continue
+	names := crashedLogs(l.Dir, l.File, time.Now())
+	setting := app.CrashReports()
+	switch decideCrashReport(setting, len(names) > 0, r.headless) {
+	case crashSkip:
+		if len(names) > 0 && r.headless && setting == app.CrashReportsAsk {
+			r.log.Info("crash report waiting; skipping in headless mode", "file", names[len(names)-1])
 		}
-		rep := r.base
-		// crashLog redacts what it takes from t; anonymous if the user
-		// last chose so in Send logs.
-		anon := app.AnonymizeLogs()
-		scrub := r.scrub(anon)
-		rep.Name, rep.Kind, rep.File, rep.Log, rep.Note = r.reportName(anon), "crash", name, crashLog(t, reportTail), scrub(l.Guard)
-		if anon {
-			rep.Log = scrub(rep.Log)
+	case crashSend:
+		for _, name := range names {
+			if !r.sendCrash(context.Background(), l, name) {
+				return
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		err = diag.SendReport(ctx, r.server, rep)
-		cancel()
-		if err != nil {
-			r.log.Warn("crash report", "file", name, "err", err)
-			return // offline: try again next start
+	case crashAsk:
+		newest := names[len(names)-1]
+		if r.offer == nil {
+			r.log.Info("crash report waiting; skipping without UI", "file", newest)
+			return
 		}
-		markSent(l.Dir, name)
-		r.log.Info("crash report sent", "file", name)
+		r.offer(func(ctx context.Context, send bool) error {
+			if !send {
+				markSent(l.Dir, names...)
+				r.log.Info("crash report not sent", "file", newest)
+				return nil
+			}
+			if r.sendCrash(ctx, l, newest) && len(names) > 1 {
+				markSent(l.Dir, names[:len(names)-1]...)
+			}
+			return nil
+		})
 	}
 }
 

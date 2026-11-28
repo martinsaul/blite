@@ -14,12 +14,13 @@
   <li>You can always copy the link, or just its room code, and paste it into <em>Watch someone</em> in the app instead.</li>
 </ul>
 
-<h2>Someone shows "can't connect, retrying"</h2>
+<h2 id="connect">Someone shows "can't connect, retrying"</h2>
 <p>Bellion Share connects people directly. A direct connection can fail when a firewall or a strict router blocks it.</p>
 <ul>
   <li>A note at the top of the window says whether others can reach you. Bellion Share asks your router to open its UDP port (30471) with UPnP, NAT-PMP or PCP; if your router doesn't allow that, or sits behind another router or your provider's NAT, calls with people behind strict routers may fail.</li>
   <li>If you run a firewall, allow Bellion Share through it.</li>
-  <li>When a direct path is blocked, a TURN server can forward the traffic (the connection hint then says so). It's still end-to-end encrypted.</li>
+  <li>Our server has no TURN server to forward traffic when a direct path is blocked. If two people still can't reach each other, add a relay that both can reach: a machine with a public address, such as a small cloud server (for example on AWS) or a home server with UDP port 30471 forwarded. As soon as a room has a relay, everyone connects to the relay instead of to each other, whatever the room's size. See <a href="/docs/relays">Relays</a>. The relay is a room member, so traffic stays end-to-end encrypted.</li>
+  <li>If you run your own server, you can add a TURN server to it (see <a href="/docs/self-hosting">Self-hosting</a>).</li>
   <li>If it keeps failing, send logs from both sides (see below).</li>
 </ul>
 

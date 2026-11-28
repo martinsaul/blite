@@ -1,10 +1,15 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -32,17 +37,42 @@ import (
 // nothing to rooms this server serves itself.
 
 // FailoverHeader is set by the Worker on a request it sends to a standby
-// origin after giving up on the primary (its value says why).
+// origin after giving up on the primary: hex HMAC-SHA256(FailoverSecret,
+// unix-minute) for the current or previous minute.
 const FailoverHeader = "X-Bellion-Failover"
 
 // workerHosts are the names only the Worker serves (bellion.app).
 var workerHosts = []string{strings.TrimPrefix(siteURL, "https://"), "www." + strings.TrimPrefix(siteURL, "https://")}
 
+func failoverMAC(secret string, unixMinute int64) []byte {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(strconv.FormatInt(unixMinute, 10)))
+	return m.Sum(nil)
+}
+
+func (s *Server) validFailover(r *http.Request) bool {
+	if s.cfg.FailoverSecret == "" {
+		return false
+	}
+	got, err := hex.DecodeString(strings.TrimSpace(r.Header.Get(FailoverHeader)))
+	if err != nil || len(got) != sha256.Size {
+		return false
+	}
+	now := time.Now
+	if s.standbyNow != nil {
+		now = s.standbyNow
+	}
+	min := now().Unix() / 60
+	cur := subtle.ConstantTimeCompare(got, failoverMAC(s.cfg.FailoverSecret, min))
+	prev := subtle.ConstantTimeCompare(got, failoverMAC(s.cfg.FailoverSecret, min-1))
+	return (cur | prev) == 1
+}
+
 // standbyRefuses reports whether r is a WebSocket this standby must turn
 // away: it came through the Worker, which hasn't given up on the primary,
 // and nobody promoted this server.
 func (s *Server) standbyRefuses(r *http.Request) bool {
-	if !s.cfg.Standby || r.Header.Get(FailoverHeader) != "" {
+	if !s.cfg.Standby || s.validFailover(r) {
 		return false
 	}
 	host := strings.ToLower(r.Host)
@@ -103,4 +133,5 @@ func (s *Server) syncLiveFile() {
 type standbyState struct {
 	standbyLogged atomic.Int64 // unix time of the last refusal log line
 	live          atomic.Bool  // LiveFile exists (as far as we know)
+	standbyNow    func() time.Time
 }

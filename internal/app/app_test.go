@@ -481,3 +481,121 @@ func TestUploadFlagWinsOverSavedSettings(t *testing.T) {
 		t.Fatalf("saved UploadKbps without flag = %d, want 7500", got)
 	}
 }
+
+func TestAnonymizeLogsDefaultAndExplicitOff(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Never chose (no settings.json): defaults to on.
+	if !AnonymizeLogs() {
+		t.Fatal("AnonymizeLogs should default to true when unset")
+	}
+	a := New(session.Config{Name: "alice", View: "none", Log: quiet}, "none")
+	defer a.Shutdown()
+	if !a.State().(UIState).AnonymizeLogs {
+		t.Fatal("UIState.AnonymizeLogs should default to true")
+	}
+
+	// Never chose, even after other settings are written to settings.json: stays on.
+	if err := a.SetResolution("1080p"); err != nil {
+		t.Fatal(err)
+	}
+	if !AnonymizeLogs() || !a.State().(UIState).AnonymizeLogs {
+		t.Fatal("AnonymizeLogs should stay true when unrelated settings are saved")
+	}
+
+	// Explicitly unticked in Send logs: becomes false and stays false across restarts.
+	var sentAnon []bool
+	a.SendLogs = func(_ context.Context, anon bool) error {
+		sentAnon = append(sentAnon, anon)
+		return nil
+	}
+	if err := a.SendLogsNow(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(sentAnon) != 1 || sentAnon[0] {
+		t.Fatalf("SendLogsNow(false) passed %v", sentAnon)
+	}
+	if AnonymizeLogs() || a.State().(UIState).AnonymizeLogs {
+		t.Fatal("AnonymizeLogs should be false after user explicitly unticked it")
+	}
+	if err := a.SetResolution("720p"); err != nil {
+		t.Fatal(err)
+	}
+	b := New(session.Config{Name: "alice", View: "none", Log: quiet}, "none")
+	defer b.Shutdown()
+	if AnonymizeLogs() || b.State().(UIState).AnonymizeLogs {
+		t.Fatal("explicit AnonymizeLogs=false must persist across unrelated saves and restarts")
+	}
+
+	// Re-ticking in Send logs turns it back on.
+	b.SendLogs = a.SendLogs
+	if err := b.SendLogsNow(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if !AnonymizeLogs() || !b.State().(UIState).AnonymizeLogs {
+		t.Fatal("AnonymizeLogs should return to true after SendLogsNow(true)")
+	}
+}
+
+func TestCrashReportsSettingAndAnswer(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if got := CrashReports(); got != CrashReportsAsk {
+		t.Fatalf("default CrashReports() = %q, want %q", got, CrashReportsAsk)
+	}
+	a := New(session.Config{Name: "alice", View: "none", Log: quiet}, "none")
+	defer a.Shutdown()
+	st := a.State().(UIState)
+	if st.CrashReports != CrashReportsAsk || st.CrashReport {
+		t.Fatalf("initial UIState crash fields = (%q, %v)", st.CrashReports, st.CrashReport)
+	}
+
+	for _, mode := range []string{CrashReportsAlways, CrashReportsNever, CrashReportsAsk} {
+		if err := a.SetCrashReports(mode); err != nil {
+			t.Fatalf("SetCrashReports(%q): %v", mode, err)
+		}
+		if got := CrashReports(); got != mode {
+			t.Fatalf("CrashReports() = %q, want %q", got, mode)
+		}
+		if got := a.State().(UIState).CrashReports; got != mode {
+			t.Fatalf("UIState.CrashReports = %q, want %q", got, mode)
+		}
+	}
+	if err := a.SetCrashReports("bogus"); err == nil {
+		t.Fatal("SetCrashReports accepted bogus value")
+	}
+
+	// Pending crash prompt: Send with auto=true -> uploads and switches to always.
+	var answered []bool
+	a.OfferCrashReport(func(_ context.Context, send bool) error {
+		answered = append(answered, send)
+		return nil
+	})
+	if !a.State().(UIState).CrashReport {
+		t.Fatal("CrashReport should be true after OfferCrashReport")
+	}
+	if err := a.AnswerCrashReport(context.Background(), true, true); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answered, []bool{true}) || a.State().(UIState).CrashReport || CrashReports() != CrashReportsAlways {
+		t.Fatalf("after Send+auto: answered=%v pending=%v mode=%q", answered, a.State().(UIState).CrashReport, CrashReports())
+	}
+
+	// Don't send with auto=true -> switches to never.
+	a.OfferCrashReport(func(_ context.Context, send bool) error {
+		answered = append(answered, send)
+		return nil
+	})
+	if err := a.AnswerCrashReport(context.Background(), false, true); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answered, []bool{true, false}) || CrashReports() != CrashReportsNever {
+		t.Fatalf("after DontSend+auto: answered=%v mode=%q", answered, CrashReports())
+	}
+}

@@ -74,8 +74,8 @@ func TestTamperedFingerprintIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Without its server, the link joins on bob's own (compromised) server.
-	code, pw, _ := session.ParseLink(a.State().(UIState).Session.Link)
-	if err := b.JoinLink(ctx, session.AppLink("", "", code, pw)); err != nil {
+	_, code, pw, e2ee, _ := session.ParseLinkServer(a.State().(UIState).Session.Link)
+	if err := b.JoinLink(ctx, session.AppLink("", "", code, pw, e2ee)); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)

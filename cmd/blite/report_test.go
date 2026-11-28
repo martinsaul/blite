@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"blite/internal/app"
 	"blite/internal/metrics"
 	"blite/internal/proto"
 	"blite/internal/redact"
@@ -136,6 +137,15 @@ func TestBuildZip(t *testing.T) {
 }
 
 func TestReportUploadRedactsSecrets(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("HOME", cfgDir)
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	if err := app.SaveCrashReports(app.CrashReportsAlways); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SaveAnonymizeLogs(false); err != nil {
+		t.Fatal(err)
+	}
 	var (
 		mu       sync.Mutex
 		received []proto.Report
@@ -347,6 +357,12 @@ func TestReportUploadRedactsSecrets(t *testing.T) {
 // redact.NewWriter (guard journal path) never hit disk unredacted, and survive
 // intact through the upload path as well.
 func TestOnDiskLoggerAndUploadRedactsAllForms(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("HOME", cfgDir)
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	if err := app.SaveCrashReports(app.CrashReportsAlways); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	guardLog := "blite-20261116-010000-event.log"
 	textLog := "blite-20261116-020000-555.log"
@@ -833,5 +849,211 @@ func TestCrashLogHugePanicMessage(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("report lacks %q", want)
 		}
+	}
+}
+
+func TestDecideCrashReport(t *testing.T) {
+	cases := []struct {
+		setting  string
+		crashed  bool
+		headless bool
+		want     crashAction
+	}{
+		{"", false, false, crashSkip},
+		{"ask", false, false, crashSkip},
+		{"always", false, false, crashSkip},
+		{"never", false, false, crashSkip},
+		{"ask", false, true, crashSkip},
+		{"always", false, true, crashSkip},
+		{"never", false, true, crashSkip},
+
+		{"", true, false, crashAsk},
+		{"ask", true, false, crashAsk},
+		{"bogus", true, false, crashAsk},
+		{"always", true, false, crashSend},
+		{"never", true, false, crashSkip},
+
+		{"", true, true, crashSkip},
+		{"ask", true, true, crashSkip},
+		{"bogus", true, true, crashSkip},
+		{"always", true, true, crashSend},
+		{"never", true, true, crashSkip},
+	}
+	for _, tc := range cases {
+		if got := decideCrashReport(tc.setting, tc.crashed, tc.headless); got != tc.want {
+			t.Errorf("decideCrashReport(%q, crashed=%v, headless=%v) = %q, want %q",
+				tc.setting, tc.crashed, tc.headless, got, tc.want)
+		}
+	}
+}
+
+func TestCrashReportAskDefaultAnonymousAndPersistence(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("HOME", cfgDir)
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+
+	var (
+		mu       sync.Mutex
+		received []proto.Report
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rep proto.Report
+		if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		received = append(received, rep)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	dir := t.TempDir()
+	curPath := filepath.Join(dir, "blite-20261127-090000-999.log")
+	os.WriteFile(curPath, []byte("current\n"), 0o600)
+	prevLogs := logState()
+	setLogs(func(l *logInfo) { *l = logInfo{Dir: dir, File: curPath} })
+	defer setLogs(func(l *logInfo) { *l = prevLogs })
+
+	writeCrash := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCrash("blite-20261127-010000-100.log", "time=2026-11-27T01:00:00Z level=INFO msg=\"older crash\" room=AAAA-1111 peer=bob#1111\npanic: first boom\n")
+
+	var logBuf bytes.Buffer
+	mkRep := func(headless bool, offer func(func(context.Context, bool) error)) *reporter {
+		return &reporter{
+			server:   wsURL,
+			log:      slog.New(slog.NewTextHandler(&logBuf, nil)),
+			name:     func() string { return "alice#7F2A" },
+			base:     proto.Report{Platform: "linux", Version: "dev", Build: 1},
+			headless: headless,
+			offer:    offer,
+			names:    func() []string { return []string{"alice", "bob", "myserver.example.com"} },
+		}
+	}
+
+	// 1. Headless mode with default "ask": logs a line, sends nothing, keeps report pending.
+	mkRep(true, nil).previous()
+	mu.Lock()
+	if len(received) != 0 {
+		t.Fatalf("headless uploaded %d reports, want 0", len(received))
+	}
+	mu.Unlock()
+	if !strings.Contains(logBuf.String(), "headless") {
+		t.Fatalf("headless mode did not log skip line: %q", logBuf.String())
+	}
+
+	// 2. Windowed start 1: offers the crash report; user quits without answering -> survives.
+	var answer func(context.Context, bool) error
+	mkRep(false, func(fn func(context.Context, bool) error) { answer = fn }).previous()
+	if answer == nil {
+		t.Fatal("expected crash report to be offered on start 1")
+	}
+	mu.Lock()
+	if len(received) != 0 {
+		t.Fatalf("ask mode uploaded before answer: %d", len(received))
+	}
+	mu.Unlock()
+
+	// 3. Another crash happens before answering: start 2 asks once and sends only the most recent crash, anonymized by default.
+	writeCrash("blite-20261127-020000-200.log", "time=2026-11-27T02:00:00Z level=INFO msg=\"latest crash\" room=K7PQ-2M4X peer=bob#2222 server=wss://myserver.example.com/ws\npanic: second boom\n")
+	answer = nil
+	offers := 0
+	mkRep(false, func(fn func(context.Context, bool) error) {
+		offers++
+		answer = fn
+	}).previous()
+	if offers != 1 || answer == nil {
+		t.Fatalf("start 2 offers = %d (answer nil=%v), want 1", offers, answer == nil)
+	}
+	if err := answer(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if len(received) != 1 {
+		t.Fatalf("after Send: received %d reports, want 1 (most recent only)", len(received))
+	}
+	rep1 := received[0]
+	mu.Unlock()
+	if rep1.File != "blite-20261127-020000-200.log" {
+		t.Fatalf("uploaded %q, want newest crash", rep1.File)
+	}
+	if rep1.Name != "anonymous" {
+		t.Fatalf("default crash report Name = %q, want anonymous", rep1.Name)
+	}
+	for _, leak := range []string{"alice", "bob#", "K7PQ-2M4X", "myserver.example.com"} {
+		if strings.Contains(rep1.Log, leak) {
+			t.Fatalf("anonymous crash report leaked %q:\n%s", leak, rep1.Log)
+		}
+	}
+	if !strings.Contains(rep1.Log, "panic: second boom") {
+		t.Fatalf("crash report missing traceback:\n%s", rep1.Log)
+	}
+
+	// Start 3: neither crash is offered again.
+	answer = nil
+	mkRep(false, func(fn func(context.Context, bool) error) { answer = fn }).previous()
+	if answer != nil {
+		t.Fatal("already-answered crashes should not be offered again")
+	}
+
+	// 4. Answering "Don't send": marks handled, sends nothing, keeps local log on disk.
+	crash3 := "blite-20261127-030000-300.log"
+	writeCrash(crash3, "panic: third boom\n")
+	mkRep(false, func(fn func(context.Context, bool) error) { answer = fn }).previous()
+	if answer == nil {
+		t.Fatal("expected crash3 to be offered")
+	}
+	if err := answer(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, crash3)); err != nil {
+		t.Fatalf("local crash log deleted on Don't send: %v", err)
+	}
+	answer = nil
+	mkRep(false, func(fn func(context.Context, bool) error) { answer = fn }).previous()
+	if answer != nil {
+		t.Fatal("dismissed crash should not be offered again")
+	}
+	mu.Lock()
+	if len(received) != 1 {
+		t.Fatalf("Don't send uploaded a report: total %d", len(received))
+	}
+	mu.Unlock()
+
+	// 5. Setting "never": skips without offering or uploading, keeps local log.
+	crash4 := "blite-20261127-040000-400.log"
+	writeCrash(crash4, "panic: fourth boom\n")
+	if err := app.SaveCrashReports(app.CrashReportsNever); err != nil {
+		t.Fatal(err)
+	}
+	mkRep(false, func(fn func(context.Context, bool) error) { answer = fn }).previous()
+	if answer != nil {
+		t.Fatal("never mode must not offer a prompt")
+	}
+	mu.Lock()
+	if len(received) != 1 {
+		t.Fatalf("never mode uploaded a report: total %d", len(received))
+	}
+	mu.Unlock()
+	if _, err := os.Stat(filepath.Join(dir, crash4)); err != nil {
+		t.Fatalf("never mode removed local log: %v", err)
+	}
+
+	// 6. Setting "always" with default AnonymizeLogs: sends automatically and anonymously.
+	if err := app.SaveCrashReports(app.CrashReportsAlways); err != nil {
+		t.Fatal(err)
+	}
+	mkRep(false, nil).previous()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 2 || received[1].File != crash4 || received[1].Name != "anonymous" {
+		t.Fatalf("always mode reports = %+v", received)
 	}
 }

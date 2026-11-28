@@ -303,7 +303,7 @@ func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) e
 		return ErrDiscordServer
 	}
 	if code != "" {
-		err := a.joinRaw(ctx, a.discordServer(), code, password, a.DefaultSource)
+		err := a.joinRaw(ctx, a.discordServer(), code, password, false, a.DefaultSource)
 		if err == nil {
 			return nil
 		}
@@ -314,7 +314,7 @@ func (a *App) GoLiveInChannel(ctx context.Context, password string, e2ee bool) e
 	err := a.createRaw(ctx, password, e2ee, id, a.DefaultSource)
 	if isProtoErr(err, proto.ErrChannelBusy) {
 		if cr := a.lookupChannel(ctx, id); cr.Room != "" {
-			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, a.DefaultSource))
+			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, false, a.DefaultSource))
 		}
 	}
 	return friendly(err)
@@ -333,7 +333,7 @@ func (a *App) EnterChannel(ctx context.Context, password string, e2ee bool) erro
 		return ErrDiscordServer
 	}
 	if code != "" {
-		err := a.joinRaw(ctx, a.discordServer(), code, password, "none")
+		err := a.joinRaw(ctx, a.discordServer(), code, password, false, "none")
 		if err == nil {
 			return nil
 		}
@@ -344,7 +344,7 @@ func (a *App) EnterChannel(ctx context.Context, password string, e2ee bool) erro
 	err := a.createRaw(ctx, password, e2ee, id, "none")
 	if isProtoErr(err, proto.ErrChannelBusy) {
 		if cr := a.lookupChannel(ctx, id); cr.Room != "" {
-			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, "none"))
+			return friendly(a.joinRaw(ctx, a.discordServer(), cr.Room, password, false, "none"))
 		}
 	}
 	return friendly(err)
@@ -361,7 +361,7 @@ func (a *App) JoinChannel(ctx context.Context, password string) error {
 	if !ok {
 		return ErrDiscordServer
 	}
-	return a.join(ctx, a.discordServer(), code, password)
+	return a.join(ctx, a.discordServer(), code, password, false)
 }
 
 // ErrDiscordServer: Discord voice channels work on the built-in server

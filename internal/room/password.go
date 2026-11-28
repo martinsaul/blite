@@ -1,8 +1,10 @@
 package room
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -27,33 +29,55 @@ const (
 // exhaust memory (each one allocates argonMemory).
 var hashSem = make(chan struct{}, 4)
 
+// hashTimeout bounds how long derive waits for a slot in hashSem.
+var hashTimeout = 10 * time.Second
+
 type passwordHash struct {
 	salt []byte
 	key  []byte
 }
 
-func hashPassword(pw string) passwordHash {
+func hashPassword(ctx context.Context, pw string) (passwordHash, error) {
 	if pw == "" {
-		return passwordHash{} // an open room: anyone with the code joins
+		return passwordHash{}, nil // an open room: anyone with the code joins
 	}
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		panic("crypto/rand failed: " + err.Error())
 	}
-	return passwordHash{salt: salt, key: derive(pw, salt)}
-}
-
-func (h passwordHash) verify(pw string) bool {
-	if h.key == nil {
-		return true // open room (older clients still send some password)
+	key, err := derive(ctx, pw, salt)
+	if err != nil {
+		return passwordHash{}, err
 	}
-	return subtle.ConstantTimeCompare(derive(pw, h.salt), h.key) == 1
+	return passwordHash{salt: salt, key: key}, nil
 }
 
-func derive(pw string, salt []byte) []byte {
-	hashSem <- struct{}{}
-	defer func() { <-hashSem }()
-	return argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+func (h passwordHash) verify(ctx context.Context, pw string) (bool, error) {
+	if h.key == nil {
+		return true, nil // open room (older clients still send some password)
+	}
+	dk, err := derive(ctx, pw, h.salt)
+	if err != nil {
+		return false, err
+	}
+	return subtle.ConstantTimeCompare(dk, h.key) == 1, nil
+}
+
+func derive(ctx context.Context, pw string, salt []byte) ([]byte, error) {
+	if ctx.Err() != nil {
+		return nil, ErrServerBusy
+	}
+	t := time.NewTimer(hashTimeout)
+	defer t.Stop()
+	select {
+	case hashSem <- struct{}{}:
+		defer func() { <-hashSem }()
+	case <-ctx.Done():
+		return nil, ErrServerBusy
+	case <-t.C:
+		return nil, ErrServerBusy
+	}
+	return argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen), nil
 }
 
 // validPassword: empty (an open room) or MinPasswordLen..MaxPasswordLen.

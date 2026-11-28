@@ -465,12 +465,39 @@ static char *blite_factory_file(const char *name) {
 	return s;
 }
 static void blite_init(void) { gst_init(NULL, NULL); }
+
+// blite_demote_decoders sets the rank of every decoder that can take caps,
+// except the names in allow, to NONE, so decodebin never picks them. It
+// returns the demoted names, comma-separated (g_free), or NULL.
+static gchar *blite_demote_decoders(const char *caps, const char **allow, int n) {
+	GstCaps *want = gst_caps_from_string(caps);
+	if (want == NULL) return NULL;
+	GString *out = g_string_new(NULL);
+	GList *list = gst_registry_get_feature_list(gst_registry_get(), GST_TYPE_ELEMENT_FACTORY);
+	for (GList *l = list; l != NULL; l = l->next) {
+		GstElementFactory *f = GST_ELEMENT_FACTORY(l->data);
+		const gchar *klass = gst_element_factory_get_metadata(f, GST_ELEMENT_METADATA_KLASS);
+		if (klass == NULL || strstr(klass, "Decoder") == NULL) continue;
+		if (!gst_element_factory_can_sink_any_caps(f, want)) continue;
+		const gchar *name = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f));
+		gboolean ok = FALSE;
+		for (int i = 0; i < n && !ok; i++) ok = g_strcmp0(name, allow[i]) == 0;
+		if (ok || gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(f)) == GST_RANK_NONE) continue;
+		gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE(f), GST_RANK_NONE);
+		if (out->len > 0) g_string_append_c(out, ',');
+		g_string_append(out, name);
+	}
+	gst_plugin_feature_list_free(list);
+	gst_caps_unref(want);
+	return g_string_free(out, out->len == 0);
+}
 */
 import "C"
 
 import (
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -732,6 +759,24 @@ func (e *Element) SrcCaps() string { return e.PadCaps("src") }
 func Version() string {
 	Init()
 	return takeString(C.gst_version_string())
+}
+
+// DemoteDecoders keeps decodebin from picking any decoder for caps that
+// isn't in allow, by ranking the others NONE. It returns the ones it demoted.
+func DemoteDecoders(caps string, allow []string) []string {
+	Init()
+	cc := C.CString(caps)
+	defer C.free(unsafe.Pointer(cc))
+	names := make([]*C.char, len(allow)+1)
+	for i, a := range allow {
+		names[i] = C.CString(a)
+		defer C.free(unsafe.Pointer(names[i]))
+	}
+	out := takeString(C.blite_demote_decoders(cc, &names[0], C.int(len(allow))))
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, ",")
 }
 
 // FactoryFile is the plugin file that provides factory ("" if none).

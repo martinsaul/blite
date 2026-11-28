@@ -131,7 +131,7 @@ func TestUnknownServerNeedsConfirmation(t *testing.T) {
 		"bshare://join/7K3QX9MD?server=other.example.com#pw":   "wss://other.example.com/ws",
 		"https://other.example.com/j/7K3QX9MD#pw":              "wss://other.example.com/ws",
 	} {
-		s, _, _, err := session.ParseLinkServer(link)
+		s, _, _, _, err := session.ParseLinkServer(link)
 		if got := a.linkServer(s); err != nil || got != want {
 			t.Errorf("%s: server %q %v, want %q", link, got, err, want)
 		}

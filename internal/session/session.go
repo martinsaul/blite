@@ -67,8 +67,9 @@ type Config struct {
 	// UploadKbps (relay) caps what transcoded renditions may add to our
 	// upload; 0 = no cap.
 	UploadKbps int
-	// E2EE (Create): ask for a room whose media is encrypted end to end.
-	// Builds below proto.E2EEBuild (dev builds included) create plain rooms.
+	// E2EE: Create asks for a room whose media is encrypted end to end
+	// (builds below proto.E2EEBuild, dev builds included, create plain rooms);
+	// Join requires the room to be encrypted.
 	E2EE bool
 	// Channel ties a created room to this Discord voice channel ID.
 	Channel string
@@ -445,22 +446,25 @@ const (
 	stoppedGrace = 1500 * time.Millisecond
 )
 
-// ErrE2EEDowngrade: we asked for an encrypted room and the server made a
-// plain one. Only a broken or hostile server does that, so we leave rather
-// than send media in the clear.
+// ErrE2EEDowngrade: we asked for or expected an encrypted room and the server
+// answered with a plain one. Only a broken or hostile server does that, so we
+// leave rather than send media in the clear.
 var ErrE2EEDowngrade = errors.New("the server did not make the room end-to-end encrypted")
 
 // Create makes a new room. An empty password gets a random one.
 func Create(ctx context.Context, cfg Config, password string) (*Session, error) {
 	s := newSession(cfg, password)
 	e2ee := cfg.E2EE && buildOf(cfg.Client) >= proto.E2EEBuild
+	if cfg.E2EE && !e2ee {
+		s.cfg.Log.Info("dev build: creating an unencrypted room", "build", buildOf(cfg.Client))
+	}
 	sig, err := sigclient.Create(ctx, cfg.Server, proto.Create{Password: password, Name: cfg.Name, IDKey: s.idKey(), Client: cfg.Client, Room: cfg.HostRoom, HostKey: cfg.HostKey, Owners: cfg.HostOwners, E2EE: e2ee, Channel: cfg.Channel}, sigclient.Options{OnState: s.sigState, OnDrop: s.sigDrop})
 	if err != nil {
 		return nil, err
 	}
 	if e2ee && !sig.Welcome.E2EE {
 		// A fixed room that already exists keeps the setting it was made
-		// with, so a relay rejoining an older plain room only warns.
+		// with, so a hosted relay rejoining an older plain room only warns.
 		if cfg.HostRoom == "" {
 			sig.Leave()
 			return nil, ErrE2EEDowngrade
@@ -476,6 +480,10 @@ func Join(ctx context.Context, cfg Config, code, password string) (*Session, err
 	sig, err := sigclient.Join(ctx, cfg.Server, proto.Join{Room: code, Password: password, Name: cfg.Name, IDKey: s.idKey(), Client: cfg.Client}, sigclient.Options{OnState: s.sigState, OnDrop: s.sigDrop})
 	if err != nil {
 		return nil, err
+	}
+	if cfg.E2EE && !sig.Welcome.E2EE {
+		sig.Leave()
+		return nil, ErrE2EEDowngrade
 	}
 	return s.start(sig)
 }
@@ -581,6 +589,20 @@ func (s *Session) start(sig *sigclient.Client) (*Session, error) {
 					m.KeyChanged = m.KeyChanged || s.keyChanged(name, s.mesh.IDKey(id))
 				}
 			}
+			s.mu.Unlock()
+			s.changed()
+		},
+		OnKeyChanged: func(id, name string) {
+			s.mu.Lock()
+			m := s.members[id]
+			if m == nil {
+				m = &Member{ID: id, Name: name, Quality: "auto", asked: -1, Volume: 1}
+				s.members[id] = m
+			}
+			m.Name = name
+			m.State = "connecting"
+			m.KeyChanged = true
+			s.stopRemoteMediaLocked(id)
 			s.mu.Unlock()
 			s.changed()
 		},
@@ -3569,7 +3591,7 @@ func (s *Session) State() State {
 	opts := NormalizeShareOptions(s.shareOpts)
 	st := State{
 		Room:              DisplayCode(s.sig.Welcome.Room),
-		Link:              ShareLink(s.cfg.Server, s.sig.Welcome.Room, s.pw),
+		Link:              ShareLink(s.cfg.Server, s.sig.Welcome.Room, s.pw, s.mesh.Encrypted()),
 		Source:            string(s.srcKind),
 		Encoder:           s.encoder,
 		LowKbps:           s.mesh.LowKbps(),
@@ -3769,6 +3791,7 @@ type Rejoin struct {
 	Server       string            `json:"server,omitempty"` // "" = the built-in default (older files)
 	Room         string            `json:"room"`
 	Password     string            `json:"password"`
+	Encrypted    bool              `json:"encrypted,omitempty"`
 	Source       media.SourceKind  `json:"source,omitempty"`
 	Resolution   media.Resolution  `json:"resolution,omitempty"`
 	Mode         media.ContentMode `json:"mode,omitempty"`
@@ -3782,7 +3805,7 @@ func (s *Session) Rejoin() Rejoin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	opts := NormalizeShareOptions(s.shareOpts)
-	return Rejoin{Server: s.cfg.Server, Room: s.sig.Welcome.Room, Password: s.pw, Source: s.srcKind, Resolution: orRes(cmp.Or(s.resWant, s.res)), Mode: s.mode, ShareOptions: &opts, Audio: s.asel, Output: s.output}
+	return Rejoin{Server: s.cfg.Server, Room: s.sig.Welcome.Room, Password: s.pw, Encrypted: s.mesh != nil && s.mesh.Encrypted(), Source: s.srcKind, Resolution: orRes(cmp.Or(s.resWant, s.res)), Mode: s.mode, ShareOptions: &opts, Audio: s.asel, Output: s.output}
 }
 
 // CloseForUpdate is Close telling the server we restart into a new build
@@ -3854,12 +3877,15 @@ func ParseLink(s string) (code, pw string, err error) {
 }
 
 // ShareLink builds the https share link for a room on the given signaling server.
-func ShareLink(server, room, pw string) string {
+func ShareLink(server, room, pw string, e2ee bool) string {
 	u, err := url.Parse(server)
 	if err != nil {
 		return ""
 	}
 	l := "https://" + u.Host + "/j/" + room
+	if e2ee {
+		l += "?e2ee=1"
+	}
 	if pw != "" {
 		l += "#" + url.PathEscape(pw)
 	}

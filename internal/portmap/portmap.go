@@ -262,7 +262,8 @@ func (p *pmp) unmap(ctx context.Context, internal uint16) error {
 // findMappers lists PCP and NAT-PMP at the default gateway, then UPnP.
 func findMappers(ctx context.Context) []func(context.Context) (mapper, error) {
 	var out []func(context.Context) (mapper, error)
-	if gw, err := gateway(); err == nil {
+	gw, gwErr := gateway()
+	if gwErr == nil {
 		gwp := netip.AddrPortFrom(gw, pmpPort)
 		out = append(out, func(context.Context) (mapper, error) {
 			local, err := localIPTo(gw)
@@ -273,13 +274,17 @@ func findMappers(ctx context.Context) []func(context.Context) (mapper, error) {
 		})
 	}
 	out = append(out, func(ctx context.Context) (mapper, error) {
-		local, err := localIPTo(netip.MustParseAddr("192.0.2.1"))
+		dst := gw
+		if gwErr != nil {
+			dst = netip.MustParseAddr("192.0.2.1")
+		}
+		local, err := localIPTo(dst)
 		if err != nil {
 			return nil, err
 		}
 		dctx, cancel := context.WithTimeout(ctx, upnpTimeout)
 		defer cancel()
-		locs, err := discoverIGD(dctx, local)
+		locs, err := discoverIGD(dctx, local, gw, ssdpAddr)
 		if err != nil {
 			return nil, err
 		}

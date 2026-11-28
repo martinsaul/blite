@@ -418,14 +418,17 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		cfg.Name = n
 	}
 	cfg.Name = orDefault(identity.CleanName(cfg.Name), identity.FriendlyName())
-	key, err := identity.LoadOrCreate()
-	if err != nil {
-		fatal(log, "identity key", err)
+	key, idErr := identity.LoadOrCreate()
+	if idErr != nil {
+		log.Error("identity key", "err", idErr)
 	}
 	cfg.Identity, cfg.Known = key, identity.LoadKnown()
 	go diag.WatchModules(context.Background(), log)
 	cfg.Port = openPort() // after the hand-over: one instance maps the port
 	a := app.New(cfg, src)
+	if idErr != nil {
+		a.SetIdentityError(idErr)
+	}
 	certpin.SetPinned(a.PinnedHost)
 	if cfg.Port != nil {
 		defer cfg.Port.Close()
@@ -442,7 +445,8 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	a.Show = nui.Show
 	a.ConfirmServer = nui.ConfirmServer
 	rep := &reporter{server: cfg.Server, log: log, name: a.DisplayName,
-		base: proto.Report{Platform: runtime.GOOS, Version: cfg.Client.Label(), Build: cfg.Client.Build, OSVersion: cfg.Client.OSVersion}}
+		offer: a.OfferCrashReport,
+		base:  proto.Report{Platform: runtime.GOOS, Version: cfg.Client.Label(), Build: cfg.Client.Build, OSVersion: cfg.Client.OSVersion}}
 	rep.system = func(anon bool) string { return systemText(a, anon) }
 	rep.names = a.KnownNames
 	a.Logs = func() any { return logState() }
@@ -464,8 +468,13 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 		os.MkdirAll(d, 0o700)
 		return app.OpenBrowser(d)
 	}
-	go a.RunDiscord(context.Background())
-	go rep.previous()
+	handOff := a.Updates != nil && guardedAfterUpdate(link)
+	if idErr == nil {
+		go a.RunDiscord(context.Background())
+	}
+	if !handOff {
+		go rep.previous()
+	}
 	go logSystem(log)
 	go func() { // per-peer and self stats while in a call, for "Send logs"
 		smp := newSampler()
@@ -496,7 +505,6 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 	}()
 
 	open := nui.Show
-	handOff := a.Updates != nil && guardedAfterUpdate(link)
 	atStart := !handOff && updateAtStart(a.Updates)
 	nui.Run(a, nui.Options{Hidden: true, OnReady: func() { // the flow below shows the window
 		if a.Updates != nil {
@@ -534,7 +542,7 @@ func runTray(cfg session.Config, log *slog.Logger, link string, src media.Source
 			if err != nil {
 				log.Error("rejoin after update", "err", err)
 			}
-			if ok || !background {
+			if ok || !background || idErr != nil {
 				open()
 			}
 		}()
@@ -638,12 +646,13 @@ func stageUpdate(a *app.App, log *slog.Logger) {
 }
 
 func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, password string, src media.SourceKind, audioArg string, dur time.Duration, volunteer bool, res media.Resolution, mode media.ContentMode) {
+	var linkE2EE bool
 	if link != "" {
-		server, code, pw, err := session.ParseLinkServer(link)
+		server, code, pw, e2ee, err := session.ParseLinkServer(link)
 		if err != nil {
 			fatal(log, "bad link", err)
 		}
-		join, password = code, pw
+		join, password, linkE2EE = code, pw, e2ee
 		if server != "" && !session.SameServer(server, cfg.Server) { // the link's server (headless: no questions)
 			cfg.Server = server
 		}
@@ -652,6 +661,17 @@ func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, 
 		fmt.Fprintln(os.Stderr, "headless needs -create, -join CODE or -link URL")
 		closeLogs()
 		os.Exit(2)
+	}
+	if d, err := logDir(); err == nil && d != "" {
+		setLogs(func(l *logInfo) { l.Dir = d })
+		rep := &reporter{
+			server:   cfg.Server,
+			log:      log,
+			name:     func() string { return cfg.Name },
+			base:     proto.Report{Platform: runtime.GOOS, Version: cfg.Client.Label(), Build: cfg.Client.Build, OSVersion: cfg.Client.OSVersion},
+			headless: true,
+		}
+		go rep.previous()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -670,6 +690,7 @@ func runHeadless(cfg session.Config, log *slog.Logger, create bool, join, link, 
 		}
 		s, err = session.Create(ctx, cfg, password)
 	} else {
+		cfg.E2EE = linkE2EE
 		s, err = session.Join(ctx, cfg, join, password)
 	}
 	if err != nil {

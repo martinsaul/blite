@@ -9,6 +9,8 @@
 //	login         Home screen with Discord Connect prompt
 //	servers       Home screen with a custom signaling server picked
 //	servers-dialog The Servers dialog (gear > Servers...)
+//	identity-key  The identity key dialog (gear > Your identity key...)
+//	identity-backup Its Back up... passphrase form
 //	sharesheet    Share options sheet open
 //	advanced      Share options sheet with Advanced... expanded
 //	call          In-call control window (people list, eyes, relay footer)
@@ -21,6 +23,7 @@
 //	leave         In-call control window asking "Leave the session?"
 //	logs-sent     In-call control window after Help > Send logs
 //	logs-failed   The same when sending the logs fails
+//	crash-ask     Home screen asking whether to send a crash report
 //	video         The main video window: two streams and our preview in its corner
 //	video-tile    The main video window with our preview expanded to a tile
 package main
@@ -62,6 +65,7 @@ type demo struct {
 	relay         bool
 	logsFail      bool   // Send logs fails
 	logsReport    string // what the last Send logs reported
+	crashReports  string
 	presets       []app.QualityPreset
 	ch            chan struct{}
 	// servers: the user's own signaling servers; def and pick: the default
@@ -100,8 +104,12 @@ func (d *demo) State() any {
 	if d.updatedFrom > 0 {
 		up.Result, up.UpdatedFrom, up.UpdatedTo = "Updated to build 212.", d.updatedFrom, 212
 	}
+	cr := d.crashReports
+	if cr == "" {
+		cr = app.CrashReportsAsk
+	}
 	st := app.UIState{Version: "0.1.0 (84) linux", Name: "Alice", Tag: "4417", Autostart: &auto,
-		AutoWatch: d.autoWatch, PlaySounds: d.playSounds,
+		AutoWatch: d.autoWatch, PlaySounds: d.playSounds, AnonymizeLogs: true, CrashReports: cr,
 		Share: app.ShareConfig{
 			Source:        orDemoSrc(d.src, d.inCall),
 			Resolution:    "1080p",
@@ -259,6 +267,22 @@ func (d *demo) SetPlaySounds(on bool) error { d.playSounds = on; d.changed(); re
 func (d *demo) SetVoiceInSystem(bool) error { return nil }
 func (d *demo) SetHideChangelog(bool) error { return nil }
 func (d *demo) SetPortMap(on bool) error    { d.portMap = on; d.changed(); return nil }
+func (d *demo) SetCrashReports(mode string) error {
+	d.crashReports = mode
+	d.changed()
+	return nil
+}
+func (d *demo) AnswerCrashReport(_ context.Context, send, auto bool) error {
+	if auto {
+		if send {
+			d.crashReports = app.CrashReportsAlways
+		} else {
+			d.crashReports = app.CrashReportsNever
+		}
+		d.changed()
+	}
+	return nil
+}
 func (d *demo) SendLogsNow(context.Context, bool) error {
 	if d.logsFail {
 		d.logsReport = "could not send: connection refused"
@@ -274,6 +298,8 @@ func (d *demo) Diagnostics() string                                  { return "d
 func (d *demo) Feedback(context.Context, string, string, bool) error { return nil }
 func (d *demo) Volunteer(on bool) error                              { d.relay = on; d.changed(); return nil }
 func (d *demo) SetName(string) error                                 { return nil }
+func (d *demo) BackupIdentity(string) ([]byte, error)                { return nil, errors.New("demo") }
+func (d *demo) RestoreIdentity([]byte, string) (string, error)       { return "", errors.New("demo") }
 func (d *demo) Transfer(string) error                                { return nil }
 func (d *demo) Kick(string, bool) error                              { return nil }
 func (d *demo) ShowUI()                                              {}
@@ -357,6 +383,9 @@ func main() {
 	case "servers-dialog":
 		d.servers = []string{"wss://share.example.com/ws"}
 		scene = "servers-dialog"
+	case "identity-key", "identity-backup":
+		d.inCall = true
+		scene = arg
 	case "sharesheet":
 		scene = "sharesheet"
 	case "advanced":
@@ -395,6 +424,8 @@ func main() {
 		d.inCall = true
 		d.logsFail = arg == "logs-failed"
 		scene = "send-logs"
+	case "crash-ask":
+		scene = "crash-ask"
 	case "video", "video-tile", "video-states":
 		videoScene(arg == "video-tile", arg == "video-states", *quitAfter)
 		return

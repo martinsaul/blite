@@ -1,8 +1,10 @@
 package nui
 
 import (
+	"errors"
 	"image"
 	"image/color"
+	"io"
 	"strconv"
 	"strings"
 
@@ -11,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -18,6 +21,7 @@ import (
 	"blite/internal/audio"
 	"blite/internal/capture"
 	"blite/internal/i18n"
+	"blite/internal/identity"
 )
 
 // dialogError shows err like dialog.NewError, with our language's words
@@ -139,8 +143,116 @@ func (u *UI) idKeyDialog() {
 		e.SetText(key)
 		items = append(items, e, widget.NewButton(i18n.L("Copy"), func() { u.fa.Clipboard().SetContent(key) }))
 	}
-	d := dialog.NewCustom(i18n.L("Your identity key"), i18n.L("Close"), container.NewVBox(items...), u.win)
+	var d dialog.Dialog
+	if ib, ok := u.a.(identityBackend); ok {
+		items = append(items, label(i18n.L("Your tag and the hosted rooms you own come with this key. Back it up to keep them on a new computer.")),
+			container.NewHBox(
+				widget.NewButton(i18n.L("Back up..."), func() { d.Hide(); u.backupIdentity(ib) }),
+				widget.NewButton(i18n.L("Restore a backup..."), func() { d.Hide(); u.restoreIdentity(ib) })))
+	}
+	d = dialog.NewCustom(i18n.L("Your identity key"), i18n.L("Close"), container.NewVBox(items...), u.win)
 	d.Resize(fyne.NewSize(520, 0))
+	d.Show()
+}
+
+// backupIdentity asks for a passphrase, then where to save the sealed key.
+func (u *UI) backupIdentity(ib identityBackend) {
+	pw, again := widget.NewPasswordEntry(), widget.NewPasswordEntry()
+	d := dialog.NewForm(i18n.L("Back up your identity key"), i18n.L("Next"), i18n.L("Cancel"), []*widget.FormItem{
+		hinted(widget.NewFormItem(i18n.L("Passphrase"), pw), i18n.L("At least 8 characters. Anyone with the file and its passphrase can use your identity.")),
+		widget.NewFormItem(i18n.L("Repeat passphrase"), again),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		if pw.Text != again.Text {
+			u.showErr(errors.New("the passphrases don't match"))
+			return
+		}
+		pass := pw.Text
+		u.bg.Add(1)
+		go func() {
+			data, err := ib.BackupIdentity(pass) // Argon2id: a moment of CPU
+			u.laterDone(func() {
+				if err != nil {
+					u.showErr(err)
+					return
+				}
+				u.saveBackup(data)
+			})
+		}()
+	}, u.win)
+	d.Resize(fyne.NewSize(480, 0))
+	d.Show()
+}
+
+func (u *UI) saveBackup(data []byte) {
+	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+		if err == nil && w == nil {
+			return // cancelled
+		}
+		if err == nil {
+			_, err = w.Write(data)
+			if cerr := w.Close(); err == nil {
+				err = cerr
+			}
+		}
+		if err != nil {
+			u.showErr(err)
+			return
+		}
+		u.info(i18n.L("Backup saved"), i18n.L("Keep the file and its passphrase somewhere safe. To use this identity on another computer, choose Restore a backup there."), nil)
+	}, u.win)
+	fd.SetFileName("bellion-identity" + identity.BackupExt)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{identity.BackupExt}))
+	fd.Resize(u.win.Canvas().Size())
+	fd.Show()
+}
+
+// restoreIdentity picks a backup, then asks for its passphrase.
+func (u *UI) restoreIdentity(ib identityBackend) {
+	fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+		if err == nil && r == nil {
+			return // cancelled
+		}
+		var data []byte
+		if err == nil {
+			data, err = io.ReadAll(io.LimitReader(r, 64<<10))
+			r.Close()
+		}
+		if err != nil {
+			u.showErr(err)
+			return
+		}
+		u.restorePassphrase(ib, data)
+	}, u.win)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{identity.BackupExt}))
+	fd.Resize(u.win.Canvas().Size())
+	fd.Show()
+}
+
+func (u *UI) restorePassphrase(ib identityBackend, data []byte) {
+	pw := widget.NewPasswordEntry()
+	d := dialog.NewForm(i18n.L("Restore your identity key"), i18n.L("Restore"), i18n.L("Cancel"), []*widget.FormItem{
+		hinted(widget.NewFormItem(i18n.L("Passphrase"), pw), i18n.L("The backup's key replaces this computer's (which is kept as identity.key.old).")),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		pass := pw.Text
+		u.bg.Add(1)
+		go func() {
+			tag, err := ib.RestoreIdentity(data, pass)
+			u.laterDone(func() {
+				if err != nil {
+					u.showErr(err)
+					return
+				}
+				u.info(i18n.L("Identity key restored"), i18n.L("Restart Bellion Share to use it. Your tag will be #{{.Tag}}.", i18n.D{"Tag": tag}), nil)
+			})
+		}()
+	}, u.win)
+	d.Resize(fyne.NewSize(480, 0))
 	d.Show()
 }
 
@@ -389,6 +501,42 @@ func (u *UI) sendLogs() {
 				u.sendLogsNow(anon.Checked)
 			}
 		}, u.win)
+	d.Resize(fyne.NewSize(520, 0))
+	d.Show()
+}
+
+func (u *UI) maybeAskCrash() {
+	if u.crashAsked || u.scene != "" || !u.shown || !u.st.CrashReport {
+		return
+	}
+	u.crashAsked = true
+	u.crashAskDialog()
+}
+
+// crashAskDialog asks whether to upload an earlier run's crash log.
+func (u *UI) crashAskDialog() {
+	msg := i18n.L("Send the end of its log to the developers so we can fix it?")
+	if u.st.AnonymizeLogs { // the user may have turned it off in Send logs
+		msg += "\n" + i18n.L("It's sent anonymously: no names, room codes or servers.")
+	}
+	text := label(msg)
+	auto := widget.NewCheck(i18n.L("Send automatically next time"), nil)
+	d := dialog.NewCustomConfirm(
+		i18n.L("Bellion Share closed unexpectedly"),
+		i18n.L("Send"),
+		i18n.L("Don't send"),
+		container.NewVBox(text, auto),
+		func(send bool) {
+			cb, ok := u.a.(crashBackend)
+			if !ok {
+				return
+			}
+			checked := auto.Checked
+			u.do(func() error { return cb.AnswerCrashReport(ctx(), send, checked) })
+		},
+		u.win,
+	)
+	d.SetConfirmImportance(widget.HighImportance)
 	d.Resize(fyne.NewSize(520, 0))
 	d.Show()
 }

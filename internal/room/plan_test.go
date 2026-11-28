@@ -36,7 +36,7 @@ func TestPlanMultiRelay(t *testing.T) {
 	m := NewManager(time.Minute)
 	nb := proto.MultiRelayBuild
 	a := &box{}
-	sa, _ := m.Create(pw, "alice", "", "", nb, false, a)
+	sa, _ := m.Create(bg, pw, "alice", "", "", nb, false, a)
 	if sa.Plan == nil || len(sa.Plan.Relays) != 0 {
 		t.Fatalf("creator's plan: %+v", sa.Plan)
 	}
@@ -44,7 +44,7 @@ func TestPlanMultiRelay(t *testing.T) {
 	boxes := []*box{a}
 	for i := 1; i < 4; i++ {
 		b := &box{}
-		s, _ := m.Join(sa.Room, pw, "p", "", "", nb, b)
+		s, _ := m.Join(bg, sa.Room, pw, "p", "", "", nb, b)
 		ids, boxes = append(ids, s.PeerID), append(boxes, b)
 	}
 	if err := m.Volunteer(sa.Room, ids[0], true); err != nil {
@@ -68,7 +68,7 @@ func TestPlanMultiRelay(t *testing.T) {
 	// the first one's members stay with it.
 	for i := 0; i < 4; i++ {
 		b := &box{}
-		s, _ := m.Join(sa.Room, pw, "q", "", "", nb, b)
+		s, _ := m.Join(bg, sa.Room, pw, "q", "", "", nb, b)
 		ids, boxes = append(ids, s.PeerID), append(boxes, b)
 	}
 	p, _ = lastPlan(a)
@@ -83,7 +83,7 @@ func TestPlanMultiRelay(t *testing.T) {
 	}
 	// The new joiner learns the plan from its seat; the plan is the same.
 	b := &box{}
-	s, _ := m.Join(sa.Room, pw, "late", "", "", nb, b)
+	s, _ := m.Join(bg, sa.Room, pw, "late", "", "", nb, b)
 	if s.Plan == nil || s.Plan.Home[s.PeerID] == "" {
 		t.Fatalf("late joiner's plan: %+v", s.Plan)
 	}
@@ -105,11 +105,11 @@ func TestPlanCaps(t *testing.T) {
 	m := NewManager(time.Minute)
 	nb := proto.MultiRelayBuild
 	a := &box{}
-	sa, _ := m.Create(pw, "alice", "", "", nb, false, a)
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", nb, &box{})
-	sc, _ := m.Join(sa.Room, pw, "carol", "", "", nb, &box{})
+	sa, _ := m.Create(bg, pw, "alice", "", "", nb, false, a)
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", nb, &box{})
+	sc, _ := m.Join(bg, sa.Room, pw, "carol", "", "", nb, &box{})
 	for i := 0; i < 6; i++ {
-		m.Join(sa.Room, pw, "x", "", "", nb, &box{})
+		m.Join(bg, sa.Room, pw, "x", "", "", nb, &box{})
 	}
 	m.SetCaps(sa.Room, sb.PeerID, proto.Caps{UpKbps: 100_000, UpSource: "declared", Reach: "public"})
 	m.SetCaps(sa.Room, sc.PeerID, proto.Caps{UpKbps: 500_000, Reach: "turn"})
@@ -138,9 +138,9 @@ func TestPlanLegacyRoom(t *testing.T) {
 	m := NewManager(time.Minute)
 	nb := proto.MultiRelayBuild
 	a, old := &box{}, &box{}
-	sa, _ := m.Create(pw, "alice", "", "", nb, false, a)
-	sb, _ := m.Join(sa.Room, pw, "bob", "", "", nb, &box{})
-	m.Join(sa.Room, pw, "old", "", "", nb-1, old)
+	sa, _ := m.Create(bg, pw, "alice", "", "", nb, false, a)
+	sb, _ := m.Join(bg, sa.Room, pw, "bob", "", "", nb, &box{})
+	m.Join(bg, sa.Room, pw, "old", "", "", nb-1, old)
 	m.Volunteer(sa.Room, sb.PeerID, true)
 	m.Volunteer(sa.Room, sa.PeerID, true)
 	p, _ := lastPlan(a)
@@ -154,7 +154,7 @@ func TestPlanLegacyRoom(t *testing.T) {
 		t.Fatalf("older build's topology: %+v", tp)
 	}
 	for i := 0; i < 3; i++ {
-		m.Join(sa.Room, pw, "x", "", "", nb, &box{})
+		m.Join(bg, sa.Room, pw, "x", "", "", nb, &box{})
 	}
 	if p, _ := lastPlan(a); !p.Paused || len(p.Relays) != 0 {
 		t.Fatalf("legacy room of 6: %+v", p)

@@ -29,8 +29,8 @@ var searchTargets = []string{
 }
 
 // discoverIGD multicasts M-SEARCH from local and returns the LOCATION URLs
-// that answer before ctx ends (at least one, or an error).
-func discoverIGD(ctx context.Context, local netip.Addr) ([]string, error) {
+// from gw (or our local subnets if gw is invalid) that answer before ctx ends.
+func discoverIGD(ctx context.Context, local, gw netip.Addr, dst netip.AddrPort) ([]string, error) {
 	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(local, 0)))
 	if err != nil {
 		return nil, err
@@ -38,9 +38,13 @@ func discoverIGD(ctx context.Context, local netip.Addr) ([]string, error) {
 	defer c.Close()
 	for _, st := range searchTargets {
 		msg := "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: " + st + "\r\n\r\n"
-		if _, err := c.WriteToUDPAddrPort([]byte(msg), ssdpAddr); err != nil {
+		if _, err := c.WriteToUDPAddrPort([]byte(msg), dst); err != nil {
 			return nil, err
 		}
+	}
+	var nets []netip.Prefix
+	if !gw.IsValid() {
+		nets = localSubnets()
 	}
 	// Collect for a short while once the first answer arrived: a router may
 	// answer each search target, and other devices answer too.
@@ -50,27 +54,88 @@ func discoverIGD(ctx context.Context, local netip.Addr) ([]string, error) {
 	buf := make([]byte, 2048)
 	for {
 		c.SetReadDeadline(end)
-		n, err := c.Read(buf)
+		n, from, err := c.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			break
+		}
+		src := from.Addr().Unmap()
+		if !allowedIGD(src, gw, nets) {
+			continue
 		}
 		resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(buf[:n])), nil)
 		if err != nil {
 			continue
 		}
 		loc := resp.Header.Get("Location")
-		if loc != "" && !seen[loc] {
-			seen[loc] = true
-			locs = append(locs, loc)
-			if soon := time.Now().Add(300 * time.Millisecond); soon.Before(end) {
-				end = soon
-			}
+		if loc == "" || seen[loc] || !sameHostIP(loc, src) {
+			continue
+		}
+		seen[loc] = true
+		locs = append(locs, loc)
+		if soon := time.Now().Add(300 * time.Millisecond); soon.Before(end) {
+			end = soon
 		}
 	}
 	if len(locs) == 0 {
 		return nil, errors.New("no UPnP gateway answered")
 	}
 	return locs, nil
+}
+
+// allowedIGD reports whether src may answer as our IGD: either it is gw, or
+// (when gw is unknown) a private/link-local address on one of nets.
+func allowedIGD(src, gw netip.Addr, nets []netip.Prefix) bool {
+	if gw.IsValid() {
+		return src == gw
+	}
+	if src.IsLoopback() || (!src.IsPrivate() && !src.IsLinkLocalUnicast()) {
+		return false
+	}
+	for _, p := range nets {
+		if p.Contains(src) {
+			return true
+		}
+	}
+	return false
+}
+
+// localSubnets returns the IPv4 non-loopback interface prefixes.
+func localSubnets() []netip.Prefix {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for _, a := range addrs {
+		in, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(in.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if !ip.Is4() || ip.IsLoopback() {
+			continue
+		}
+		ones, bits := in.Mask.Size()
+		if bits != 32 || ones <= 0 {
+			continue
+		}
+		out = append(out, netip.PrefixFrom(ip, ones))
+	}
+	return out
+}
+
+// sameHostIP reports whether rawURL is an http URL whose literal host IP is want.
+func sameHostIP(rawURL string, want netip.Addr) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	ip, err := netip.ParseAddr(u.Hostname())
+	return err == nil && ip.Unmap() == want
 }
 
 // upnp is a WAN connection service found on an IGD.
@@ -86,6 +151,15 @@ func (*upnp) name() string { return "UPnP" }
 
 func (u *upnp) local() netip.Addr { return u.lan }
 
+var knownWANIP = []string{
+	"urn:schemas-upnp-org:service:WANIPConnection:1",
+	"urn:schemas-upnp-org:service:WANIPConnection:2",
+}
+
+var knownWANPPP = []string{
+	"urn:schemas-upnp-org:service:WANPPPConnection:1",
+}
+
 type upnpDevice struct {
 	Services []struct {
 		ServiceType string `xml:"serviceType"`
@@ -94,16 +168,17 @@ type upnpDevice struct {
 	Devices []upnpDevice `xml:"deviceList>device"`
 }
 
-// findWAN returns the first WAN connection service in the tree, preferring
-// WANIPConnection.
-func (d *upnpDevice) findWAN(kind string) (svc, ctrl string) {
+// findWAN returns the first matching WAN connection service in the tree.
+func (d *upnpDevice) findWAN(allowed []string) (svc, ctrl string) {
 	for _, s := range d.Services {
-		if strings.HasPrefix(s.ServiceType, "urn:schemas-upnp-org:service:"+kind+":") {
-			return s.ServiceType, s.ControlURL
+		for _, want := range allowed {
+			if s.ServiceType == want {
+				return s.ServiceType, s.ControlURL
+			}
 		}
 	}
 	for i := range d.Devices {
-		if svc, ctrl = d.Devices[i].findWAN(kind); svc != "" {
+		if svc, ctrl = d.Devices[i].findWAN(allowed); svc != "" {
 			return
 		}
 	}
@@ -116,21 +191,36 @@ func newUPnP(ctx context.Context, loc string) (*upnp, error) {
 	if err != nil {
 		return nil, err
 	}
+	if u.Scheme != "http" {
+		return nil, fmt.Errorf("UPnP location %q: unsupported scheme", loc)
+	}
 	host, err := netip.ParseAddr(u.Hostname())
 	if err != nil {
 		return nil, fmt.Errorf("UPnP location %q: %w", loc, err)
 	}
+	host = host.Unmap()
 	local, err := localIPTo(host)
 	if err != nil {
 		return nil, err
 	}
-	cl := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequestWithContext(ctx, "GET", loc, nil)
+	cl := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", loc, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("UPnP description HTTP %d", resp.StatusCode)
+	}
 	var root struct {
 		URLBase string     `xml:"URLBase"`
 		Device  upnpDevice `xml:"device"`
@@ -138,22 +228,30 @@ func newUPnP(ctx context.Context, loc string) (*upnp, error) {
 	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&root); err != nil {
 		return nil, fmt.Errorf("UPnP description: %w", err)
 	}
-	svc, ctrl := root.Device.findWAN("WANIPConnection")
+	svc, ctrl := root.Device.findWAN(knownWANIP)
 	if svc == "" {
-		svc, ctrl = root.Device.findWAN("WANPPPConnection")
+		svc, ctrl = root.Device.findWAN(knownWANPPP)
 	}
 	if svc == "" {
 		return nil, errors.New("UPnP device has no WAN connection service")
 	}
 	base := u
 	if root.URLBase != "" {
-		if b, err := url.Parse(root.URLBase); err == nil {
-			base = b
+		b, err := url.Parse(root.URLBase)
+		if err != nil {
+			return nil, fmt.Errorf("UPnP URLBase %q: %w", root.URLBase, err)
 		}
+		base = u.ResolveReference(b)
 	}
 	c, err := base.Parse(ctrl)
 	if err != nil {
 		return nil, err
+	}
+	if c.Scheme != "http" {
+		return nil, fmt.Errorf("UPnP control URL %q: unsupported scheme", c)
+	}
+	if ctrlIP, err := netip.ParseAddr(c.Hostname()); err != nil || ctrlIP.Unmap() != host {
+		return nil, fmt.Errorf("UPnP control URL %q does not match device host %s", c, host)
 	}
 	return &upnp{ctrl: c.String(), service: svc, lan: local, client: cl}, nil
 }
@@ -169,14 +267,23 @@ func (e *soapError) Error() string { return fmt.Sprintf("UPnP error %d %s", e.Co
 // call runs action with args (in order) and returns the response fields.
 func (u *upnp) call(ctx context.Context, action string, args [][2]string) (map[string]string, error) {
 	var b strings.Builder
-	b.WriteString(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>`)
-	fmt.Fprintf(&b, `<u:%s xmlns:u="%s">`, action, u.service)
+	b.WriteString(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:`)
+	xml.EscapeText(&b, []byte(action))
+	b.WriteString(` xmlns:u="`)
+	xml.EscapeText(&b, []byte(u.service))
+	b.WriteString(`">`)
 	for _, a := range args {
-		fmt.Fprintf(&b, "<%s>", a[0])
+		b.WriteByte('<')
+		xml.EscapeText(&b, []byte(a[0]))
+		b.WriteByte('>')
 		xml.EscapeText(&b, []byte(a[1]))
-		fmt.Fprintf(&b, "</%s>", a[0])
+		b.WriteString("</")
+		xml.EscapeText(&b, []byte(a[0]))
+		b.WriteByte('>')
 	}
-	fmt.Fprintf(&b, `</u:%s></s:Body></s:Envelope>`, action)
+	b.WriteString(`</u:`)
+	xml.EscapeText(&b, []byte(action))
+	b.WriteString(`></s:Body></s:Envelope>`)
 	req, err := http.NewRequestWithContext(ctx, "POST", u.ctrl, strings.NewReader(b.String()))
 	if err != nil {
 		return nil, err
@@ -188,7 +295,7 @@ func (u *upnp) call(ctx context.Context, action string, args [][2]string) (map[s
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return parseSOAP(io.LimitReader(resp.Body, 1<<16), resp.StatusCode)
+	return parseSOAP(io.LimitReader(resp.Body, 1<<20), resp.StatusCode)
 }
 
 // parseSOAP collects the leaf elements of a SOAP response body; a fault

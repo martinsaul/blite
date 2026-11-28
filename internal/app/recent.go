@@ -12,6 +12,7 @@ import (
 
 	"blite/internal/proto"
 	"blite/internal/room"
+	"blite/internal/secret"
 	"blite/internal/session"
 	"blite/internal/sigclient"
 )
@@ -36,16 +37,18 @@ var recentPath = func() (string, error) {
 }
 
 type recentDiskEntry struct {
-	Server   string `json:"server"`
-	Code     string `json:"code"`
-	Password string `json:"password,omitempty"`
+	Server    string `json:"server"`
+	Code      string `json:"code"`
+	Password  string `json:"password,omitempty"`
+	Encrypted bool   `json:"encrypted,omitempty"`
 }
 
 type recentEntry struct {
-	server   string
-	code     string
-	password string
-	status   string // "checking", "ready", "gone"
+	server    string
+	code      string
+	password  string
+	encrypted bool
+	status    string // "checking", "ready", "gone"
 }
 
 // RecentRoom is a recent room entry exposed to the UI (without its password).
@@ -102,11 +105,22 @@ func loadRecent(defaultServer string) []recentEntry {
 		}) {
 			continue
 		}
+		pw := d.Password
+		if pw != "" {
+			plain, err := secret.Open(pw)
+			if err != nil {
+				pw = ""
+			} else {
+				pw = string(plain)
+				clear(plain)
+			}
+		}
 		out = append(out, recentEntry{
-			server:   srv,
-			code:     code,
-			password: d.Password,
-			status:   "checking",
+			server:    srv,
+			code:      code,
+			password:  pw,
+			encrypted: d.Encrypted,
+			status:    "checking",
 		})
 		if len(out) >= maxRecentRooms {
 			break
@@ -125,10 +139,19 @@ func saveRecentEntries(entries []recentEntry) error {
 		if e.status == "gone" {
 			continue
 		}
+		pw := e.password
+		if pw != "" && secret.Enabled {
+			s, err := secret.Seal([]byte(pw))
+			if err != nil {
+				return err
+			}
+			pw = s
+		}
 		disk = append(disk, recentDiskEntry{
-			Server:   e.server,
-			Code:     e.code,
-			Password: e.password,
+			Server:    e.server,
+			Code:      e.code,
+			Password:  pw,
+			Encrypted: e.encrypted,
 		})
 	}
 	if len(disk) == 0 {
@@ -154,7 +177,7 @@ func (a *App) saveRecentLocked() {
 	}
 }
 
-func (a *App) recordRecent(server, code, password string) {
+func (a *App) recordRecent(server, code, password string, encrypted bool) {
 	code = normalizeRecentCode(code)
 	if code == "" {
 		return
@@ -169,10 +192,11 @@ func (a *App) recordRecent(server, code, password string) {
 		return e.code == code && sameRecentServer(e.server, server)
 	})
 	a.recent = slices.Insert(a.recent, 0, recentEntry{
-		server:   server,
-		code:     code,
-		password: password,
-		status:   "checking",
+		server:    server,
+		code:      code,
+		password:  password,
+		encrypted: encrypted,
+		status:    "checking",
 	})
 	if len(a.recent) > maxRecentRooms {
 		a.recent = a.recent[:maxRecentRooms]
@@ -353,7 +377,7 @@ func (a *App) JoinRecentRoom(ctx context.Context, server, code string) error {
 	if err := a.confirmServer(srv); err != nil {
 		return err
 	}
-	err := a.joinRaw(ctx, srv, entry.code, entry.password, a.DefaultSource)
+	err := a.joinRaw(ctx, srv, entry.code, entry.password, entry.encrypted, a.DefaultSource)
 	if err != nil {
 		if isProtoErr(err, proto.ErrNoRoom) || isProtoErr(err, proto.ErrBadPassword) {
 			a.markRecentGone(0, entry.server, entry.code)

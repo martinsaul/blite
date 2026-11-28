@@ -4,6 +4,7 @@
 package room
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -30,6 +31,13 @@ var (
 	ErrBanned           = errors.New(proto.ErrBanned)
 	ErrNoPeer           = errors.New(proto.ErrNoPeer)
 	ErrChannelBusy      = errors.New(proto.ErrChannelBusy)
+	// ErrServerFull: the server already holds Manager.MaxRooms rooms. It goes
+	// out as rate_limited, which every client build words as "wait a few
+	// minutes".
+	ErrServerFull = errors.New(proto.ErrRateLimited)
+	// ErrServerBusy: all password-hashing slots stayed busy until the timeout
+	// or caller context expired. Sent as rate_limited so clients ask to retry.
+	ErrServerBusy = errors.New(proto.ErrRateLimited)
 )
 
 // Outbox receives messages for one peer. The server implements it per connection.
@@ -217,6 +225,10 @@ type Manager struct {
 	MinRelayBuild int
 	// MaxPeers caps room size (0 = no cap). Set by the server operator.
 	MaxPeers int
+	// MaxRooms caps the number of rooms Create makes (0 = no cap), so many
+	// addresses together can't fill the server's memory. Hosted fixed rooms
+	// don't count against it.
+	MaxRooms int
 	now      func() time.Time
 }
 
@@ -272,17 +284,23 @@ type Seat struct {
 
 // Create makes a room with the caller as its first peer. Hashing happens
 // outside the lock.
-func (m *Manager) Create(password, name, idKey, ver string, build int, e2ee bool, out Outbox) (Seat, error) {
+func (m *Manager) Create(ctx context.Context, password, name, idKey, ver string, build int, e2ee bool, out Outbox) (Seat, error) {
 	if e2ee && build < proto.E2EEBuild {
 		return Seat{}, ErrBadRequest
 	}
 	if !validPassword(password) || !validName(name) || !validIDKey(idKey) || !validVer(ver) {
 		return Seat{}, ErrBadRequest
 	}
-	pw := hashPassword(password)
+	pw, err := hashPassword(ctx, password)
+	if err != nil {
+		return Seat{}, err
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.MaxRooms > 0 && len(m.rooms) >= m.MaxRooms {
+		return Seat{}, ErrServerFull
+	}
 	code := NewCode()
 	for m.rooms[code] != nil {
 		code = NewCode()
@@ -300,7 +318,7 @@ func (m *Manager) Create(password, name, idKey, ver string, build int, e2ee bool
 // already exists, it joins it instead, password and all. Either way the
 // caller is the room's host; owners are the identity keys that take
 // ownership from it.
-func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int, e2ee bool, owners []string, out Outbox) (Seat, error) {
+func (m *Manager) CreateFixed(ctx context.Context, code, password, name, idKey, ver string, build int, e2ee bool, owners []string, out Outbox) (Seat, error) {
 	if e2ee && build < proto.E2EEBuild {
 		return Seat{}, ErrBadRequest
 	}
@@ -313,11 +331,8 @@ func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int
 			allowed[k] = true
 		}
 	}
-	pw := hashPassword(password)
-	m.mu.Lock()
-	if m.rooms[code] != nil {
-		m.mu.Unlock()
-		seat, err := m.Join(code, password, name, idKey, ver, build, out)
+	joinExisting := func() (Seat, error) {
+		seat, err := m.Join(ctx, code, password, name, idKey, ver, build, out)
 		if err != nil {
 			return seat, err
 		}
@@ -333,6 +348,21 @@ func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int
 		}
 		return seat, nil
 	}
+	m.mu.Lock()
+	exists := m.rooms[code] != nil
+	m.mu.Unlock()
+	if exists {
+		return joinExisting()
+	}
+	pw, err := hashPassword(ctx, password)
+	if err != nil {
+		return Seat{}, err
+	}
+	m.mu.Lock()
+	if m.rooms[code] != nil {
+		m.mu.Unlock()
+		return joinExisting()
+	}
 	defer m.mu.Unlock()
 	r := &Room{Code: code, pw: pw, peers: map[string]*Peer{}, allowed: allowed, e2ee: e2ee}
 	m.rooms[code] = r
@@ -346,7 +376,7 @@ func (m *Manager) CreateFixed(code, password, name, idKey, ver string, build int
 
 // Join adds the caller to an existing room. It returns ErrBadPassword or ErrNoRoom
 // without revealing which rooms exist beyond what the code itself implies.
-func (m *Manager) Join(code, password, name, idKey, ver string, build int, out Outbox) (Seat, error) {
+func (m *Manager) Join(ctx context.Context, code, password, name, idKey, ver string, build int, out Outbox) (Seat, error) {
 	if !validName(name) || !validIDKey(idKey) || !validVer(ver) || len(password) > MaxPasswordLen {
 		return Seat{}, ErrBadRequest
 	}
@@ -359,7 +389,11 @@ func (m *Manager) Join(code, password, name, idKey, ver string, build int, out O
 	pw := r.pw
 	m.mu.Unlock()
 
-	if !pw.verify(password) {
+	ok, err := pw.verify(ctx, password)
+	if err != nil {
+		return Seat{}, err
+	}
+	if !ok {
 		return Seat{}, ErrBadPassword
 	}
 
@@ -391,28 +425,35 @@ func (m *Manager) Join(code, password, name, idKey, ver string, build int, out O
 }
 
 // Probe reports whether room code exists and password opens it, without
-// creating a room or changing its state. Hashing runs outside the lock.
+// creating a room or changing its state.
 func (m *Manager) Probe(code, password string) bool {
+	ok, _ := m.ProbeContext(context.Background(), code, password)
+	return ok
+}
+
+// ProbeContext is Probe with a caller context for password hashing.
+func (m *Manager) ProbeContext(ctx context.Context, code, password string) (bool, error) {
 	if len(password) > MaxPasswordLen {
-		return false
+		return false, nil
 	}
 	m.mu.Lock()
 	r := m.rooms[code]
 	if r == nil {
 		m.mu.Unlock()
-		return false
+		return false, nil
 	}
 	pw := r.pw
 	m.mu.Unlock()
 
-	if !pw.verify(password) {
-		return false
+	ok, err := pw.verify(ctx, password)
+	if err != nil || !ok {
+		return false, err
 	}
 
 	m.mu.Lock()
-	ok := m.rooms[code] == r
+	same := m.rooms[code] == r
 	m.mu.Unlock()
-	return ok
+	return same, nil
 }
 
 func (m *Manager) seatLocked(r *Room, name, idKey, ver string, build int, out Outbox) Seat {

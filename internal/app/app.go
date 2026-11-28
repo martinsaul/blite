@@ -37,6 +37,7 @@ type App struct {
 	mu          sync.Mutex
 	nameChosen  bool // the user saved a name; until then it's two random words
 	sess        *session.Session
+	identityErr error // startup failure loading identity.key
 	lastErr     string
 	homeSource  string               // pre-call source choice ("primary", "window:...", "screen", "test", "none")
 	srcInfo     sourceInfo           // what we know of the picked "window:"/"monitor:" source
@@ -57,6 +58,8 @@ type App struct {
 	playSounds  bool                 // play notification sounds; kept on disk
 	// hideChangelog: don't show what changed after an update; kept on disk.
 	hideChangelog bool
+	crashAnswer   func(ctx context.Context, send bool) error
+	crashPending  bool
 	discord       Discord        // the user's Discord voice channel (RunDiscord)
 	servers       serverSettings // the user's signaling servers; kept on disk
 	picked        string         // the lobby's server for new sessions; "" = the default
@@ -218,10 +221,16 @@ type UIState struct {
 	// HideChangelog: the user doesn't want to see what changed after an
 	// update (Help > What's new still shows it).
 	HideChangelog bool `json:"hideChangelog,omitempty"`
-	// AnonymizeLogs: the last choice of "Anonymize" for Send logs; crash
-	// reports follow it too.
-	AnonymizeLogs bool `json:"anonymizeLogs,omitempty"`
-	Logs          any  `json:"logs,omitempty"`
+	// AnonymizeLogs: whether reports leave out names, room codes and
+	// servers (default true; kept from the last choice in Send logs, and
+	// crash reports follow it too).
+	AnonymizeLogs bool `json:"anonymizeLogs"`
+	// CrashReports: when crash logs from earlier runs are sent ("ask",
+	// "always" or "never").
+	CrashReports string `json:"crashReports,omitempty"`
+	// CrashReport: an earlier run crashed and waits for the user's answer.
+	CrashReport bool `json:"crashReport,omitempty"`
+	Logs        any  `json:"logs,omitempty"`
 	// Reach says whether others can reach us from the internet.
 	Reach *Reach `json:"reach,omitempty"`
 	// Discord: the user's voice channel and its session (nil until the
@@ -242,7 +251,11 @@ type Reach struct {
 // State implements ui.Backend.
 func (a *App) State() any {
 	a.mu.Lock()
-	s, e, autoWatch, playSounds, hideChangelog := a.sess, a.lastErr, a.autoWatch, a.playSounds, a.hideChangelog
+	s, e, idErr, autoWatch, playSounds, hideChangelog := a.sess, a.lastErr, a.identityErr, a.autoWatch, a.playSounds, a.hideChangelog
+	crashPending := a.crashPending
+	if e == "" && idErr != nil {
+		e = idErr.Error()
+	}
 	portMap, sessPortMap := a.portMap, a.sessPortMap
 	opts := session.NormalizeShareOptions(a.shareOpts)
 	homeSrc := a.homeSource
@@ -283,7 +296,8 @@ func (a *App) State() any {
 	servers := a.serverState()
 	recent := a.recentStateLocked()
 	a.mu.Unlock()
-	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), NameChosen: a.isNameChosen(), AutoWatch: autoWatch, PlaySounds: playSounds, VoiceInSystem: audio.IncludeVoice(), HideChangelog: hideChangelog, AnonymizeLogs: AnonymizeLogs(), Discord: dc, Servers: servers, Recent: recent}
+	disk := loadSettings()
+	st := UIState{Share: share, Error: e, Version: a.cfg.Client.Label(), Name: a.cfgName(), NameChosen: a.isNameChosen(), AutoWatch: autoWatch, PlaySounds: playSounds, VoiceInSystem: audio.IncludeVoice(), HideChangelog: hideChangelog, AnonymizeLogs: anonymizeLogs(disk), CrashReports: normalizeCrashReports(disk.CrashReports), CrashReport: crashPending, Discord: dc, Servers: servers, Recent: recent}
 	if a.cfg.Client != nil {
 		st.Build = a.cfg.Client.Build
 	}
@@ -336,6 +350,7 @@ func (a *App) config() session.Config {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cfg := a.cfg
+	cfg.E2EE = false
 	on := a.autoWatch
 	ps := a.playSounds
 	cfg.AutoWatch = &on
@@ -379,9 +394,9 @@ func (a *App) DisplayName() string {
 	return n
 }
 
-// AnonymizeLogs reports whether reports should be anonymous (the user's
-// last choice in Send logs).
-func AnonymizeLogs() bool { return loadSettings().AnonymizeLogs }
+// AnonymizeLogs reports whether reports should be anonymous (default true;
+// kept from the user's last choice in Send logs).
+func AnonymizeLogs() bool { return anonymizeLogs(loadSettings()) }
 
 // SendLogsNow implements ui.Backend: anon sends an anonymous report, and
 // is remembered for the next one and for crash reports.
@@ -389,12 +404,64 @@ func (a *App) SendLogsNow(ctx context.Context, anon bool) error {
 	if a.SendLogs == nil {
 		return errors.New("this build can't send logs")
 	}
-	if err := updateSettings(func(s *appSettings) { s.AnonymizeLogs = anon }); err != nil {
+	if err := SaveAnonymizeLogs(anon); err != nil {
 		a.log.Warn("save anonymize setting", "err", err)
 	}
 	err := a.SendLogs(ctx, anon)
 	a.bc.Notify()
 	return err
+}
+
+// SetCrashReports sets when crash logs from earlier runs are sent ("ask",
+// "always" or "never"), kept on disk.
+func (a *App) SetCrashReports(mode string) error {
+	switch mode {
+	case "", CrashReportsAsk:
+		mode = CrashReportsAsk
+	case CrashReportsAlways, CrashReportsNever:
+	default:
+		return errors.New("unknown crash report setting")
+	}
+	if err := SaveCrashReports(mode); err != nil {
+		a.log.Warn("save crash report setting", "err", err)
+	}
+	a.bc.Notify()
+	return nil
+}
+
+// OfferCrashReport registers a crash report from an earlier run that waits
+// for the user's answer in the window.
+func (a *App) OfferCrashReport(answer func(ctx context.Context, send bool) error) {
+	a.mu.Lock()
+	a.crashAnswer = answer
+	a.crashPending = answer != nil
+	a.mu.Unlock()
+	a.bc.Notify()
+}
+
+// AnswerCrashReport handles the user's choice in the crash-report dialog:
+// send uploads the report; auto makes that choice ("always" or "never")
+// automatic next time.
+func (a *App) AnswerCrashReport(ctx context.Context, send, auto bool) error {
+	if auto {
+		mode := CrashReportsNever
+		if send {
+			mode = CrashReportsAlways
+		}
+		if err := SaveCrashReports(mode); err != nil {
+			a.log.Warn("save crash report setting", "err", err)
+		}
+	}
+	a.mu.Lock()
+	fn := a.crashAnswer
+	a.crashAnswer = nil
+	a.crashPending = false
+	a.mu.Unlock()
+	a.bc.Notify()
+	if fn != nil {
+		return fn(ctx, send)
+	}
+	return nil
 }
 
 // Feedback implements ui.Backend: kind is "idea" or "problem".
@@ -511,7 +578,7 @@ func (a *App) adoptAs(s *session.Session, src media.SourceKind) {
 	a.srcAudioMu.Lock()
 	defer a.srcAudioMu.Unlock()
 	rj := s.Rejoin()
-	a.recordRecent(rj.Server, rj.Room, rj.Password)
+	a.recordRecent(rj.Server, rj.Room, rj.Password, rj.Encrypted)
 	s.OnChange(a.bc.Notify)
 	a.mu.Lock()
 	a.sess, a.lastErr = s, ""
@@ -587,6 +654,7 @@ func (a *App) rejoinLost(rj session.Rejoin) {
 	if rj.Server != "" {
 		cfg.Server = rj.Server
 	}
+	cfg.E2EE = rj.Encrypted
 	s, err := session.Join(ctx, cfg, rj.Room, rj.Password)
 	if err != nil {
 		a.log.Warn("rejoin after a lost slot", "err", err)
@@ -612,6 +680,24 @@ func (a *App) setErr(e string) {
 	a.bc.Notify()
 }
 
+// SetIdentityError records a startup failure loading identity.key so the UI
+// shows it and refuses new sessions until a backup is restored.
+func (a *App) SetIdentityError(err error) {
+	a.mu.Lock()
+	a.identityErr = err
+	if err != nil {
+		a.lastErr = err.Error()
+	}
+	a.mu.Unlock()
+	a.bc.Notify()
+}
+
+func (a *App) identityError() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.identityErr
+}
+
 // ErrInSession is returned when a session is already running.
 var ErrInSession = errors.New("already in a session; leave it first")
 
@@ -632,6 +718,9 @@ func (a *App) create(ctx context.Context, password string, e2ee bool, channel st
 }
 
 func (a *App) createRaw(ctx context.Context, password string, e2ee bool, channel string, src media.SourceKind) error {
+	if err := a.identityError(); err != nil {
+		return err
+	}
 	if a.busy() {
 		return ErrInSession
 	}
@@ -661,7 +750,7 @@ func (a *App) createRaw(ctx context.Context, password string, e2ee bool, channel
 // JoinLink implements ui.Backend: accepts either a share link (whose room is
 // on the link's server) or a bare room code (joined on the selected server).
 func (a *App) JoinLink(ctx context.Context, link string) error {
-	server, code, pw, isLink, err := session.ParseJoinInput(link)
+	server, code, pw, e2ee, isLink, err := session.ParseJoinInput(link)
 	if err != nil {
 		return err
 	}
@@ -681,15 +770,18 @@ func (a *App) JoinLink(ctx context.Context, link string) error {
 		server = a.selectedLocked()
 		a.mu.Unlock()
 	}
-	return a.join(ctx, server, code, pw)
+	return a.join(ctx, server, code, pw, e2ee)
 }
 
 // join joins room code on server.
-func (a *App) join(ctx context.Context, server, code, pw string) error {
-	return friendly(a.joinRaw(ctx, server, code, pw, a.DefaultSource))
+func (a *App) join(ctx context.Context, server, code, pw string, e2ee bool) error {
+	return friendly(a.joinRaw(ctx, server, code, pw, e2ee, a.DefaultSource))
 }
 
-func (a *App) joinRaw(ctx context.Context, server, code, pw string, src media.SourceKind) error {
+func (a *App) joinRaw(ctx context.Context, server, code, pw string, e2ee bool, src media.SourceKind) error {
+	if err := a.identityError(); err != nil {
+		return err
+	}
 	if a.busy() {
 		return ErrInSession
 	}
@@ -701,6 +793,7 @@ func (a *App) joinRaw(ctx context.Context, server, code, pw string, src media.So
 	a.syncPortMapForNextSession()
 	cfg := a.config()
 	cfg.Server = server
+	cfg.E2EE = e2ee
 	s, err := session.Join(ctx, cfg, code, pw)
 	if err != nil {
 		return err
@@ -1023,6 +1116,34 @@ func (a *App) SetName(name string) error {
 	}
 	a.bc.Notify()
 	return nil
+}
+
+// BackupIdentity seals our identity key and display name with passphrase,
+// for RestoreIdentity on another computer.
+func (a *App) BackupIdentity(passphrase string) ([]byte, error) {
+	if err := a.identityError(); err != nil {
+		return nil, err
+	}
+	return a.cfg.Identity.Backup(a.cfgName(), passphrase)
+}
+
+// RestoreIdentity makes the key in a backup ours from the next start, with
+// its display name, and returns the tag it gives.
+func (a *App) RestoreIdentity(data []byte, passphrase string) (string, error) {
+	k, name, err := identity.OpenBackup(data, passphrase)
+	if err != nil {
+		return "", err
+	}
+	if err := identity.Install(k); err != nil {
+		return "", err
+	}
+	if name != "" {
+		if err := identity.SaveName(name); err != nil {
+			a.log.Warn("save name", "err", err)
+		}
+	}
+	a.log.Info("identity key restored from a backup; it applies at the next start")
+	return identity.Tag(k.Public()), nil
 }
 
 // Transfer implements ui.Backend.
